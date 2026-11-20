@@ -1,0 +1,9 @@
+{
+  "name": "Mi Edificio",
+  "short_name": "Mi Edificio",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f4f6fa",
+  "theme_color": "#1e5eff",
+  "icons": [{"src":"icon.svg","sizes":"any","type":"image/svg+xml"}]
+}

@@ -1,0 +1,10 @@
+node_modules/
+.DS_Store
+.env
+.env.*
+.vercel/
+.netlify/
+supabase/.temp/
+supabase/.branches/
+# Configuración local con las claves de tu propio proyecto Supabase
+web/config.local.js

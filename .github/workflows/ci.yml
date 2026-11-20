@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verificar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Sintaxis JS
+        run: |
+          for f in web/*.js; do node --check "$f"; done
+      - name: JSON del manifest
+        run: node -e "JSON.parse(require('fs').readFileSync('web/manifest.webmanifest','utf8'))"
+      - name: config.js sin claves reales
+        run: |
+          grep -q 'TU-PROYECTO.supabase.co' web/config.js
+          grep -q '"TU_ANON_KEY"' web/config.js
