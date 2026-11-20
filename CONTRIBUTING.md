@@ -47,7 +47,20 @@ PGHOST=localhost PGUSER=postgres supabase/tests/run.sh
 
 Crea y borra las bases `mi_edificio_test` y `mi_edificio_mig`; no lo apuntes a un servidor con datos reales.
 
+## Reglas de seguridad al programar
+
+- Todo dato que venga de la base de datos se pasa por `esc()` antes de entrar a una plantilla HTML, también dentro de atributos. `fotoUrl()` ya devuelve la URL escapada.
+- Sin `onclick=` ni scripts en línea: la política CSP de `index.html` los bloquea. Usa `addEventListener`.
+- Una regla que importa (quién aprueba, qué estado es válido) se impone en `schema.sql` con política o trigger, y se prueba en `supabase/tests/rls.sql`. Validarla solo en el navegador no cuenta.
+- Para actualizar `supabase-js`, cambia la versión en `index.html` y recalcula el hash de integridad:
+
+  ```bash
+  curl -s https://cdn.jsdelivr.net/npm/@supabase/supabase-js@VERSION/dist/umd/supabase.js | openssl dgst -sha384 -binary | openssl base64 -A
+  ```
+
 ## Reportar vulnerabilidades
+
+Ver [`SECURITY.md`](SECURITY.md).
 
 Si encuentras un problema de seguridad (por ejemplo, una política RLS que permite leer datos de otro departamento), **no abras un issue público**. Usa *Security → Report a vulnerability* en GitHub.
 

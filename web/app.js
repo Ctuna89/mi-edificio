@@ -11,6 +11,7 @@ const $ = (s,el=document)=>el.querySelector(s);
 const $$ = (s,el=document)=>Array.from(el.querySelectorAll(s));
 const esc = s => String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const rnd = ()=> Math.random().toString(36).slice(2,10);
+const rndSeguro = ()=> Array.from(crypto.getRandomValues(new Uint8Array(16)), b=>b.toString(16).padStart(2,'0')).join('');
 const now = ()=> new Date().toISOString();
 const clp = n => '$'+Math.round(Number(n)||0).toLocaleString('es-CL');
 const pad = n => String(n).padStart(2,'0');
@@ -24,7 +25,7 @@ const sortBy = (arr,f,desc)=>arr.slice().sort((a,b)=>{const x=f(a),y=f(b);return
 const errMsg = e => (e&&(e.message||e.error_description||e.msg))||String(e);
 
 let toastT; function toast(m){ let t=$('.toast'); if(!t){t=document.createElement('div');t.className='toast';document.body.appendChild(t);} t.textContent=m; clearTimeout(toastT); toastT=setTimeout(()=>t.remove(),3000); }
-function modal(html){ closeModal(); const m=document.createElement('div'); m.className='modal'; m.innerHTML='<div class="box">'+html+'</div>'; m.addEventListener('click',e=>{ if(e.target===m) closeModal(); }); document.body.appendChild(m); return m; }
+function modal(html){ closeModal(); const m=document.createElement('div'); m.className='modal'; m.innerHTML='<div class="box">'+html+'</div>'; m.addEventListener('click',e=>{ if(e.target===m||e.target.closest('[data-close]')) closeModal(); }); document.body.appendChild(m); return m; }
 function closeModal(){ $$('.modal').forEach(m=>m.remove()); }
 function confirmBox(msg){ return new Promise(res=>{ const m=modal(`<h3>Confirmar</h3><p>${esc(msg)}</p><div class="row" style="justify-content:flex-end"><button class="btn sec" data-x="no">Cancelar</button><button class="btn dan" data-x="si">Confirmar</button></div>`); m.addEventListener('click',e=>{ const x=e.target.closest('[data-x]'); if(!x) return; closeModal(); res(x.dataset.x==='si'); }); }); }
 function askText(label, def=''){ return new Promise(res=>{ const m=modal(`<h3>${esc(label)}</h3><form id="fAsk"><textarea name="t">${esc(def)}</textarea><div class="row" style="justify-content:flex-end;margin-top:8px"><button type="button" class="btn sec" id="no">Cancelar</button><button class="btn">Aceptar</button></div></form>`); $('#no',m).addEventListener('click',()=>{closeModal();res(null);}); $('#fAsk',m).addEventListener('submit',e=>{e.preventDefault(); const v=$('[name=t]',m).value.trim(); closeModal(); res(v);}); }); }
@@ -43,7 +44,8 @@ if(!CFG.SUPABASE_URL || CFG.SUPABASE_URL.includes('TU-PROYECTO')){ document.getE
 const sb = window.supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON_KEY);
 async function q(p){ const {data,error}=await p; if(error) throw error; return data; }
 const T = t => sb.from(t);
-const fotoUrl = path => path ? sb.storage.from('fotos').getPublicUrl(path).data.publicUrl : '';
+// Devuelve la URL ya escapada para usarla dentro de atributos HTML (src/href)
+const fotoUrl = path => path ? esc(sb.storage.from('fotos').getPublicUrl(path).data.publicUrl) : '';
 
 // Suscripción: carga inicial + refetch al recibir cambios realtime en las tablas indicadas
 let chanN=0;
@@ -65,14 +67,14 @@ async function uploadImage(file, folder='img'){
   const blob = await new Promise((res,rej)=>{ const img=new Image(); const url=URL.createObjectURL(file);
     img.onload=()=>{ const max=1280; let w=img.width,h=img.height; if(w>max||h>max){ if(w>h){h=Math.round(h*max/w);w=max;} else {w=Math.round(w*max/h);h=max;} } const c=document.createElement('canvas'); c.width=w;c.height=h; c.getContext('2d').drawImage(img,0,0,w,h); c.toBlob(b=>{URL.revokeObjectURL(url); b?res(b):rej(new Error('No se pudo procesar la imagen'));},'image/jpeg',0.82); };
     img.onerror=()=>rej(new Error('El archivo no es una imagen válida')); img.src=url; });
-  const path=`${dirEdif()}${folder}/${todayStr()}/${rnd()}.jpg`;
+  const path=`${dirEdif()}${folder}/${todayStr()}/${rndSeguro()}.jpg`;
   await q(sb.storage.from('fotos').upload(path, blob, {contentType:'image/jpeg'}));
   return path;
 }
-async function uploadFile(file, folder='docs'){ const ext=(file.name.split('.').pop()||'bin').toLowerCase().replace(/[^a-z0-9]/g,''); const path=`${dirEdif()}${folder}/${todayStr()}/${rnd()}.${ext}`; await q(sb.storage.from('fotos').upload(path, file, {contentType:file.type||undefined})); return path; }
+async function uploadFile(file, folder='docs'){ const ext=(file.name.split('.').pop()||'bin').toLowerCase().replace(/[^a-z0-9]/g,''); const path=`${dirEdif()}${folder}/${todayStr()}/${rndSeguro()}.${ext}`; await q(sb.storage.from('fotos').upload(path, file, {contentType:file.type||undefined})); return path; }
 async function subirFotos(input, folder){ const ids=[]; for(const f of Array.from(input?.files||[])){ try{ ids.push(await uploadImage(f, folder)); }catch(e){ toast('Foto no subida: '+errMsg(e)); } } return ids; }
 const fotoInput=(name='fotos')=>`<label class="f"><span>Fotos (puedes tomar varias)</span><input type="file" name="${name}" accept="image/*" capture="environment" multiple></label>`;
-function viewImg(path){ modal(`<img src="${fotoUrl(path)}" style="width:100%;border-radius:10px"><div class="center" style="margin-top:10px"><button class="btn sec" onclick="this.closest('.modal').remove()">Cerrar</button></div>`); }
+function viewImg(path){ modal(`<img src="${fotoUrl(path)}" style="width:100%;border-radius:10px"><div class="center" style="margin-top:10px"><button class="btn sec" data-close>Cerrar</button></div>`); }
 
 // ---------- estado ----------
 const S = { session:null, uid:null, cfg:null, me:null, users:{}, unidades:{}, empresas:{}, activos:{}, viewSubs:[], globalSubs:[], ready:false };
@@ -84,6 +86,14 @@ const EST_RES = { pendiente:['Pendiente','wa'], aprobada:['Aprobada','ok'], rech
 const EST_OT = { asignada:['Asignada','wa'], aceptada:['Aceptada','in'], agendada:['Agendada','in'], en_terreno:['En terreno','in'], cierre_tecnico:['Cierre técnico','wa'], aprobada:['Aprobada','ok'], rechazada:['Rechazada','er'] };
 const PRIO = { baja:['Baja','mu'], media:['Media','in'], alta:['Alta','wa'], urgente:['Urgente','er'] };
 const TIPOS={checkpoint:'Checkpoint',lectura:'Lectura',foto:'Foto',incidencia:'Observación'};
+
+// Aviso de privacidad del edificio (texto propio en Administración → Edificio, o este por defecto)
+const avisoPriv = e => (e?.privacidad||'').trim() || `${e?.nombre||'La comunidad'} usa esta aplicación para administrar el edificio. Se registran tu nombre, teléfono, correo y unidad, y lo que ingreses al usarla: reservas, incidencias, mensajes, visitas que anuncies, encomiendas, votos y el estado de pago de los gastos comunes de tu unidad. Esos datos los ven la administración, el comité y la conserjería según su función, y no se usan para otros fines ni se entregan a terceros. Puedes descargar tus datos o eliminar tu cuenta en "Mi cuenta", y pedir que se corrijan escribiendo a la administración${e?.email?' ('+e.email+')':''}.`;
+async function descargarMisDatos(){
+  const dep=myDepto(); const de=(t,k,v)=>q(T(t).select('*').eq(k,v)).catch(()=>[]);
+  const [reservas,incidencias,mensajes,visitas,encomiendas,gastos_comunes,votos]=await Promise.all([de('reservas','uid',S.uid), de('incidencias','uid',S.uid), de('mensajes','uid',S.uid), de('visitas','uid',S.uid), dep?de('encomiendas','depto',dep):[], dep?de('gasto_unidades','depto',dep):[], dep?de('votos','depto',dep):[]]);
+  descargar(new Blob([JSON.stringify({generado:now(), edificio:S.cfg?.nombre||'', correo:S.session?.user?.email||'', perfil:S.me, reservas, incidencias, mensajes, visitas, encomiendas, gastos_comunes, votos},null,2)],{type:'application/json'}), 'mis-datos.json');
+}
 
 function lsGet(k){ try{ return localStorage.getItem('edif_'+k); }catch(e){ return null; } }
 function lsSet(k,v){ try{ v==null?localStorage.removeItem('edif_'+k):localStorage.setItem('edif_'+k,v); }catch(e){} }
@@ -233,6 +243,8 @@ async function viewCrearPerfil(){
       <label class="f"><span>Departamento / unidad</span><input type="text" name="depto" placeholder="Ej: 1204 (vacío si eres conserje o empresa)"></label>
       <label class="f"><span>Teléfono</span><input type="tel" name="telefono"></label>
       <label class="f"><span>Soy</span><select name="rol"><option value="residente">Residente (arrendatario)</option><option value="propietario">Propietario</option><option value="conserje">Conserje</option><option value="mantencion">Empresa de mantención</option></select></label>
+      <details style="margin-bottom:10px"><summary>Aviso de privacidad</summary><p class="small" style="white-space:pre-wrap">${esc(avisoPriv(edif))}</p></details>
+      <label class="sw" style="margin-bottom:12px"><input type="checkbox" name="acepto" required> Leí el aviso de privacidad</label>
       <button class="btn full">Enviar solicitud</button></form>${pie}</div>`
     :`<div id="pErr"></div><div class="card"><h3>Unirme a mi edificio</h3><p class="small muted">Pide a la administración de tu edificio el enlace o el código de invitación.</p><form id="fCod" class="row"><input type="text" name="codigo" class="grow" placeholder="Código de invitación" required autocapitalize="characters" autocomplete="off"><button class="btn">Buscar</button></form></div>
       ${puede?`<div class="card"><h3>Crear un edificio nuevo</h3><p class="small muted">Quedarás como administrador y podrás invitar a tu comunidad.</p><form id="fNew"><label class="f"><span>Nombre del edificio o condominio</span><input type="text" name="edificio" required></label><label class="f"><span>Tu nombre completo</span><input type="text" name="nombre" required></label><label class="f"><span>Teléfono</span><input type="tel" name="telefono"></label><button class="btn full">Crear edificio</button></form></div>`:''}${pie}`));
@@ -252,9 +264,13 @@ const VIEWS = {};
 VIEWS.perfil = function(){
   setMain(`<h1>Mi cuenta</h1><div class="card"><form id="fP"><label class="f"><span>Nombre</span><input type="text" name="nombre" value="${esc(S.me.nombre)}" required></label><label class="f"><span>Teléfono</span><input type="tel" name="telefono" value="${esc(S.me.telefono||'')}"></label><div class="small muted" style="margin-bottom:10px">Depto: <b>${esc(S.me.depto||'—')}</b> · Rol: <b>${ROLES[S.me.rol]}</b> · ${esc(S.session?.user?.email||'')}<br>Para cambiar depto o rol, contacta a la administración.</div><button class="btn">Guardar</button></form></div>
   <div class="card"><h3>Contraseña</h3><form id="fPw"><label class="f"><span>Nueva contraseña</span><input type="password" name="pw" minlength="8" required autocomplete="new-password"></label><button class="btn sec">Cambiar contraseña</button></form></div>
+  <div class="card"><h3>Tus datos personales</h3><details><summary>Aviso de privacidad</summary><p class="small" style="white-space:pre-wrap">${esc(avisoPriv(S.cfg))}</p></details>
+  <div class="row wrap" style="margin-top:10px"><button class="btn sec" id="bDatos">Descargar mis datos</button><button class="btn sec" id="bBaja">Eliminar mi cuenta</button></div></div>
   <div class="card"><h3>Notificaciones</h3><div id="pushBody" class="small muted">Comprobando…</div></div>
   <button class="btn dan" id="out">Cerrar sesión</button>`);
   pushCard();
+  $('#bDatos').addEventListener('click', async e=>{ busy(e.target,true,'Preparando…'); try{ await descargarMisDatos(); }catch(err){ toast(errMsg(err)); } busy(e.target,false); });
+  $('#bBaja').addEventListener('click', async()=>{ if(!await confirmBox('Se borrarán tu nombre, teléfono y unidad, y perderás el acceso. Lo que hayas escrito (mensajes, incidencias) quedará sin tu nombre. Esta acción no se puede deshacer. ¿Eliminar tu cuenta?')) return; try{ await q(sb.rpc('eliminar_mi_cuenta')); toast('Cuenta eliminada'); await salir(); }catch(err){ toast(errMsg(err)); } });
   $('#fP').addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); try{ await q(T('usuarios').update({nombre:d.nombre.trim(), telefono:d.telefono.trim()}).eq('id',S.uid)); toast('Guardado'); }catch(err){ toast(errMsg(err)); } });
   $('#fPw').addEventListener('submit', async e=>{ e.preventDefault(); try{ await q(sb.auth.updateUser({password:$('[name=pw]',e.target).value})); toast('Contraseña actualizada'); e.target.reset(); }catch(err){ toast(errMsg(err)); } });
   $('#out').addEventListener('click',()=>salir());
@@ -436,7 +452,7 @@ function detalleIncidencia(x){
   const staff=isStaff(); const conserjes=Object.values(S.users).filter(u=>u.rol==='conserje'&&u.estado==='activo');
   const m=modal(`<h3>${esc(x.titulo)}</h3><div class="row wrap" style="gap:6px;margin-bottom:8px">${pillOf(EST_INC,x.estado)}${pillOf(PRIO,x.prioridad)}<span class="muted small">Depto ${esc(x.depto)} · ${fmtDate(x.ts)}</span></div>
   <p>${esc(x.descripcion)}</p><div class="small muted">📍 ${esc(x.ubicacion||'Sin ubicación')}${x.asignado_a?' · Asignada a '+esc(userName(x.asignado_a)):''}${x.ot_id&&role()!=='residente'&&role()!=='propietario'?' · <a href="#mantencion--'+esc(x.ot_id)+'">Ver OT</a>':''}</div>
-  <div class="photos">${(x.fotos||[]).map(f=>`<img src="${fotoUrl(f)}" data-img="${f}">`).join('')}</div>
+  <div class="photos">${(x.fotos||[]).map(f=>`<img src="${fotoUrl(f)}" data-img="${esc(f)}">`).join('')}</div>
   ${staff?`<h2>Gestión</h2><div class="row wrap" style="gap:6px">
     ${x.estado==='abierta'?`<button class="btn sm" data-st="en_curso">Tomar / En curso</button>`:''}
     ${x.estado==='en_curso'?`<button class="btn ok sm" data-st="resuelta">Marcar resuelta</button>`:''}
@@ -447,7 +463,7 @@ function detalleIncidencia(x){
   ${conserjes.length?`<label class="f" style="margin-top:10px"><span>Asignar a</span><select id="asig"><option value="">— Sin asignar —</option>${conserjes.map(u=>`<option value="${u.id}" ${x.asignado_a===u.id?'selected':''}>${esc(u.nombre)}</option>`).join('')}</select></label>`:''}
   <label class="f"><span>Agregar nota (y fotos)</span><textarea id="nota" placeholder="Comentario para el historial"></textarea><input type="file" id="notaFotos" accept="image/*" capture="environment" multiple style="margin-top:6px"></label><button class="btn sec sm" id="addNota">Agregar nota</button>`
   : (x.estado==='resuelta'&&x.uid===S.uid?`<div class="info" style="margin-top:10px">¿Quedó resuelto? <button class="btn ok sm" data-st="cerrada">Sí, cerrar</button> <button class="btn sec sm" data-st="abierta">No, reabrir</button></div>`:'')}
-  <h2>Historial</h2><div class="timeline">${(x.historial||[]).slice().reverse().map(h=>`<div><b>${esc(h.accion)}</b> <span class="muted">· ${esc(userName(h.uid))} · ${fmtDate(h.ts)}</span>${h.nota?'<br>'+esc(h.nota):''}${h.fotos?.length?'<div class="photos">'+h.fotos.map(f=>`<img src="${fotoUrl(f)}" data-img="${f}">`).join('')+'</div>':''}</div>`).join('')}</div>`);
+  <h2>Historial</h2><div class="timeline">${(x.historial||[]).slice().reverse().map(h=>`<div><b>${esc(h.accion)}</b> <span class="muted">· ${esc(userName(h.uid))} · ${fmtDate(h.ts)}</span>${h.nota?'<br>'+esc(h.nota):''}${h.fotos?.length?'<div class="photos">'+h.fotos.map(f=>`<img src="${fotoUrl(f)}" data-img="${esc(f)}">`).join('')+'</div>':''}</div>`).join('')}</div>`);
   const upd=p=>q(T('incidencias').update(p).eq('id',x.id));
   const hist=(accion,extra={})=>[...(x.historial||[]),{ts:now(),uid:S.uid,accion,...extra}];
   m.addEventListener('click', async e=>{ const st=e.target.closest('[data-st]'); const img=e.target.closest('[data-img]'); if(img){ viewImg(img.dataset.img); return; }
@@ -552,7 +568,7 @@ VIEWS.encomiendas = function(){
   $('#bNewE')?.addEventListener('click',()=>{ const m=modal(`<h3>Registrar encomienda</h3><form id="fE"><label class="f"><span>Departamento</span><input type="text" name="depto" list="dl" required><datalist id="dl">${Object.keys(S.unidades).map(d=>`<option value="${esc(d)}">`).join('')}</datalist></label><label class="f"><span>Descripción</span><input type="text" name="desc" placeholder="Caja mediana, sobre, etc." required></label><label class="f"><span>Empresa / remitente</span><input type="text" name="courier" placeholder="Chilexpress, Mercado Libre…"></label><label class="f"><span>Foto (opcional)</span><input type="file" name="foto" accept="image/*" capture="environment"></label><button class="btn full">Registrar</button></form>`);
     $('#fE',m).addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); const b=$('button',e.target); busy(b,true); try{ const f=$('[name=foto]',m).files[0]; const foto=f?await uploadImage(f,'encomiendas'):''; await q(T('encomiendas').insert({depto:d.depto.trim(), descripcion:d.desc.trim(), courier:d.courier.trim(), foto, recibido_por:S.uid, entregado:false})); closeModal(); toast('Encomienda registrada'); }catch(err){ toast('Error: '+errMsg(err)); busy(b,false); } }); });
   let tab='pend', docs=[]; $('#eTabs').addEventListener('click',e=>{ const b=e.target.closest('button'); if(!b) return; $$('#eTabs button').forEach(x=>x.classList.remove('on')); b.classList.add('on'); tab=b.dataset.t; draw(); });
-  const draw=()=>{ const el=$('#eList'); if(!el) return; let d=docs; if(resid) d=d.filter(x=>x.depto===myDepto()); d=d.filter(x=>tab==='pend'?!x.entregado:x.entregado); el.innerHTML=d.map(x=>`<div class="item static"><div class="hd"><b>${resid?'':'Depto '+esc(x.depto)+' · '}${esc(x.descripcion)}</b><span class="pill ${x.entregado?'ok':'wa'}">${x.entregado?'Entregada':'Por retirar'}</span></div><div class="meta">${esc(x.courier||'')} · recibida ${fmtDate(x.ts)}${x.entregado?' · entregada '+fmtDate(x.entregado_at)+(x.retirado_por?' a '+esc(x.retirado_por):''):''}</div>${x.foto?`<div class="photos"><img src="${fotoUrl(x.foto)}" data-img="${x.foto}"></div>`:''}${!resid&&!x.entregado?`<div style="margin-top:8px"><button class="btn ok sm" data-ent="${x.id}">Marcar entregada</button></div>`:''}</div>`).join('')||'<div class="empty">Nada por aquí</div>'; };
+  const draw=()=>{ const el=$('#eList'); if(!el) return; let d=docs; if(resid) d=d.filter(x=>x.depto===myDepto()); d=d.filter(x=>tab==='pend'?!x.entregado:x.entregado); el.innerHTML=d.map(x=>`<div class="item static"><div class="hd"><b>${resid?'':'Depto '+esc(x.depto)+' · '}${esc(x.descripcion)}</b><span class="pill ${x.entregado?'ok':'wa'}">${x.entregado?'Entregada':'Por retirar'}</span></div><div class="meta">${esc(x.courier||'')} · recibida ${fmtDate(x.ts)}${x.entregado?' · entregada '+fmtDate(x.entregado_at)+(x.retirado_por?' a '+esc(x.retirado_por):''):''}</div>${x.foto?`<div class="photos"><img src="${fotoUrl(x.foto)}" data-img="${esc(x.foto)}"></div>`:''}${!resid&&!x.entregado?`<div style="margin-top:8px"><button class="btn ok sm" data-ent="${x.id}">Marcar entregada</button></div>`:''}</div>`).join('')||'<div class="empty">Nada por aquí</div>'; };
   $('#eList').addEventListener('click', async e=>{ const img=e.target.closest('[data-img]'); if(img) return viewImg(img.dataset.img); const b=e.target.closest('[data-ent]'); if(b){ const quien=await askText('¿Quién retira? (nombre, opcional)'); if(quien===null) return; try{ await q(T('encomiendas').update({entregado:true, entregado_at:now(), entregado_por:S.uid, retirado_por:quien}).eq('id',b.dataset.ent)); toast('Entregada'); }catch(err){ toast(errMsg(err)); } } });
   watch('encomiendas', ()=>q(T('encomiendas').select('*').order('ts',{ascending:false}).limit(500)), rows=>{ docs=rows; draw(); });
 };
@@ -600,7 +616,7 @@ VIEWS.rondas = function(){
       return req.map((qq,i)=>{ const hrs=Number(qq.frecuenciaHoras)||24; const esHoy=d===todayStr(); const horas= esHoy? (new Date().getHours()+1) : 24; const esperado=Math.max(1,Math.floor(horas/hrs)); const hechos=mine.filter(x=>x.tipo===qq.tipo); const buckets=new Set(hechos.map(x=>Math.floor(new Date(x.ts).getHours()/hrs))); const ok=Math.min(buckets.size,esperado); const pct=Math.round(ok/esperado*100);
         return `<tr>${i===0?`<td rowspan="${req.length}">${esc(a.nombre)}</td>`:''}<td>${esc(qq.descripcion||TIPOS[qq.tipo])}<br><span class="muted small">cada ${hrs} h</span></td><td class="num">${ok}/${esperado}</td><td style="min-width:90px"><div class="bar"><i style="width:${pct}%;background:${pct>=100?'var(--ok)':pct>=50?'var(--wa)':'var(--er)'}"></i></div></td></tr>`; }).join(''); }).join('');
     el.innerHTML = acts.length? `<table><thead><tr><th>Activo</th><th>Requisito</th><th class="num">Hecho</th><th>Cumpl.</th></tr></thead><tbody>${rows}</tbody></table>`:'<div class="muted">Sin activos.</div>'; }
-  function drawBit(){ const el=$('#bit'); if(!el) return; const rs=sortBy(porDia(),x=>x.ts,true); el.innerHTML=rs.map(x=>{const a=S.activos[x.activo_id]; return `<div class="item static"><div class="hd"><b>${esc(a?.nombre||'Activo eliminado')} · ${esc(TIPOS[x.tipo]||x.tipo)}</b><span class="muted small">${fmtDate(x.ts)}</span></div><div class="meta">${esc(userName(x.uid))}${x.valor?' · valor: <b>'+esc(x.valor)+'</b>':''}${x.nota?' · '+esc(x.nota):''}${x.via_nfc?' · 📡 NFC':''}</div>${x.foto?`<div class="photos"><img src="${fotoUrl(x.foto)}" data-img="${x.foto}"></div>`:''}</div>`;}).join('')||'<div class="empty">Sin registros ese día</div>'; }
+  function drawBit(){ const el=$('#bit'); if(!el) return; const rs=sortBy(porDia(),x=>x.ts,true); el.innerHTML=rs.map(x=>{const a=S.activos[x.activo_id]; return `<div class="item static"><div class="hd"><b>${esc(a?.nombre||'Activo eliminado')} · ${esc(TIPOS[x.tipo]||x.tipo)}</b><span class="muted small">${fmtDate(x.ts)}</span></div><div class="meta">${esc(userName(x.uid))}${x.valor?' · valor: <b>'+esc(x.valor)+'</b>':''}${x.nota?' · '+esc(x.nota):''}${x.via_nfc?' · 📡 NFC':''}</div>${x.foto?`<div class="photos"><img src="${fotoUrl(x.foto)}" data-img="${esc(x.foto)}"></div>`:''}</div>`;}).join('')||'<div class="empty">Sin registros ese día</div>'; }
   const all=()=>{ drawActs(); drawRep(); drawBit(); };
   $('#repDia').addEventListener('change',()=>{drawRep();drawBit();});
   $('#bit').addEventListener('click',e=>{ const img=e.target.closest('[data-img]'); if(img) viewImg(img.dataset.img); });
@@ -659,8 +675,8 @@ function detalleOT(o){
   const m=modal(`<h3>${esc(o.titulo)}</h3><div class="row wrap" style="gap:6px;margin-bottom:8px">${pillOf(EST_OT,o.estado)}${pillOf(PRIO,o.prioridad)}${o.preventiva?'<span class="pill mu">Preventiva</span>':''}</div>
   <p style="white-space:pre-wrap">${esc(o.descripcion)}</p>
   <div class="small muted">🏢 ${esc(S.empresas[o.empresa_id]?.nombre||'—')}${o.activo_id?' · 🔩 '+esc(S.activos[o.activo_id]?.nombre||''):''}${o.limite?' · límite '+fmtDay(o.limite):''}${o.fecha_agendada?' · agendada '+fmtDay(o.fecha_agendada)+' '+esc(o.hora_agendada||''):''}${o.incidencia_id&&!emp?` · <a href="#incidencias--${esc(o.incidencia_id)}">Ver incidencia</a>`:''}</div>
-  ${o.fotos_antes?.length?`<div class="small" style="margin-top:8px"><b>Antes</b></div><div class="photos">${o.fotos_antes.map(f=>`<img src="${fotoUrl(f)}" data-img="${f}">`).join('')}</div>`:''}
-  ${o.fotos_despues?.length?`<div class="small" style="margin-top:8px"><b>Después</b></div><div class="photos">${o.fotos_despues.map(f=>`<img src="${fotoUrl(f)}" data-img="${f}">`).join('')}</div>`:''}
+  ${o.fotos_antes?.length?`<div class="small" style="margin-top:8px"><b>Antes</b></div><div class="photos">${o.fotos_antes.map(f=>`<img src="${fotoUrl(f)}" data-img="${esc(f)}">`).join('')}</div>`:''}
+  ${o.fotos_despues?.length?`<div class="small" style="margin-top:8px"><b>Después</b></div><div class="photos">${o.fotos_despues.map(f=>`<img src="${fotoUrl(f)}" data-img="${esc(f)}">`).join('')}</div>`:''}
   ${o.informe?`<div class="card" style="margin-top:10px"><b>Informe técnico</b><div style="white-space:pre-wrap">${esc(o.informe)}</div>${Number(o.costo)?`<div class="small muted">Costo informado: ${clp(o.costo)}</div>`:''}${o.factura?`<a href="${fotoUrl(o.factura)}" target="_blank">Ver documento adjunto</a>`:''}</div>`:''}
   ${emp?`<h2>Acciones de la empresa</h2><div class="row wrap" style="gap:6px">
     ${o.estado==='asignada'?`<button class="btn ok sm" data-a="aceptar">Aceptar</button><button class="btn dan sm" data-a="rechazar">Rechazar</button>`:''}
@@ -701,6 +717,7 @@ ADMIN.edificio = function(el){
   <div class="row"><label class="f grow"><span>Comuna / ciudad</span><input type="text" name="comuna" value="${esc(c.comuna||'')}"></label><label class="f grow"><span>Teléfono conserjería</span><input type="tel" name="telefono" value="${esc(c.telefono||'')}"></label></div>
   <label class="f"><span>Email administración</span><input type="email" name="email" value="${esc(c.email||'')}"></label>
   <label class="f"><span>Datos bancarios para transferir gastos comunes (visibles a residentes)</span><textarea name="datos_bancarios" placeholder="Banco, tipo de cuenta, número, RUT, correo">${esc(c.datos_bancarios||'')}</textarea></label>
+  <label class="f"><span>Aviso de privacidad (se muestra al registrarse y en Mi cuenta; vacío = texto por defecto)</span><textarea name="privacidad" placeholder="Quién es responsable de los datos, para qué se usan, por cuánto tiempo se guardan y cómo ejercer los derechos de acceso, rectificación y eliminación.">${esc(c.privacidad||'')}</textarea></label>
   <label class="f"><span>Color principal</span><input type="color" name="color" value="${esc(c.color||'#1e5eff')}" style="width:60px;height:36px;padding:2px;border:1px solid var(--bd);border-radius:8px"></label>
   <button class="btn">Guardar cambios</button></form></div>
   <div class="card"><h3>Invitar a la comunidad</h3><p class="small muted">Comparte este enlace con residentes, conserjes y empresas. Al crear su cuenta quedarán asociados a este edificio y pendientes de tu aprobación en Usuarios.</p><div class="row wrap"><input type="text" id="invUrl" class="grow" readonly value="${esc(location.origin+location.pathname+'?e='+(c.codigo||''))}"><button type="button" class="btn sec" id="bInv">Copiar enlace</button></div><p class="small muted" style="margin:8px 0 0">Código de invitación: <code>${esc(c.codigo||'')}</code></p></div>`;
@@ -709,7 +726,7 @@ ADMIN.edificio = function(el){
   $('#bLogo',el).addEventListener('click',()=>$('#logoIn',el).click());
   $('#logoIn',el).addEventListener('change', async e=>{ const f=e.target.files[0]; if(!f) return; try{ toast('Subiendo logo…'); newLogo=await uploadImage(f,'logo'); $('#logoPrev',el).innerHTML=`<img src="${fotoUrl(newLogo)}">`; toast('Logo listo, guarda los cambios'); }catch(err){ toast('Error: '+errMsg(err)); } });
   $('#bLogoDel',el)?.addEventListener('click',()=>{ newLogo=''; $('#logoPrev',el).innerHTML='🏢'; });
-  $('#fEd',el).addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); try{ await q(T('edificios').update({nombre:d.nombre.trim(), direccion:d.direccion.trim(), comuna:d.comuna.trim(), telefono:d.telefono.trim(), email:d.email.trim(), datos_bancarios:d.datos_bancarios.trim(), color:d.color, ...(newLogo!==null?{logo:newLogo}:{}), actualizado:now()}).eq('id',S.cfg.id)); toast('Guardado'); }catch(err){ toast('Error: '+errMsg(err)); } });
+  $('#fEd',el).addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); try{ await q(T('edificios').update({nombre:d.nombre.trim(), direccion:d.direccion.trim(), comuna:d.comuna.trim(), telefono:d.telefono.trim(), email:d.email.trim(), datos_bancarios:d.datos_bancarios.trim(), privacidad:d.privacidad.trim(), color:d.color, ...(newLogo!==null?{logo:newLogo}:{}), actualizado:now()}).eq('id',S.cfg.id)); toast('Guardado'); }catch(err){ toast('Error: '+errMsg(err)); } });
 };
 ADMIN.usuarios = function(el){
   const us=Object.values(S.users); const pend=us.filter(u=>u.estado==='pendiente'); const act=us.filter(u=>u.estado!=='pendiente');

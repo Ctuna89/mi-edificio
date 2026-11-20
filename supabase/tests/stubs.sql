@@ -29,3 +29,4 @@ grant usage on schema public, auth, storage to anon, authenticated;
 alter default privileges in schema public grant all on tables to anon, authenticated;
 alter default privileges in schema public grant execute on functions to anon, authenticated;
 grant all on storage.objects, storage.buckets to authenticated;
+grant select on storage.objects to anon;

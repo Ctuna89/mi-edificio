@@ -133,9 +133,40 @@ Cómo funciona: triggers de `schema.sql` deciden a quién avisar y llaman a la f
 
 Limitaciones: en iPhone/iPad las notificaciones web solo funcionan con la app agregada a la pantalla de inicio (iOS 16.4 o superior).
 
+## Seguridad
+
+El modelo de seguridad, las limitaciones conocidas y una lista de verificación para configurar Supabase están en [`SECURITY.md`](SECURITY.md). Lo esencial: activa la confirmación de correo y el CAPTCHA en Supabase Auth, protege con MFA tu cuenta de Supabase, y ten presente que los archivos subidos son públicos para quien tenga su URL.
+
+## Datos personales (Chile)
+
+La app trata datos personales de residentes, trabajadores y visitas: nombre, teléfono, correo, unidad, RUT y patente de visitas, fotos, mensajes, votos y estado de pago de gastos comunes. En Chile eso está regulado por la Ley 19.628, reformada por la **Ley 21.719** (crea la Agencia de Protección de Datos Personales y multas de hasta 20.000 UTM). Su entrada en vigencia estaba fijada para el 1 de diciembre de 2026 y a noviembre de 2026 se tramitaba una postergación a octubre de 2027: verifica la fecha vigente.
+
+Esto no es asesoría legal. Quién responde por qué:
+
+- **Responsable de los datos**: la comunidad de copropietarios (a través de su comité y administración), no este proyecto. Si operas la instalación para comunidades ajenas, actúas como encargado y conviene un contrato que lo regule.
+- **Supabase y el hosting** son proveedores que tratan los datos por cuenta del responsable, normalmente fuera de Chile (transferencia internacional): revisa sus condiciones de tratamiento de datos.
+
+Lo que la app ya trae para cumplir:
+
+| Obligación | Cómo se cubre |
+|---|---|
+| Informar al titular | Aviso de privacidad por edificio (Administración → Edificio), mostrado y aceptado al registrarse y disponible en Mi cuenta. Se guarda la fecha de aceptación. |
+| Acceso y portabilidad | Mi cuenta → **Descargar mis datos** (JSON). |
+| Rectificación | Cada persona edita su nombre y teléfono; unidad y rol los corrige la administración. |
+| Supresión | Mi cuenta → **Eliminar mi cuenta**: borra nombre, teléfono y unidad y bloquea el acceso. El correo queda en Supabase Auth hasta que el operador elimine el usuario en *Authentication → Users*. |
+| Seguridad y mínimo acceso | RLS por rol y por edificio; cada unidad ve solo sus cobros, encomiendas, visitas y voto. |
+
+Lo que debe resolver cada comunidad (no lo hace el software):
+
+1. Redactar su aviso de privacidad: quién es el responsable y cómo contactarlo, para qué se usan los datos, a quién se comunican, por cuánto tiempo se guardan y cómo ejercer los derechos. El texto por defecto es genérico.
+2. Definir **plazos de conservación** y borrar lo antiguo. La app no elimina nada por sí sola: visitas (con RUT y patente de terceros), rondas, encomiendas y mensajes se acumulan indefinidamente.
+3. Pedir a las visitas solo los datos necesarios; RUT y patente son opcionales en el formulario.
+4. Tener un procedimiento para responder solicitudes de los titulares y para avisar a la Agencia y a los afectados si hay una filtración.
+5. No subir a Documentos archivos con datos personales de terceros (listados de morosidad, contratos con RUT): son públicos por URL.
+
 ## Fotos y archivos
 
-Se guardan en el bucket `fotos` de Supabase Storage (lectura pública por URL, escritura solo de usuarios activos en la carpeta de su edificio). Las imágenes se comprimen en el navegador a 1280 px antes de subir. El plan gratuito incluye 1 GB.
+Se guardan en el bucket `fotos` de Supabase Storage (lectura pública por URL con nombre aleatorio, sin listado; escritura solo de usuarios activos en la carpeta de su edificio). Las imágenes se comprimen en el navegador a 1280 px antes de subir. El plan gratuito incluye 1 GB.
 
 ## NFC
 
@@ -172,6 +203,8 @@ La CI lo ejecuta en cada push junto con la verificación de sintaxis del fronten
 2. Administradoras con varios edificios: que una misma cuenta pueda pertenecer a más de un edificio y cambiar entre ellos.
 3. Pagos en línea mediante Edge Function.
 4. Avisos push para comunicados y encuestas nuevas.
+5. Bucket privado con URLs firmadas para fotos y documentos.
+6. Borrado automático por plazo de conservación (visitas, rondas, encomiendas entregadas).
 
 ## Contribuir
 

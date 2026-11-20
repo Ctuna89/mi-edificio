@@ -20,6 +20,8 @@ App web para la comunidad de un edificio: residentes, conserjería, comité, adm
 - **Encuestas**: un voto por unidad (`votos` con PK `encuesta_id, depto`). El voto individual solo lo ve su unidad; los totales salen de `resultados_encuestas()` (SECURITY DEFINER). Los plazos se evalúan en hora de Chile (`hoy()`).
 - **Exportación** de gastos: `.xlsx` generado en el navegador y PDF mediante impresión (`@media print` + `#printArea`). Sin librerías.
 - **Push**: triggers en el esquema `privado` (no expuesto por la API) calculan destinatarios y llaman con `pg_net` a la Edge Function, autenticada con `plataforma.push_secret`. Si `push_url` está vacío no hacen nada; un fallo de envío nunca bloquea la operación.
+- **Reglas fuera del navegador**: triggers `reservas_antes`, `incidencias_antes`, `ot_antes_update` y `mensajes_antes_insert` fijan estados iniciales, impiden auto-aprobaciones y la suplantación de rol. El bucket no se puede listar y los archivos llevan nombres aleatorios, pero siguen siendo públicos por URL.
+- **Datos personales**: aviso de privacidad por edificio (`edificios.privacidad`, aceptación en `usuarios.privacidad_at`), descarga de datos propios y `eliminar_mi_cuenta()` (anonimiza el perfil). No hay borrado automático por antigüedad.
 - **Sin pago en línea** de gastos comunes. Se muestran datos bancarios y el admin marca pagado a mano. Si se agrega, debe ir en una Edge Function, no en el navegador.
 - **Rondas NFC** integradas en la misma app. Web NFC solo funciona en Chrome Android; hay fallback por código o lista.
 - **Perfil empresa de mantención**: externo, solo ve sus OT y los activos; flujo asignada → aceptada → agendada → en terreno → cierre técnico → aprobada por admin.

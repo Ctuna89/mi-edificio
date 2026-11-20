@@ -33,10 +33,12 @@ create table if not exists public.edificios (
   color         text default '#1e5eff',
   datos_bancarios text default '',
   espacios      jsonb not null default '[]'::jsonb,  -- [{id,nombre,capacidad,desde,hasta,maxHoras,anticipacionDias,aprobacion,costo}]
+  privacidad    text default '',          -- aviso de privacidad que se muestra al registrarse
   creado_por    uuid,
   creado        timestamptz default now(),
   actualizado   timestamptz default now()
 );
+alter table public.edificios add column if not exists privacidad text default '';
 
 -- Ajustes de la instalación (1 fila). Sin políticas RLS: solo se edita desde el SQL Editor.
 create table if not exists public.plataforma (
@@ -68,8 +70,10 @@ create table if not exists public.usuarios (
   rol        rol_t not null default 'residente',
   estado     estado_usuario_t not null default 'pendiente',
   empresa_id uuid references public.empresas(id) on delete set null,
+  privacidad_at timestamptz,               -- cuándo aceptó el aviso de privacidad (al registrarse)
   creado     timestamptz default now()
 );
+alter table public.usuarios add column if not exists privacidad_at timestamptz;
 
 create table if not exists public.unidades (
   edificio_id uuid references public.edificios(id) on delete cascade,
@@ -436,10 +440,11 @@ $$;
 
 -- Busca un edificio por código de invitación. Sin código, devuelve el edificio solo si
 -- la instalación tiene exactamente uno (caso típico: un edificio, se comparte la URL).
+drop function if exists public.buscar_edificio(text);
 create or replace function public.buscar_edificio(p_codigo text default null)
-returns table (id uuid, nombre text, logo text, color text)
+returns table (id uuid, nombre text, logo text, color text, email text, privacidad text)
 language sql stable security definer set search_path = public as $$
-  select e.id, e.nombre, e.logo, e.color
+  select e.id, e.nombre, e.logo, e.color, e.email, e.privacidad
   from public.edificios e
   where auth.uid() is not null
     and case when coalesce(trim(p_codigo), '') <> ''
@@ -468,6 +473,7 @@ language plpgsql security definer set search_path = public as $$
 declare e public.edificios;
 begin
   if auth.uid() is null then return new; end if;   -- SQL Editor / service role
+  new.privacidad_at := now();
   select * into e from public.edificios where id = new.edificio_id;
   if not found then raise exception 'Edificio no válido'; end if;
   if public.es_admin() and new.edificio_id = public.mi_edificio() then return new; end if;
@@ -490,7 +496,8 @@ create or replace function public.usuarios_antes_update() returns trigger
 language plpgsql security definer set search_path = public as $$
 begin
   if auth.uid() is null then return new; end if;   -- SQL Editor / service role
-  new.edificio_id := old.edificio_id;
+  if current_setting('mi_edificio.baja', true) = '1' then return new; end if;   -- eliminar_mi_cuenta()
+  new.edificio_id := old.edificio_id; new.privacidad_at := old.privacidad_at;
   if not (public.es_admin() and old.edificio_id = public.mi_edificio()) then
     if old.id <> auth.uid() then raise exception 'Sin permiso'; end if;
     new.rol := old.rol; new.estado := old.estado; new.depto := old.depto; new.empresa_id := old.empresa_id;
@@ -500,6 +507,106 @@ end $$;
 drop trigger if exists usuarios_antes_update on public.usuarios;
 create trigger usuarios_antes_update before update on public.usuarios
 for each row execute function public.usuarios_antes_update();
+
+-- Derecho de supresión: borra los datos personales del perfil y bloquea la cuenta.
+-- Lo que la persona escribió (mensajes, incidencias) queda sin su nombre. El correo sigue
+-- en Supabase Auth hasta que quien opera la instalación elimine el usuario ahí.
+create or replace function public.eliminar_mi_cuenta() returns void
+language plpgsql security definer set search_path = public as $$
+declare u public.usuarios;
+begin
+  select * into u from public.usuarios where id = auth.uid();
+  if not found then raise exception 'Tu cuenta no tiene perfil'; end if;
+  if u.rol = 'admin' and u.estado = 'activo' and not exists (
+       select 1 from public.usuarios where edificio_id = u.edificio_id and rol = 'admin' and estado = 'activo' and id <> u.id) then
+    raise exception 'Eres la única persona administradora: nombra a otra antes de eliminar tu cuenta';
+  end if;
+  delete from public.push_subs where uid = u.id;
+  perform set_config('mi_edificio.baja', '1', true);
+  update public.usuarios set nombre = 'Cuenta eliminada', telefono = '', depto = '', empresa_id = null, estado = 'bloqueado' where id = u.id;
+  perform set_config('mi_edificio.baja', '', true);
+end $$;
+
+-- Reservas: el estado inicial lo decide la configuración del espacio (no el navegador), no se
+-- aceptan horarios traslapados y quien reserva solo puede cancelar; aprobar es del comité/admin.
+create or replace function public.reservas_antes() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare esp jsonb;
+begin
+  if auth.uid() is null then return new; end if;   -- SQL Editor / service role
+  if tg_op = 'INSERT' then
+    select x into esp from public.edificios e, jsonb_array_elements(e.espacios) x
+    where e.id = new.edificio_id and x->>'id' = new.espacio_id;
+    if esp is null then raise exception 'Espacio no válido'; end if;
+    if new.h_fin <= new.h_ini then raise exception 'Horario no válido'; end if;
+    if exists (select 1 from public.reservas r where r.edificio_id = new.edificio_id and r.espacio_id = new.espacio_id
+               and r.fecha = new.fecha and r.estado in ('pendiente','aprobada') and r.h_ini < new.h_fin and new.h_ini < r.h_fin) then
+      raise exception 'Ese horario ya está reservado';
+    end if;
+    new.espacio_nombre := coalesce(esp->>'nombre', new.espacio_nombre);
+    new.estado := case when coalesce((esp->>'aprobacion')::boolean, false) then 'pendiente' else 'aprobada' end;
+    new.aprobado_por := null; new.motivo_rechazo := null;
+  elsif coalesce(public.mi_rol() in ('comite','admin'), false) then
+    null;
+  else
+    if new.estado <> 'cancelada' or old.estado not in ('pendiente','aprobada') then raise exception 'Solo puedes cancelar tu reserva'; end if;
+    new := old; new.estado := 'cancelada';
+  end if;
+  return new;
+end $$;
+drop trigger if exists reservas_antes on public.reservas;
+create trigger reservas_antes before insert or update on public.reservas
+for each row execute function public.reservas_antes();
+
+-- Mensajes: el rol del autor lo pone la base de datos (no se puede escribir "como conserjería")
+create or replace function public.mensajes_antes_insert() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if auth.uid() is not null then new.rol := public.mi_rol(); end if;
+  return new;
+end $$;
+drop trigger if exists mensajes_antes_insert on public.mensajes;
+create trigger mensajes_antes_insert before insert on public.mensajes
+for each row execute function public.mensajes_antes_insert();
+
+-- Incidencias: quien reporta no se asigna ni cambia prioridad; solo confirma o reabre una resuelta
+create or replace function public.incidencias_antes() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if auth.uid() is null or public.es_staff() then return new; end if;
+  if tg_op = 'INSERT' then
+    new.estado := 'abierta'; new.asignado_a := null; new.ot_id := null;
+  else
+    if new.estado is distinct from old.estado and not (old.estado = 'resuelta' and new.estado in ('cerrada','abierta')) then
+      raise exception 'No puedes cambiar el estado de la incidencia';
+    end if;
+    new.asignado_a := old.asignado_a; new.ot_id := old.ot_id; new.depto := old.depto; new.uid := old.uid;
+    new.prioridad := old.prioridad; new.titulo := old.titulo; new.descripcion := old.descripcion;
+  end if;
+  return new;
+end $$;
+drop trigger if exists incidencias_antes on public.incidencias;
+create trigger incidencias_antes before insert or update on public.incidencias
+for each row execute function public.incidencias_antes();
+
+-- Órdenes de trabajo: la empresa avanza su flujo, pero no aprueba su propio trabajo,
+-- no se reasigna la orden ni la modifica una vez cerrada
+create or replace function public.ot_antes_update() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if auth.uid() is null or public.es_admin() then return new; end if;
+  if old.estado in ('aprobada','rechazada') then raise exception 'La orden ya está cerrada'; end if;
+  if new.estado is distinct from old.estado and new.estado not in ('aceptada','rechazada','agendada','en_terreno','cierre_tecnico') then
+    raise exception 'Solo la administración puede dejar la orden en ese estado';
+  end if;
+  new.empresa_id := old.empresa_id; new.titulo := old.titulo; new.descripcion := old.descripcion; new.uid := old.uid;
+  new.incidencia_id := old.incidencia_id; new.activo_id := old.activo_id; new.preventiva := old.preventiva;
+  new.prioridad := old.prioridad; new.limite := old.limite; new.aprobado_at := old.aprobado_at;
+  return new;
+end $$;
+drop trigger if exists ot_antes_update on public.ot;
+create trigger ot_antes_update before update on public.ot
+for each row execute function public.ot_antes_update();
 
 -- Recalcular prorrateo de un período con las alícuotas actuales
 create or replace function public.recalcular_prorrateo(p_periodo text) returns void
@@ -788,7 +895,7 @@ select public._pol('encomiendas','enc_upd','update','public.mi_rol() in (''conse
 
 -- visitas: residente anuncia para su depto y cancela las anunciadas; conserje/admin registran
 select public._pol('visitas','vis_sel','select','depto = public.mi_depto() or public.mi_rol() in (''conserje'',''admin'')');
-select public._pol('visitas','vis_ins','insert','(public.es_residente() and depto = public.mi_depto() and uid = auth.uid()) or public.mi_rol() in (''conserje'',''admin'')');
+select public._pol('visitas','vis_ins','insert','(public.es_residente() and depto = public.mi_depto() and uid = auth.uid() and estado = ''anunciada'' and ingreso_at is null) or public.mi_rol() in (''conserje'',''admin'')');
 select public._pol('visitas','vis_upd','update','public.mi_rol() in (''conserje'',''admin'')');
 select public._pol('visitas','vis_del','delete','(uid = auth.uid() and estado = ''anunciada'') or public.mi_rol() in (''conserje'',''admin'')');
 
@@ -824,7 +931,7 @@ select public._pol('push_subs','push_del','delete','uid = auth.uid()');
 drop function public._pol(text, text, text, text, text, boolean);
 
 -- ---------------------------------------------------------------------
--- Storage: bucket público de lectura "fotos" (logo, incidencias, rondas, documentos)
+-- Storage: bucket "fotos", de lectura pública por URL (logo, incidencias, rondas, documentos)
 -- ---------------------------------------------------------------------
 insert into storage.buckets (id, name, public) values ('fotos','fotos', true)
 on conflict (id) do update set public = true;
@@ -832,7 +939,9 @@ on conflict (id) do update set public = true;
 drop policy if exists "fotos_read"   on storage.objects;
 drop policy if exists "fotos_insert" on storage.objects;
 drop policy if exists "fotos_delete" on storage.objects;
-create policy "fotos_read"   on storage.objects for select using (bucket_id = 'fotos');
+-- Los archivos se abren por su URL pública (bucket público). Esta política solo controla el
+-- LISTADO vía API: cada edificio lista su carpeta; nadie puede enumerar el bucket completo.
+create policy "fotos_read"   on storage.objects for select to authenticated using (bucket_id = 'fotos' and (storage.foldername(name))[1] = public.mi_edificio()::text);
 -- Los archivos de cada edificio viven bajo la carpeta <edificio_id>/
 create policy "fotos_insert" on storage.objects for insert to authenticated with check (bucket_id = 'fotos' and (storage.foldername(name))[1] = public.mi_edificio()::text);
 create policy "fotos_delete" on storage.objects for delete to authenticated using (bucket_id = 'fotos' and (storage.foldername(name))[1] = public.mi_edificio()::text and public.mi_rol() in ('admin','comite'));

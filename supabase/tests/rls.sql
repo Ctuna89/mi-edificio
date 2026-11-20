@@ -9,7 +9,7 @@
 \set b2 '00000000-0000-0000-0000-0000000000b2'
 
 create schema if not exists t;
-grant usage on schema t to authenticated;
+grant usage on schema t to authenticated, anon;
 create or replace function t.ok(cond boolean, msg text) returns void language plpgsql as $$
 begin if cond is not true then raise exception 'FALLÓ: %', msg; end if; end $$;
 -- ejecuta sql y exige que falle (o que no afecte filas)
@@ -127,6 +127,7 @@ select t.soy(:'b1'); insert into encomiendas (depto, descripcion) values ('101',
 reset role;
 select t.ok((select count(*) = 1 from net.llamadas), 'encomienda del depto 101 de B no avisa al 101 de A');
 select t.soy(:'a1'); select public.guardar_push('https://fcm.googleapis.com/fcm/send/a1', 'k', 'a');
+update edificios set espacios = '[{"id":"quincho","nombre":"Quincho","aprobacion":true},{"id":"gym","nombre":"Gimnasio","aprobacion":false}]' where id = :'ea';
 select t.soy(:'a2');
 insert into reservas (espacio_id, espacio_nombre, fecha, h_ini, h_fin, depto, uid) values ('quincho', 'Quincho', '2026-12-24', 18, 22, '101', :'a2') returning id as res \gset
 select t.soy(:'a1'); update reservas set estado = 'aprobada' where id = :'res';
@@ -138,9 +139,50 @@ select t.ok(not has_schema_privilege('authenticated', 'privado', 'usage'), 'el e
 select t.soy(:'a3');
 select t.ok((select count(*) = 0 from plataforma) and (select count(*) = 0 from push_subs), 'ni la plataforma ni las suscripciones ajenas se leen');
 
+-- ---------- reglas que no dependen del navegador ----------
+select t.soy(:'a3');
+insert into reservas (espacio_id, espacio_nombre, fecha, h_ini, h_fin, depto, uid, estado) values ('quincho', 'x', '2026-12-25', 18, 20, '102', :'a3', 'aprobada') returning id as res2 \gset
+select t.ok((select estado = 'pendiente' and espacio_nombre = 'Quincho' from reservas where id = :'res2'), 'el estado inicial de la reserva lo decide el espacio');
+select t.falla(format($$update reservas set estado = 'aprobada' where id = %L returning 1$$, :'res2'), 'aprobar la propia reserva');
+select t.falla(format($$insert into reservas (espacio_id, espacio_nombre, fecha, h_ini, h_fin, depto, uid) values ('quincho', 'x', '2026-12-24', 20, 23, '102', %L)$$, :'a3'), 'reserva traslapada');
+select t.falla(format($$insert into reservas (espacio_id, espacio_nombre, fecha, h_ini, h_fin, depto, uid) values ('piscina', 'x', '2026-12-26', 10, 11, '102', %L)$$, :'a3'), 'espacio inexistente');
+update reservas set estado = 'cancelada', fecha = '2030-01-01' where id = :'res2';
+select t.ok((select estado = 'cancelada' and fecha = '2026-12-25' from reservas where id = :'res2'), 'quien reserva solo puede cancelar');
+insert into conversaciones (id, canal, depto) values ('comite_102', 'comite', '102');
+insert into mensajes (conv_id, texto, uid, rol) values ('comite_102', 'Soy el comité (mentira)', :'a3', 'comite');
+select t.ok((select rol = 'propietario' from mensajes where conv_id = 'comite_102'), 'no se puede suplantar el rol en un mensaje');
+insert into incidencias (titulo, descripcion, depto, uid, estado, asignado_a) values ('Gotera', 'En el pasillo', '102', :'a3', 'cerrada', :'a3') returning id as inc \gset
+select t.ok((select estado = 'abierta' and asignado_a is null from incidencias where id = :'inc'), 'la incidencia nace abierta y sin asignar');
+select t.falla(format($$update incidencias set estado = 'resuelta' where id = %L returning 1$$, :'inc'), 'el residente marca resuelta su incidencia');
+select t.falla(format($$insert into visitas (depto, nombre, fecha, estado, uid) values ('102', 'Falso', '2026-12-01', 'ingreso', %L)$$, :'a3'), 'residente registra un ingreso');
+select t.falla($$select count(*) from storage.objects having count(*) > 0$$, 'residente lista archivos antes de subir');
+-- empresa de mantención
+reset role;
+insert into auth.users (id) values ('00000000-0000-0000-0000-0000000000a5');
+select t.soy(:'a1');
+insert into empresas (nombre) values ('Ascensores SpA') returning id as emp \gset
+select t.soy('00000000-0000-0000-0000-0000000000a5'); insert into usuarios (id, edificio_id, nombre, rol) values ('00000000-0000-0000-0000-0000000000a5', :'ea', 'Tito Técnico', 'mantencion');
+select t.soy(:'a1'); update usuarios set estado = 'activo', empresa_id = :'emp' where id = '00000000-0000-0000-0000-0000000000a5';
+insert into ot (titulo, descripcion, empresa_id, uid) values ('Revisar ascensor', 'Ruido', :'emp', :'a1') returning id as ot \gset
+select t.soy('00000000-0000-0000-0000-0000000000a5');
+update ot set estado = 'aceptada', titulo = 'otro título' where id = :'ot';
+select t.ok((select estado = 'aceptada' and titulo = 'Revisar ascensor' from ot where id = :'ot'), 'la empresa avanza la orden sin poder reescribirla');
+select t.falla(format($$update ot set estado = 'aprobada', costo = 999999 where id = %L returning 1$$, :'ot'), 'la empresa aprueba su propia orden');
+-- derecho de supresión
+select t.soy(:'a1');
+select t.falla($$select public.eliminar_mi_cuenta()$$, 'la única administradora elimina su cuenta');
+select t.soy(:'a3'); select public.eliminar_mi_cuenta();
+reset role;
+select t.ok((select nombre = 'Cuenta eliminada' and telefono = '' and depto = '' and estado = 'bloqueado' from usuarios where id = :'a3'), 'eliminar cuenta borra los datos del perfil y bloquea');
+select t.ok((select privacidad_at is not null from usuarios where id = :'a2'), 'queda registrada la aceptación del aviso de privacidad');
+select t.soy(:'a3'); select t.ok((select count(*) = 0 from mensajes) and (select count(*) = 0 from unidades), 'la cuenta eliminada ya no accede a nada');
+
 -- ---------- storage ----------
 select t.soy(:'a2');
 insert into storage.objects (bucket_id, name) values ('fotos', :'ea' || '/incidencias/2026-11-20/x.jpg');
 select t.falla(format($$insert into storage.objects (bucket_id, name) values ('fotos', %L)$$, :'eb' || '/incidencias/x.jpg'), 'subir a la carpeta de otro edificio');
+select t.ok((select count(*) = 1 from storage.objects), 'cada edificio lista solo su carpeta');
+select t.soy(:'b2'); select t.ok((select count(*) = 0 from storage.objects), 'otro edificio no puede listar esos archivos');
+set role anon; select t.ok((select count(*) = 0 from storage.objects), 'sin sesión no se puede enumerar el bucket');
 reset role;
 \echo 'OK: todas las pruebas de RLS pasaron'
