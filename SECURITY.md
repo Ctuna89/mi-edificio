@@ -27,6 +27,7 @@ En el panel de Supabase:
 3. *Authentication → Attack Protection*: CAPTCHA en registro e inicio de sesión; revisa los límites de frecuencia.
 4. *Authentication → URL Configuration*: solo la URL real de la app en *Site URL* y *Redirect URLs*.
 5. Activa MFA en tu cuenta de Supabase y en la del hosting; limita quién tiene acceso al proyecto.
-6. Mantén `plataforma.creacion_abierta = false` salvo mientras das de alta un edificio.
-7. Revisa periódicamente *Database → Backups* y prueba una restauración.
-8. Tras actualizar el código, vuelve a ejecutar `supabase/schema.sql`: las políticas y triggers se recrean.
+6. Activa la extensión `pg_cron` (*Database → Extensions*) para que el borrado por plazo de conservación corra a diario.
+7. Mantén `plataforma.creacion_abierta = false` salvo mientras das de alta un edificio.
+8. Revisa periódicamente *Database → Backups* y prueba una restauración.
+9. Tras actualizar el código, vuelve a ejecutar `supabase/schema.sql`: las políticas y triggers se recrean.

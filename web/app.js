@@ -187,7 +187,9 @@ async function start(){
 }
 function meKey(){ const m=S.me||{}; return [m.edificio_id,m.rol,m.estado,m.nombre,m.depto,m.empresa_id].join('|'); }
 function cfgKey(){ const c=S.cfg||{}; return [c.id,c.nombre,c.direccion,c.logo,c.color,JSON.stringify(c.espacios||[])].join('|'); }
-function gate(){ if(S.ready) return; if(!S.cfgLoaded || !S.meLoaded) return; S.ready=true; routeNow(); pushSync(); }
+function gate(){ if(S.ready) return; if(!S.cfgLoaded || !S.meLoaded) return; S.ready=true; routeNow(); pushSync(); limpiarArchivos(); }
+// Borra del bucket los archivos de filas eliminadas por plazo de conservación (solo administración)
+async function limpiarArchivos(){ try{ if(realRole()!=='admin' || S.me.estado!=='activo') return; const rows=await q(T('archivos_por_borrar').select('id,path').limit(500)); if(!rows.length) return; await sb.storage.from('fotos').remove(rows.map(r=>r.path)); await q(T('archivos_por_borrar').delete().in('id',rows.map(r=>r.id))); }catch(e){ console.warn('limpiarArchivos',e); } }
 
 // ---------- router ----------
 let currentView='inicio', currentParam=null; const REFRESH={};
@@ -711,6 +713,7 @@ VIEWS.admin = function(param){
   REFRESH.admin=()=>{ if(tab!=='edificio') draw(); };
 };
 const ADMIN={};
+const RETENCION=[['visitas','Visitas','Nombre, RUT y patente de quienes visitan'],['registros','Rondas y bitácora','Registros y fotos de las rondas'],['encomiendas','Encomiendas entregadas','Desde la fecha de entrega'],['mensajes','Mensajes','Conversaciones con conserjería, comité y administración'],['reservas','Reservas','Desde la fecha reservada'],['incidencias','Incidencias cerradas','Con sus fotos e historial']];
 ADMIN.edificio = function(el){
   const c=S.cfg||{};
   el.innerHTML=`<div class="card"><h3>Datos del edificio</h3><form id="fEd"><div class="row" style="align-items:flex-start"><div><div class="logo-prev" id="logoPrev">${c.logo?`<img src="${fotoUrl(c.logo)}">`:'🏢'}</div><input type="file" id="logoIn" accept="image/*" style="display:none"><div class="row" style="margin-top:6px;gap:4px"><button type="button" class="btn sec sm" id="bLogo">Cambiar logo</button>${c.logo?'<button type="button" class="btn sec sm" id="bLogoDel">Quitar</button>':''}</div></div><div class="grow"><label class="f"><span>Nombre</span><input type="text" name="nombre" value="${esc(c.nombre||'')}" required></label><label class="f"><span>Dirección</span><input type="text" name="direccion" value="${esc(c.direccion||'')}"></label></div></div>
@@ -720,8 +723,13 @@ ADMIN.edificio = function(el){
   <label class="f"><span>Aviso de privacidad (se muestra al registrarse y en Mi cuenta; vacío = texto por defecto)</span><textarea name="privacidad" placeholder="Quién es responsable de los datos, para qué se usan, por cuánto tiempo se guardan y cómo ejercer los derechos de acceso, rectificación y eliminación.">${esc(c.privacidad||'')}</textarea></label>
   <label class="f"><span>Color principal</span><input type="color" name="color" value="${esc(c.color||'#1e5eff')}" style="width:60px;height:36px;padding:2px;border:1px solid var(--bd);border-radius:8px"></label>
   <button class="btn">Guardar cambios</button></form></div>
+  <div class="card"><h3>Conservación de datos</h3><p class="small muted">Define por cuántos meses se guarda cada tipo de dato. Lo que supere el plazo se borra en forma definitiva, cada día. Vacío = se conserva indefinidamente.</p>
+  <form id="fRet"><div class="grid2">${RETENCION.map(([k,t,d])=>`<label class="f"><span>${t}</span><input type="number" name="${k}" min="1" max="240" placeholder="Indefinido" value="${Number(c.retencion?.[k])||''}"><span style="font-weight:400;margin-top:4px">${d}</span></label>`).join('')}</div>
+  <div class="row wrap"><button class="btn">Guardar plazos</button><button type="button" class="btn sec" id="bDep">Aplicar ahora</button></div></form></div>
   <div class="card"><h3>Invitar a la comunidad</h3><p class="small muted">Comparte este enlace con residentes, conserjes y empresas. Al crear su cuenta quedarán asociados a este edificio y pendientes de tu aprobación en Usuarios.</p><div class="row wrap"><input type="text" id="invUrl" class="grow" readonly value="${esc(location.origin+location.pathname+'?e='+(c.codigo||''))}"><button type="button" class="btn sec" id="bInv">Copiar enlace</button></div><p class="small muted" style="margin:8px 0 0">Código de invitación: <code>${esc(c.codigo||'')}</code></p></div>`;
   $('#bInv',el).addEventListener('click', async()=>{ const i=$('#invUrl',el); try{ await navigator.clipboard.writeText(i.value); toast('Enlace copiado'); }catch(e){ i.select(); toast('Copia el enlace seleccionado'); } });
+  $('#fRet',el).addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); const retencion={}; RETENCION.forEach(([k])=>{ const n=Math.floor(Number(d[k])); if(n>0) retencion[k]=n; }); try{ await q(T('edificios').update({retencion}).eq('id',S.cfg.id)); toast('Plazos guardados'); }catch(err){ toast('Error: '+errMsg(err)); } });
+  $('#bDep',el).addEventListener('click', async e=>{ if(!await confirmBox('Se borrarán en forma definitiva los datos que superen los plazos guardados. ¿Continuar?')) return; try{ const r=await q(sb.rpc('depurar_ahora'))||{}; const n=Object.values(r).reduce((a,b)=>a+Number(b),0); toast(n?(n===1?'Se borró 1 registro':`Se borraron ${n} registros`):'No había datos fuera de plazo'); limpiarArchivos(); }catch(err){ toast('Error: '+errMsg(err)); } });
   let newLogo=null;
   $('#bLogo',el).addEventListener('click',()=>$('#logoIn',el).click());
   $('#logoIn',el).addEventListener('change', async e=>{ const f=e.target.files[0]; if(!f) return; try{ toast('Subiendo logo…'); newLogo=await uploadImage(f,'logo'); $('#logoPrev',el).innerHTML=`<img src="${fotoUrl(newLogo)}">`; toast('Logo listo, guarda los cambios'); }catch(err){ toast('Error: '+errMsg(err)); } });

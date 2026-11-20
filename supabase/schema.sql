@@ -34,11 +34,15 @@ create table if not exists public.edificios (
   datos_bancarios text default '',
   espacios      jsonb not null default '[]'::jsonb,  -- [{id,nombre,capacidad,desde,hasta,maxHoras,anticipacionDias,aprobacion,costo}]
   privacidad    text default '',          -- aviso de privacidad que se muestra al registrarse
+  retencion     jsonb not null default '{}'::jsonb,  -- plazos de conservación en meses, por tipo de dato
   creado_por    uuid,
   creado        timestamptz default now(),
   actualizado   timestamptz default now()
 );
 alter table public.edificios add column if not exists privacidad text default '';
+-- Plazos de conservación en meses, definidos por la administración de cada edificio.
+-- Claves: visitas, registros, encomiendas, mensajes, reservas, incidencias. Sin clave o 0 = no se borra.
+alter table public.edificios add column if not exists retencion jsonb not null default '{}'::jsonb;
 
 -- Ajustes de la instalación (1 fila). Sin políticas RLS: solo se edita desde el SQL Editor.
 create table if not exists public.plataforma (
@@ -311,6 +315,15 @@ create table if not exists public.push_subs (
   creado      timestamptz default now()
 );
 
+-- Archivos de filas borradas por plazo de conservación, pendientes de eliminar del bucket.
+-- Los elimina la app de la administración (la base de datos no puede borrar archivos de Storage).
+create table if not exists public.archivos_por_borrar (
+  id          uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  path        text not null,
+  creado      timestamptz default now()
+);
+
 -- ---------------------------------------------------------------------
 -- Migración desde la versión de un solo edificio (no hace nada en instalaciones nuevas)
 -- ---------------------------------------------------------------------
@@ -340,7 +353,7 @@ begin
   end if;
 
   select id into def from public.edificios order by creado, id limit 1;
-  foreach t in array array['empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs']
+  foreach t in array array['empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar']
   loop
     execute format('alter table public.%I add column if not exists edificio_id uuid references public.edificios(id) on delete cascade', t);
     execute format('select count(*) from public.%I where edificio_id is null', t) into n;
@@ -423,7 +436,7 @@ $$;
 do $$
 declare t text;
 begin
-  foreach t in array array['empresas','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs']
+  foreach t in array array['empresas','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar']
   loop
     execute format('alter table public.%I alter column edificio_id set default public.mi_edificio()', t);
   end loop;
@@ -774,6 +787,106 @@ create trigger push_usuario after insert on public.usuarios for each row execute
 drop trigger if exists push_ot on public.ot;
 create trigger push_ot after insert or update on public.ot for each row execute function privado.tg_push_ot();
 
+-- ---------------------------------------------------------------------
+-- Conservación de datos: borra lo que supera el plazo que definió la administración del edificio
+-- ---------------------------------------------------------------------
+create or replace function privado.meses(r jsonb, k text) returns int
+language sql immutable as $$
+  select case when (r->>k) ~ '^[0-9]{1,3}$' then (r->>k)::int else 0 end
+$$;
+
+create or replace function privado.encolar_archivos(p_e uuid, p_paths text[]) returns void
+language sql security definer set search_path = public as $$
+  insert into public.archivos_por_borrar (edificio_id, path)
+  select p_e, x from unnest(coalesce(p_paths, '{}')) x where coalesce(x, '') <> ''
+$$;
+
+create or replace function privado.depurar_edificio(p_e uuid) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare r jsonb; m int; n int; res jsonb := '{}'; rec record; ps text[];
+begin
+  select retencion into r from public.edificios where id = p_e;
+  if r is null then return res; end if;
+
+  m := privado.meses(r, 'visitas');
+  if m > 0 then
+    delete from public.visitas where edificio_id = p_e and fecha < (public.hoy() - make_interval(months => m))::date;
+    get diagnostics n = row_count; res := res || jsonb_build_object('visitas', n);
+  end if;
+
+  m := privado.meses(r, 'registros');
+  if m > 0 then
+    with d as (delete from public.registros where edificio_id = p_e and ts < now() - make_interval(months => m) returning foto)
+    select count(*), array_agg(foto) into n, ps from d;
+    perform privado.encolar_archivos(p_e, ps); res := res || jsonb_build_object('registros', n);
+  end if;
+
+  m := privado.meses(r, 'encomiendas');
+  if m > 0 then
+    with d as (delete from public.encomiendas where edificio_id = p_e and entregado and entregado_at < now() - make_interval(months => m) returning foto)
+    select count(*), array_agg(foto) into n, ps from d;
+    perform privado.encolar_archivos(p_e, ps); res := res || jsonb_build_object('encomiendas', n);
+  end if;
+
+  m := privado.meses(r, 'mensajes');
+  if m > 0 then
+    delete from public.mensajes where edificio_id = p_e and ts < now() - make_interval(months => m);
+    get diagnostics n = row_count; res := res || jsonb_build_object('mensajes', n);
+    delete from public.conversaciones c where c.edificio_id = p_e and c.ultimo_ts < now() - make_interval(months => m)
+      and not exists (select 1 from public.mensajes x where x.edificio_id = c.edificio_id and x.conv_id = c.id);
+  end if;
+
+  m := privado.meses(r, 'reservas');
+  if m > 0 then
+    delete from public.reservas where edificio_id = p_e and fecha < (public.hoy() - make_interval(months => m))::date;
+    get diagnostics n = row_count; res := res || jsonb_build_object('reservas', n);
+  end if;
+
+  m := privado.meses(r, 'incidencias');
+  if m > 0 then
+    n := 0;
+    for rec in delete from public.incidencias where edificio_id = p_e and estado = 'cerrada' and ts < now() - make_interval(months => m) returning fotos, historial
+    loop
+      n := n + 1;
+      perform privado.encolar_archivos(p_e, rec.fotos);
+      perform privado.encolar_archivos(p_e, array(
+        select jsonb_array_elements_text(h->'fotos') from jsonb_array_elements(rec.historial) h where jsonb_typeof(h->'fotos') = 'array'));
+    end loop;
+    res := res || jsonb_build_object('incidencias', n);
+  end if;
+  return res;
+end $$;
+
+-- Todos los edificios (tarea diaria). Un error en un edificio no detiene a los demás.
+create or replace function privado.depurar() returns void
+language plpgsql security definer set search_path = public as $$
+declare e record;
+begin
+  for e in select id from public.edificios where retencion <> '{}'::jsonb loop
+    begin
+      perform privado.depurar_edificio(e.id);
+    exception when others then
+      raise warning 'depurar %: %', e.id, sqlerrm;
+    end;
+  end loop;
+end $$;
+
+-- Botón "Aplicar ahora" de la administración
+create or replace function public.depurar_ahora() returns jsonb
+language plpgsql security definer set search_path = public as $$
+begin
+  if not public.es_admin() then raise exception 'Solo administración'; end if;
+  return privado.depurar_edificio(public.mi_edificio());
+end $$;
+
+-- Ejecución diaria con pg_cron (07:23 UTC, madrugada en Chile)
+do $$ begin
+  create extension if not exists pg_cron;
+  perform cron.schedule('mi-edificio-depurar', '23 7 * * *', 'select privado.depurar()');
+exception when others then
+  raise notice 'pg_cron no disponible: el borrado por plazo solo corre con el botón "Aplicar ahora" de la administración';
+end $$;
+
 -- Registrar el navegador de quien llama para recibir notificaciones
 create or replace function public.guardar_push(p_endpoint text, p_p256dh text, p_auth text, p_ua text default '') returns void
 language plpgsql security definer set search_path = public as $$
@@ -809,6 +922,7 @@ alter table public.ot             enable row level security;
 alter table public.encuestas      enable row level security;
 alter table public.votos          enable row level security;
 alter table public.push_subs      enable row level security;
+alter table public.archivos_por_borrar enable row level security;
 
 -- helper para (re)crear políticas sin errores. Salvo que se indique lo contrario, toda
 -- política queda además limitada a las filas del edificio del usuario.
@@ -927,6 +1041,10 @@ select public._pol('votos','vot_upd','update','depto = public.mi_depto()','uid =
 -- push_subs: cada usuario ve y borra las suyas; se guardan con guardar_push()
 select public._pol('push_subs','push_sel','select','uid = auth.uid()');
 select public._pol('push_subs','push_del','delete','uid = auth.uid()');
+
+-- archivos_por_borrar: la administración los lee y los quita de la cola al borrarlos del bucket
+select public._pol('archivos_por_borrar','apb_sel','select','public.es_admin()');
+select public._pol('archivos_por_borrar','apb_del','delete','public.es_admin()');
 
 drop function public._pol(text, text, text, text, text, boolean);
 

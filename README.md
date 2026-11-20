@@ -154,15 +154,20 @@ Lo que la app ya trae para cumplir:
 | Acceso y portabilidad | Mi cuenta → **Descargar mis datos** (JSON). |
 | Rectificación | Cada persona edita su nombre y teléfono; unidad y rol los corrige la administración. |
 | Supresión | Mi cuenta → **Eliminar mi cuenta**: borra nombre, teléfono y unidad y bloquea el acceso. El correo queda en Supabase Auth hasta que el operador elimine el usuario en *Authentication → Users*. |
+| Conservación limitada | Administración → Edificio → **Conservación de datos**: la administración fija cuántos meses se guardan visitas, rondas, encomiendas entregadas, mensajes, reservas e incidencias cerradas. Lo que supera el plazo se borra a diario. |
 | Seguridad y mínimo acceso | RLS por rol y por edificio; cada unidad ve solo sus cobros, encomiendas, visitas y voto. |
 
 Lo que debe resolver cada comunidad (no lo hace el software):
 
 1. Redactar su aviso de privacidad: quién es el responsable y cómo contactarlo, para qué se usan los datos, a quién se comunican, por cuánto tiempo se guardan y cómo ejercer los derechos. El texto por defecto es genérico.
-2. Definir **plazos de conservación** y borrar lo antiguo. La app no elimina nada por sí sola: visitas (con RUT y patente de terceros), rondas, encomiendas y mensajes se acumulan indefinidamente.
+2. Definir sus **plazos de conservación** en Administración → Edificio. Mientras no se definan, nada se borra: visitas (con RUT y patente de terceros), rondas, encomiendas y mensajes se acumulan indefinidamente. Gastos comunes, comunicados, documentos, encuestas y órdenes de trabajo no tienen borrado automático.
 3. Pedir a las visitas solo los datos necesarios; RUT y patente son opcionales en el formulario.
 4. Tener un procedimiento para responder solicitudes de los titulares y para avisar a la Agencia y a los afectados si hay una filtración.
 5. No subir a Documentos archivos con datos personales de terceros (listados de morosidad, contratos con RUT): son públicos por URL.
+
+### Cómo funciona el borrado por plazo
+
+Una tarea diaria (`pg_cron`, 07:23 UTC) borra en cada edificio lo que supera sus plazos. Si al ejecutar `schema.sql` aparece el aviso de que `pg_cron` no está disponible, actívalo en *Database → Extensions* y vuelve a ejecutar el script; mientras tanto el borrado solo corre con el botón **Aplicar ahora**. El borrado es definitivo. Las fotos asociadas se eliminan del bucket la siguiente vez que alguien de la administración abre la app.
 
 ## Fotos y archivos
 
@@ -204,7 +209,6 @@ La CI lo ejecuta en cada push junto con la verificación de sintaxis del fronten
 3. Pagos en línea mediante Edge Function.
 4. Avisos push para comunicados y encuestas nuevas.
 5. Bucket privado con URLs firmadas para fotos y documentos.
-6. Borrado automático por plazo de conservación (visitas, rondas, encomiendas entregadas).
 
 ## Contribuir
 

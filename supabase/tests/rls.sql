@@ -177,6 +177,23 @@ select t.ok((select nombre = 'Cuenta eliminada' and telefono = '' and depto = ''
 select t.ok((select privacidad_at is not null from usuarios where id = :'a2'), 'queda registrada la aceptación del aviso de privacidad');
 select t.soy(:'a3'); select t.ok((select count(*) = 0 from mensajes) and (select count(*) = 0 from unidades), 'la cuenta eliminada ya no accede a nada');
 
+-- ---------- conservación de datos ----------
+reset role;
+insert into visitas (edificio_id, depto, nombre, rut, fecha) values (:'ea', '101', 'Visita antigua', '1-9', current_date - 400), (:'ea', '101', 'Visita reciente', '', current_date - 5), (:'eb', '101', 'Visita antigua de B', '', current_date - 400);
+insert into encomiendas (edificio_id, depto, descripcion, foto, entregado, entregado_at) values (:'ea', '101', 'Vieja', :'ea' || '/encomiendas/vieja.jpg', true, now() - interval '400 days'), (:'ea', '101', 'Vieja sin retirar', '', false, null);
+update encomiendas set ts = now() - interval '400 days' where descripcion like 'Vieja%';
+select t.soy(:'a2'); select t.falla($$select public.depurar_ahora()$$, 'un residente ejecuta el borrado');
+select t.soy(:'a1');
+select t.ok(public.depurar_ahora() = '{}'::jsonb, 'sin plazos definidos no se borra nada');
+update edificios set retencion = '{"visitas": 12, "encomiendas": 6, "mensajes": "abc"}' where id = :'ea';
+select t.ok(public.depurar_ahora() = '{"visitas": 1, "encomiendas": 1}'::jsonb, 'borra solo lo que supera el plazo del edificio');
+select t.ok((select count(*) = 1 from archivos_por_borrar where path like '%/encomiendas/vieja.jpg'), 'la foto queda en cola para borrarse del bucket');
+reset role;
+select t.ok((select count(*) = 1 from visitas where nombre = 'Visita reciente') and (select count(*) = 1 from visitas where edificio_id = :'eb') and (select count(*) = 1 from encomiendas where descripcion = 'Vieja sin retirar'), 'se conserva lo reciente, lo no entregado y lo de otros edificios');
+update edificios set retencion = '{"visitas": 1}' where id = :'eb';
+select privado.depurar();
+select t.ok((select count(*) = 0 from visitas where edificio_id = :'eb'), 'la tarea diaria recorre todos los edificios');
+
 -- ---------- storage ----------
 select t.soy(:'a2');
 insert into storage.objects (bucket_id, name) values ('fotos', :'ea' || '/incidencias/2026-11-20/x.jpg');
