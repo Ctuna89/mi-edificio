@@ -19,8 +19,11 @@ exception when duplicate_object then null; end $$;
 -- ---------------------------------------------------------------------
 -- Tablas
 -- ---------------------------------------------------------------------
-create table if not exists public.config (
-  id            int primary key default 1 check (id = 1),
+-- Cada instalación puede alojar varios edificios. Todas las tablas llevan edificio_id
+-- y las políticas RLS lo comparan con el edificio del usuario (public.mi_edificio()).
+create table if not exists public.edificios (
+  id            uuid primary key default gen_random_uuid(),
+  codigo        text not null unique default upper(substr(replace(gen_random_uuid()::text,'-',''),1,10)), -- código de invitación
   nombre        text not null default 'Mi Edificio',
   direccion     text default '',
   comuna        text default '',
@@ -30,12 +33,24 @@ create table if not exists public.config (
   color         text default '#1e5eff',
   datos_bancarios text default '',
   espacios      jsonb not null default '[]'::jsonb,  -- [{id,nombre,capacidad,desde,hasta,maxHoras,anticipacionDias,aprobacion,costo}]
+  creado_por    uuid,
+  creado        timestamptz default now(),
   actualizado   timestamptz default now()
 );
-insert into public.config (id) values (1) on conflict do nothing;
+
+-- Ajustes de la instalación (1 fila). Sin políticas RLS: solo se edita desde el SQL Editor.
+create table if not exists public.plataforma (
+  id               int primary key default 1 check (id = 1),
+  creacion_abierta boolean not null default false,  -- true: cualquier cuenta nueva puede crear otro edificio
+  push_url         text default '',                 -- URL de la Edge Function "push"
+  push_secret      text default ''                  -- mismo valor que el secreto PUSH_SECRET de la función
+);
+insert into public.plataforma (id) values (1) on conflict do nothing;
+alter table public.plataforma enable row level security;
 
 create table if not exists public.empresas (
   id        uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
   nombre    text not null,
   rubro     text default '',
   contacto  text default '',
@@ -46,6 +61,7 @@ create table if not exists public.empresas (
 
 create table if not exists public.usuarios (
   id         uuid primary key references auth.users(id) on delete cascade,
+  edificio_id uuid references public.edificios(id) on delete cascade,
   nombre     text not null default '',
   depto      text default '',
   telefono   text default '',
@@ -56,32 +72,39 @@ create table if not exists public.usuarios (
 );
 
 create table if not exists public.unidades (
-  depto     text primary key,
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  depto     text not null,
   alicuota  numeric(8,4) not null default 0,
-  prop      text default ''
+  prop      text default '',
+  primary key (edificio_id, depto)
 );
 
 create table if not exists public.gastos (
-  periodo    text primary key,             -- 'YYYY-MM'
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  periodo    text not null,                -- 'YYYY-MM'
   vence      date,
   items      jsonb not null default '[]'::jsonb,   -- [{categoria,descripcion,monto}]
   total      numeric(14,2) not null default 0,
   publicado  boolean not null default false,
-  actualizado timestamptz default now()
+  actualizado timestamptz default now(),
+  primary key (edificio_id, periodo)
 );
 
 create table if not exists public.gasto_unidades (
-  periodo   text references public.gastos(periodo) on delete cascade,
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  periodo   text not null,
   depto     text not null,
   alicuota  numeric(8,4) not null default 0,
   monto     numeric(14,2) not null default 0,
   pagado    boolean not null default false,
   pagado_at timestamptz,
-  primary key (periodo, depto)
+  primary key (edificio_id, periodo, depto),
+  constraint gasto_unidades_gasto_fkey foreign key (edificio_id, periodo) references public.gastos(edificio_id, periodo) on delete cascade
 );
 
 create table if not exists public.reservas (
   id             uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
   espacio_id     text not null,
   espacio_nombre text not null,
   fecha          date not null,
@@ -99,6 +122,7 @@ create index if not exists reservas_fecha_idx on public.reservas(fecha);
 
 create table if not exists public.incidencias (
   id          uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
   titulo      text not null,
   ubicacion   text default '',
   descripcion text not null,
@@ -114,28 +138,33 @@ create table if not exists public.incidencias (
 );
 
 create table if not exists public.conversaciones (
-  id                 text primary key,        -- canal_depto
+  edificio_id        uuid references public.edificios(id) on delete cascade,
+  id                 text not null,           -- canal_depto
   canal              text not null,           -- conserjeria|comite|administracion
   depto              text not null,
   ultimo             text default '',
   ultimo_ts          timestamptz default now(),
   ultimo_uid         uuid,
   no_leido_staff     boolean default false,
-  no_leido_residente boolean default false
+  no_leido_residente boolean default false,
+  primary key (edificio_id, id)
 );
 
 create table if not exists public.mensajes (
   id        uuid primary key default gen_random_uuid(),
-  conv_id   text not null references public.conversaciones(id) on delete cascade,
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  conv_id   text not null,
   texto     text not null,
   uid       uuid not null references public.usuarios(id),
   rol       rol_t not null,
-  ts        timestamptz default now()
+  ts        timestamptz default now(),
+  constraint mensajes_conv_fkey foreign key (edificio_id, conv_id) references public.conversaciones(edificio_id, id) on delete cascade
 );
 create index if not exists mensajes_conv_idx on public.mensajes(conv_id, ts);
 
 create table if not exists public.comunicados (
   id      uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
   titulo  text not null,
   cuerpo  text not null,
   adjunto text default '',
@@ -147,6 +176,7 @@ create table if not exists public.comunicados (
 
 create table if not exists public.documentos (
   id     uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
   nombre text not null,
   cat    text not null default 'Otros',
   path   text not null,
@@ -157,6 +187,7 @@ create table if not exists public.documentos (
 
 create table if not exists public.encomiendas (
   id           uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
   depto        text not null,
   descripcion  text not null,
   courier      text default '',
@@ -171,6 +202,7 @@ create table if not exists public.encomiendas (
 
 create table if not exists public.visitas (
   id         uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
   depto      text not null,
   nombre     text not null,
   rut        text default '',
@@ -187,6 +219,7 @@ create table if not exists public.visitas (
 
 create table if not exists public.activos (
   id                uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
   icono             text default '📍',
   nombre            text not null,
   ubicacion         text default '',
@@ -199,6 +232,7 @@ create table if not exists public.activos (
 
 create table if not exists public.registros (
   id        uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
   activo_id uuid references public.activos(id) on delete set null,
   tipo      text not null,     -- checkpoint|lectura|foto|incidencia
   valor     text default '',
@@ -212,6 +246,7 @@ create index if not exists registros_ts_idx on public.registros(ts);
 
 create table if not exists public.ot (
   id             uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
   titulo         text not null,
   descripcion    text not null,
   empresa_id     uuid references public.empresas(id),
@@ -236,6 +271,103 @@ create table if not exists public.ot (
   aprobado_at    timestamptz
 );
 
+-- Encuestas del comité: un voto por unidad (depto), modificable mientras esté abierta
+create table if not exists public.encuestas (
+  id          uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  titulo      text not null,
+  descripcion text default '',
+  opciones    jsonb not null default '[]'::jsonb,   -- ["Sí","No",...]
+  solo_propietarios boolean not null default false,
+  cierra      date,                                  -- último día para votar (null = sin plazo)
+  estado      text not null default 'abierta',       -- abierta|cerrada
+  uid         uuid references public.usuarios(id),
+  ts          timestamptz default now()
+);
+
+create table if not exists public.votos (
+  encuesta_id uuid not null references public.encuestas(id) on delete cascade,
+  depto       text not null,
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  opcion      int not null,                          -- índice en encuestas.opciones
+  uid         uuid references public.usuarios(id),
+  ts          timestamptz default now(),
+  primary key (encuesta_id, depto)
+);
+
+-- Suscripciones Web Push (una por navegador/dispositivo)
+create table if not exists public.push_subs (
+  id          uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  uid         uuid not null references public.usuarios(id) on delete cascade,
+  endpoint    text not null unique,
+  p256dh      text not null,
+  auth        text not null,
+  ua          text default '',
+  creado      timestamptz default now()
+);
+
+-- ---------------------------------------------------------------------
+-- Migración desde la versión de un solo edificio (no hace nada en instalaciones nuevas)
+-- ---------------------------------------------------------------------
+create or replace function public._pk_cols(tbl text) returns text
+language sql as $$
+  select string_agg(a.attname, ',' order by k.ord)
+  from pg_index i
+  join unnest(i.indkey) with ordinality k(attnum, ord) on true
+  join pg_attribute a on a.attrelid = i.indrelid and a.attnum = k.attnum
+  where i.indrelid = ('public.' || tbl)::regclass and i.indisprimary
+$$;
+
+do $$
+declare t text; def uuid; n bigint;
+begin
+  -- la fila única de "config" pasa a ser el primer edificio
+  if to_regclass('public.config') is not null then
+    if not exists (select 1 from public.edificios) then
+      execute 'insert into public.edificios (nombre,direccion,comuna,telefono,email,logo,color,datos_bancarios,espacios)
+               select nombre,direccion,comuna,telefono,email,logo,color,datos_bancarios,espacios from public.config where id = 1';
+    end if;
+    begin
+      execute 'alter publication supabase_realtime drop table public.config';
+    exception when others then null;
+    end;
+    execute 'drop table public.config';
+  end if;
+
+  select id into def from public.edificios order by creado, id limit 1;
+  foreach t in array array['empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs']
+  loop
+    execute format('alter table public.%I add column if not exists edificio_id uuid references public.edificios(id) on delete cascade', t);
+    execute format('select count(*) from public.%I where edificio_id is null', t) into n;
+    if n > 0 then
+      if def is null then raise exception 'Hay filas en % sin edificio y no existe ningún edificio', t; end if;
+      execute format('update public.%I set edificio_id = $1 where edificio_id is null', t) using def;
+    end if;
+    execute format('alter table public.%I alter column edificio_id set not null', t);
+    execute format('create index if not exists %I on public.%I (edificio_id)', t || '_edificio_idx', t);
+  end loop;
+
+  -- claves primarias y foráneas compuestas (depto, período y conversación se repiten entre edificios)
+  if public._pk_cols('unidades') <> 'edificio_id,depto' then
+    alter table public.unidades drop constraint unidades_pkey, add primary key (edificio_id, depto);
+  end if;
+  if public._pk_cols('gastos') <> 'edificio_id,periodo' then
+    alter table public.gasto_unidades drop constraint if exists gasto_unidades_periodo_fkey;
+    alter table public.gasto_unidades drop constraint gasto_unidades_pkey, add primary key (edificio_id, periodo, depto);
+    alter table public.gastos drop constraint gastos_pkey, add primary key (edificio_id, periodo);
+    alter table public.gasto_unidades add constraint gasto_unidades_gasto_fkey
+      foreign key (edificio_id, periodo) references public.gastos(edificio_id, periodo) on delete cascade;
+  end if;
+  if public._pk_cols('conversaciones') <> 'edificio_id,id' then
+    alter table public.mensajes drop constraint if exists mensajes_conv_id_fkey;
+    alter table public.conversaciones drop constraint conversaciones_pkey, add primary key (edificio_id, id);
+    alter table public.mensajes add constraint mensajes_conv_fkey
+      foreign key (edificio_id, conv_id) references public.conversaciones(edificio_id, id) on delete cascade;
+  end if;
+end $$;
+drop function public._pk_cols(text);
+
 -- ---------------------------------------------------------------------
 -- Funciones auxiliares (SECURITY DEFINER para evitar recursión en RLS)
 -- ---------------------------------------------------------------------
@@ -250,6 +382,21 @@ $$;
 create or replace function public.mi_empresa() returns uuid
 language sql stable security definer set search_path = public as $$
   select empresa_id from public.usuarios where id = auth.uid() and estado = 'activo'
+$$;
+-- Edificio del usuario activo (null si está pendiente o bloqueado)
+create or replace function public.mi_edificio() returns uuid
+language sql stable security definer set search_path = public as $$
+  select edificio_id from public.usuarios where id = auth.uid() and estado = 'activo'
+$$;
+-- Edificio al que pertenece la cuenta, aunque siga pendiente (para mostrar nombre y logo)
+create or replace function public.mi_edificio_asignado() returns uuid
+language sql stable security definer set search_path = public as $$
+  select edificio_id from public.usuarios where id = auth.uid()
+$$;
+-- "Hoy" en hora de Chile (plazos de encuestas)
+create or replace function public.hoy() returns date
+language sql stable as $$
+  select (now() at time zone 'America/Santiago')::date
 $$;
 create or replace function public.es_staff() returns boolean
 language sql stable security definer set search_path = public as $$
@@ -268,17 +415,68 @@ language sql immutable as $$
   select case r when 'conserje' then 'conserjeria' when 'comite' then 'comite' when 'admin' then 'administracion' else null end
 $$;
 
--- Primer usuario registrado = administrador activo. Los demás quedan pendientes.
+-- edificio_id se completa solo con el edificio de quien inserta
+do $$
+declare t text;
+begin
+  foreach t in array array['empresas','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs']
+  loop
+    execute format('alter table public.%I alter column edificio_id set default public.mi_edificio()', t);
+  end loop;
+end $$;
+
+-- ¿Puede esta cuenta crear un edificio? Siempre el primero; los siguientes solo si
+-- plataforma.creacion_abierta = true.
+create or replace function public.puede_crear_edificio() returns boolean
+language sql stable security definer set search_path = public as $$
+  select auth.uid() is not null
+     and (not exists (select 1 from public.edificios)
+          or coalesce((select creacion_abierta from public.plataforma where id = 1), false))
+$$;
+
+-- Busca un edificio por código de invitación. Sin código, devuelve el edificio solo si
+-- la instalación tiene exactamente uno (caso típico: un edificio, se comparte la URL).
+create or replace function public.buscar_edificio(p_codigo text default null)
+returns table (id uuid, nombre text, logo text, color text)
+language sql stable security definer set search_path = public as $$
+  select e.id, e.nombre, e.logo, e.color
+  from public.edificios e
+  where auth.uid() is not null
+    and case when coalesce(trim(p_codigo), '') <> ''
+             then e.codigo = upper(trim(p_codigo))
+             else (select count(*) from public.edificios) = 1 end
+$$;
+
+-- Crea un edificio y deja a quien lo crea como su administrador activo.
+create or replace function public.crear_edificio(p_edificio text, p_nombre text, p_telefono text default '') returns uuid
+language plpgsql security definer set search_path = public as $$
+declare eid uuid;
+begin
+  if auth.uid() is null then raise exception 'Debes iniciar sesión'; end if;
+  if exists (select 1 from public.usuarios where id = auth.uid()) then raise exception 'Tu cuenta ya pertenece a un edificio'; end if;
+  if not public.puede_crear_edificio() then raise exception 'La creación de edificios está cerrada en esta instalación'; end if;
+  if coalesce(trim(p_edificio), '') = '' or coalesce(trim(p_nombre), '') = '' then raise exception 'Faltan el nombre del edificio o tu nombre'; end if;
+  insert into public.edificios (nombre, creado_por) values (trim(p_edificio), auth.uid()) returning id into eid;
+  insert into public.usuarios (id, edificio_id, nombre, telefono, rol, estado)
+  values (auth.uid(), eid, trim(p_nombre), coalesce(trim(p_telefono), ''), 'admin', 'activo');
+  return eid;
+end $$;
+
+-- Quien crea un edificio queda como administrador activo. Los demás quedan pendientes.
 create or replace function public.usuarios_antes_insert() returns trigger
 language plpgsql security definer set search_path = public as $$
+declare e public.edificios;
 begin
-  if new.id <> auth.uid() and not public.es_admin() then
-    raise exception 'Solo puedes crear tu propio perfil';
-  end if;
-  if (select count(*) from public.usuarios) = 0 then
+  if auth.uid() is null then return new; end if;   -- SQL Editor / service role
+  select * into e from public.edificios where id = new.edificio_id;
+  if not found then raise exception 'Edificio no válido'; end if;
+  if public.es_admin() and new.edificio_id = public.mi_edificio() then return new; end if;
+  if new.id <> auth.uid() then raise exception 'Solo puedes crear tu propio perfil'; end if;
+  if not exists (select 1 from public.usuarios where edificio_id = new.edificio_id)
+     and (e.creado_por is null or e.creado_por = auth.uid()) then
     new.rol := 'admin'; new.estado := 'activo';
-  elsif not public.es_admin() then
-    new.estado := 'pendiente';
+  else
+    new.estado := 'pendiente'; new.empresa_id := null;
     if new.rol in ('admin','comite') then new.rol := 'residente'; end if;
   end if;
   return new;
@@ -287,11 +485,13 @@ drop trigger if exists usuarios_antes_insert on public.usuarios;
 create trigger usuarios_antes_insert before insert on public.usuarios
 for each row execute function public.usuarios_antes_insert();
 
--- Un no-admin solo puede cambiar nombre y teléfono de su propio perfil.
+-- Un no-admin solo puede cambiar nombre y teléfono de su propio perfil. Nadie cambia de edificio desde la app.
 create or replace function public.usuarios_antes_update() returns trigger
 language plpgsql security definer set search_path = public as $$
 begin
-  if not public.es_admin() then
+  if auth.uid() is null then return new; end if;   -- SQL Editor / service role
+  new.edificio_id := old.edificio_id;
+  if not (public.es_admin() and old.edificio_id = public.mi_edificio()) then
     if old.id <> auth.uid() then raise exception 'Sin permiso'; end if;
     new.rol := old.rol; new.estado := old.estado; new.depto := old.depto; new.empresa_id := old.empresa_id;
   end if;
@@ -304,21 +504,185 @@ for each row execute function public.usuarios_antes_update();
 -- Recalcular prorrateo de un período con las alícuotas actuales
 create or replace function public.recalcular_prorrateo(p_periodo text) returns void
 language plpgsql security definer set search_path = public as $$
-declare t numeric;
+declare t numeric; e uuid := public.mi_edificio();
 begin
   if not public.es_admin() then raise exception 'Solo administración'; end if;
-  select total into t from public.gastos where periodo = p_periodo;
-  insert into public.gasto_unidades (periodo, depto, alicuota, monto)
-  select p_periodo, u.depto, u.alicuota, round(t * u.alicuota / 100.0)
-  from public.unidades u
-  on conflict (periodo, depto) do update set alicuota = excluded.alicuota, monto = excluded.monto;
-  delete from public.gasto_unidades g where g.periodo = p_periodo and not exists (select 1 from public.unidades u where u.depto = g.depto);
+  select total into t from public.gastos where edificio_id = e and periodo = p_periodo;
+  insert into public.gasto_unidades (edificio_id, periodo, depto, alicuota, monto)
+  select e, p_periodo, u.depto, u.alicuota, round(t * u.alicuota / 100.0)
+  from public.unidades u where u.edificio_id = e
+  on conflict (edificio_id, periodo, depto) do update set alicuota = excluded.alicuota, monto = excluded.monto;
+  delete from public.gasto_unidades g where g.edificio_id = e and g.periodo = p_periodo
+    and not exists (select 1 from public.unidades u where u.edificio_id = e and u.depto = g.depto);
+end $$;
+
+-- Encuestas: ¿puede mi unidad votar esta opción ahora?
+create or replace function public.puede_votar(p_encuesta uuid, p_opcion int) returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists (
+    select 1 from public.encuestas e
+    where e.id = p_encuesta and e.edificio_id = public.mi_edificio()
+      and e.estado = 'abierta' and (e.cierra is null or e.cierra >= public.hoy())
+      and p_opcion >= 0 and p_opcion < jsonb_array_length(e.opciones)
+      and case when e.solo_propietarios then public.mi_rol() = 'propietario' else public.es_residente() end)
+$$;
+
+-- Resultados agregados (nadie ve el voto de otra unidad). Comité y administración los ven
+-- siempre; los residentes, cuando su unidad ya votó o la encuesta terminó.
+create or replace function public.resultados_encuestas()
+returns table (encuesta_id uuid, opcion int, n int, alicuota numeric)
+language sql stable security definer set search_path = public as $$
+  select v.encuesta_id, v.opcion, count(*)::int, coalesce(sum(u.alicuota), 0)::numeric
+  from public.votos v
+  join public.encuestas e on e.id = v.encuesta_id
+  left join public.unidades u on u.edificio_id = v.edificio_id and u.depto = v.depto
+  where e.edificio_id = public.mi_edificio()
+    and public.mi_rol() in ('residente','propietario','comite','admin')
+    and (public.mi_rol() in ('comite','admin')
+         or e.estado = 'cerrada' or (e.cierra is not null and e.cierra < public.hoy())
+         or exists (select 1 from public.votos m where m.encuesta_id = e.id and m.depto = public.mi_depto()))
+  group by v.encuesta_id, v.opcion
+$$;
+
+-- ---------------------------------------------------------------------
+-- Notificaciones push: los triggers arman el aviso y lo envían a la Edge Function "push"
+-- (supabase/functions/push) usando pg_net. Sin plataforma.push_url no hacen nada.
+-- ---------------------------------------------------------------------
+do $$ begin
+  create extension if not exists pg_net;
+exception when others then
+  raise notice 'pg_net no disponible: las notificaciones push quedan desactivadas';
+end $$;
+
+-- Esquema no expuesto por la API: estas funciones no se pueden llamar desde el navegador
+create schema if not exists privado;
+
+create or replace function privado.push(p_edificio uuid, p_uids uuid[], p_titulo text, p_cuerpo text, p_url text) returns void
+language plpgsql security definer set search_path = public as $$
+declare c record;
+begin
+  if p_uids is null or cardinality(p_uids) = 0 then return; end if;
+  select push_url, push_secret into c from public.plataforma where id = 1;
+  if coalesce(c.push_url, '') = '' then return; end if;
+  if not exists (select 1 from public.push_subs where uid = any(p_uids)) then return; end if;
+  perform net.http_post(
+    url := c.push_url,
+    body := jsonb_build_object('edificio_id', p_edificio, 'uids', to_jsonb(p_uids), 'titulo', p_titulo, 'cuerpo', coalesce(p_cuerpo, ''), 'url', p_url),
+    headers := jsonb_build_object('Content-Type', 'application/json', 'x-push-secret', coalesce(c.push_secret, '')));
+exception when others then
+  raise warning 'push no enviado: %', sqlerrm;   -- un fallo de notificación nunca bloquea la operación
+end $$;
+
+create or replace function privado.usuarios_de(p_edificio uuid, p_roles rol_t[], p_depto text default null, p_empresa uuid default null, p_excepto uuid default null) returns uuid[]
+language sql stable security definer set search_path = public as $$
+  select coalesce(array_agg(id), '{}') from public.usuarios
+  where edificio_id = p_edificio and estado = 'activo' and rol = any(p_roles)
+    and (p_depto is null or depto = p_depto)
+    and (p_empresa is null or empresa_id = p_empresa)
+    and (p_excepto is null or id <> p_excepto)
+$$;
+
+create or replace function privado.tg_push_encomienda() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  perform privado.push(new.edificio_id, privado.usuarios_de(new.edificio_id, '{residente,propietario}', new.depto),
+    '📦 Tienes una encomienda', concat_ws(' · ', new.descripcion, nullif(new.courier, '')), '#encomiendas');
+  return null;
+end $$;
+
+create or replace function privado.tg_push_mensaje() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare c public.conversaciones;
+begin
+  select * into c from public.conversaciones where edificio_id = new.edificio_id and id = new.conv_id;
+  if not found then return null; end if;
+  if new.rol in ('residente','propietario') then
+    perform privado.push(new.edificio_id,
+      array(select id from public.usuarios where edificio_id = new.edificio_id and estado = 'activo' and id <> new.uid and public.canal_de_rol(rol) = c.canal),
+      '💬 Depto ' || c.depto, left(new.texto, 140), '#mensajes');
+  else
+    perform privado.push(new.edificio_id, privado.usuarios_de(new.edificio_id, '{residente,propietario}', c.depto, null, new.uid),
+      '💬 ' || case c.canal when 'conserjeria' then 'Conserjería' when 'comite' then 'Comité' else 'Administración' end,
+      left(new.texto, 140), '#mensajes');
+  end if;
+  return null;
+end $$;
+
+create or replace function privado.tg_push_reserva() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare det text := new.espacio_nombre || ' · ' || to_char(new.fecha, 'DD/MM') || ' ' || lpad(new.h_ini::text, 2, '0') || ':00';
+begin
+  if tg_op = 'INSERT' and new.estado = 'pendiente' then
+    perform privado.push(new.edificio_id, privado.usuarios_de(new.edificio_id, '{comite,admin}', null, null, new.uid),
+      '📅 Reserva por aprobar', 'Depto ' || new.depto || ' · ' || det, '#reservas');
+  elsif tg_op = 'UPDATE' and old.estado = 'pendiente' and new.estado in ('aprobada','rechazada') then
+    perform privado.push(new.edificio_id, array[new.uid],
+      case new.estado when 'aprobada' then '✅ Reserva aprobada' else '❌ Reserva rechazada' end,
+      concat_ws(' · ', det, nullif(new.motivo_rechazo, '')), '#reservas');
+  end if;
+  return null;
+end $$;
+
+create or replace function privado.tg_push_usuario() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if new.estado = 'pendiente' then
+    perform privado.push(new.edificio_id, privado.usuarios_de(new.edificio_id, '{admin}'),
+      '👤 Solicitud de acceso por aprobar', concat_ws(' · ', new.nombre, nullif(new.depto, '')), '#admin--usuarios');
+  end if;
+  return null;
+end $$;
+
+create or replace function privado.tg_push_ot() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if tg_op = 'INSERT' or new.empresa_id is distinct from old.empresa_id then
+    if new.empresa_id is not null then
+      perform privado.push(new.edificio_id, privado.usuarios_de(new.edificio_id, '{mantencion}', null, new.empresa_id),
+        '🔧 Nueva orden de trabajo', new.titulo, '#mantencion--' || new.id);
+    end if;
+  elsif new.estado is distinct from old.estado then
+    if new.estado = 'cierre_tecnico' then
+      perform privado.push(new.edificio_id, privado.usuarios_de(new.edificio_id, '{admin}'),
+        '🔧 Orden de trabajo por aprobar', new.titulo, '#mantencion--' || new.id);
+    elsif new.estado = 'rechazada' then
+      perform privado.push(new.edificio_id, privado.usuarios_de(new.edificio_id, '{admin}'),
+        '🔧 La empresa rechazó la orden', new.titulo, '#mantencion--' || new.id);
+    elsif new.estado = 'aprobada' and new.empresa_id is not null then
+      perform privado.push(new.edificio_id, privado.usuarios_de(new.edificio_id, '{mantencion}', null, new.empresa_id),
+        '✅ Orden de trabajo aprobada', new.titulo, '#mantencion--' || new.id);
+    end if;
+  end if;
+  return null;
+end $$;
+
+drop trigger if exists push_encomienda on public.encomiendas;
+create trigger push_encomienda after insert on public.encomiendas for each row execute function privado.tg_push_encomienda();
+drop trigger if exists push_mensaje on public.mensajes;
+create trigger push_mensaje after insert on public.mensajes for each row execute function privado.tg_push_mensaje();
+drop trigger if exists push_reserva on public.reservas;
+create trigger push_reserva after insert or update on public.reservas for each row execute function privado.tg_push_reserva();
+drop trigger if exists push_usuario on public.usuarios;
+create trigger push_usuario after insert on public.usuarios for each row execute function privado.tg_push_usuario();
+drop trigger if exists push_ot on public.ot;
+create trigger push_ot after insert or update on public.ot for each row execute function privado.tg_push_ot();
+
+-- Registrar el navegador de quien llama para recibir notificaciones
+create or replace function public.guardar_push(p_endpoint text, p_p256dh text, p_auth text, p_ua text default '') returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  if public.mi_edificio() is null then raise exception 'Sin permiso'; end if;
+  if p_endpoint !~ '^https://' or coalesce(p_p256dh, '') = '' or coalesce(p_auth, '') = '' then raise exception 'Suscripción no válida'; end if;
+  delete from public.push_subs where endpoint = p_endpoint;
+  delete from public.push_subs where id in (select id from public.push_subs where uid = auth.uid() order by creado desc offset 9);
+  insert into public.push_subs (edificio_id, uid, endpoint, p256dh, auth, ua)
+  values (public.mi_edificio(), auth.uid(), p_endpoint, p_p256dh, p_auth, left(coalesce(p_ua, ''), 200));
 end $$;
 
 -- ---------------------------------------------------------------------
 -- RLS
 -- ---------------------------------------------------------------------
-alter table public.config         enable row level security;
+alter table public.edificios      enable row level security;
 alter table public.empresas       enable row level security;
 alter table public.usuarios       enable row level security;
 alter table public.unidades       enable row level security;
@@ -335,24 +699,31 @@ alter table public.visitas        enable row level security;
 alter table public.activos        enable row level security;
 alter table public.registros      enable row level security;
 alter table public.ot             enable row level security;
+alter table public.encuestas      enable row level security;
+alter table public.votos          enable row level security;
+alter table public.push_subs      enable row level security;
 
--- helper para (re)crear políticas sin errores
-create or replace function public._pol(tbl text, nombre text, cmd text, usando text, con text default null) returns void
+-- helper para (re)crear políticas sin errores. Salvo que se indique lo contrario, toda
+-- política queda además limitada a las filas del edificio del usuario.
+drop function if exists public._pol(text, text, text, text, text);
+create or replace function public._pol(tbl text, nombre text, cmd text, usando text, con text default null, por_edificio boolean default true) returns void
 language plpgsql as $$
+declare pre text := case when por_edificio then 'edificio_id = public.mi_edificio() and ' else '' end;
 begin
   execute format('drop policy if exists %I on public.%I', nombre, tbl);
   if cmd = 'insert' then
-    execute format('create policy %I on public.%I for insert to authenticated with check (%s)', nombre, tbl, coalesce(con, usando));
+    execute format('create policy %I on public.%I for insert to authenticated with check (%s(%s))', nombre, tbl, pre, coalesce(con, usando));
   elsif cmd = 'update' then
-    execute format('create policy %I on public.%I for update to authenticated using (%s) with check (%s)', nombre, tbl, usando, coalesce(con, usando));
+    execute format('create policy %I on public.%I for update to authenticated using (%s(%s)) with check (%s(%s))', nombre, tbl, pre, usando, pre, coalesce(con, usando));
   else
-    execute format('create policy %I on public.%I for %s to authenticated using (%s)', nombre, tbl, cmd, usando);
+    execute format('create policy %I on public.%I for %s to authenticated using (%s(%s))', nombre, tbl, cmd, pre, usando);
   end if;
 end $$;
 
--- config: todos los autenticados leen; admin edita
-select public._pol('config','config_sel','select','true');
-select public._pol('config','config_upd','update','public.es_admin()');
+-- edificios: cada cuenta lee el suyo (aunque esté pendiente); su admin lo edita.
+-- Se crean solo con crear_edificio().
+select public._pol('edificios','edi_sel','select','id = public.mi_edificio_asignado()', null, false);
+select public._pol('edificios','edi_upd','update','id = public.mi_edificio() and public.es_admin()', null, false);
 
 -- empresas: todos activos leen; admin escribe
 select public._pol('empresas','emp_sel','select','public.mi_rol() is not null');
@@ -362,9 +733,10 @@ select public._pol('empresas','emp_del','delete','public.es_admin()');
 
 -- usuarios: cada uno ve el suyo; staff ve todos; mantención ve a sus colegas; insert propio; update por trigger
 -- (residentes ven además a conserjes/comité/admin para mostrar nombres en chats e historiales)
-select public._pol('usuarios','usu_sel','select','id = auth.uid() or public.es_staff() or (public.mi_rol() is not null and rol in (''conserje'',''comite'',''admin'')) or (public.mi_rol() = ''mantencion'' and empresa_id = public.mi_empresa())');
-select public._pol('usuarios','usu_ins','insert','id = auth.uid() or public.es_admin()');
-select public._pol('usuarios','usu_upd','update','id = auth.uid() or public.es_admin()');
+-- (su propia fila se ve siempre, también pendiente; por eso estas políticas llevan el edificio a mano)
+select public._pol('usuarios','usu_sel','select','id = auth.uid() or (edificio_id = public.mi_edificio() and (public.es_staff() or (public.mi_rol() is not null and rol in (''conserje'',''comite'',''admin'')) or (public.mi_rol() = ''mantencion'' and empresa_id = public.mi_empresa())))', null, false);
+select public._pol('usuarios','usu_ins','insert','id = auth.uid() or (public.es_admin() and edificio_id = public.mi_edificio())', null, false);
+select public._pol('usuarios','usu_upd','update','id = auth.uid() or (public.es_admin() and edificio_id = public.mi_edificio())', null, false);
 select public._pol('usuarios','usu_del','delete','public.es_admin()');
 
 -- unidades: activos leen; admin escribe
@@ -397,8 +769,8 @@ select public._pol('incidencias','inc_upd','update','uid = auth.uid() or public.
 select public._pol('conversaciones','conv_sel','select','(depto = public.mi_depto() and public.es_residente()) or public.es_admin() or canal = public.canal_de_rol(public.mi_rol())');
 select public._pol('conversaciones','conv_ins','insert','(depto = public.mi_depto() and public.es_residente()) or public.es_admin() or canal = public.canal_de_rol(public.mi_rol())');
 select public._pol('conversaciones','conv_upd','update','(depto = public.mi_depto() and public.es_residente()) or public.es_admin() or canal = public.canal_de_rol(public.mi_rol())');
-select public._pol('mensajes','msg_sel','select','exists (select 1 from public.conversaciones c where c.id = mensajes.conv_id)');
-select public._pol('mensajes','msg_ins','insert','uid = auth.uid() and exists (select 1 from public.conversaciones c where c.id = mensajes.conv_id)');
+select public._pol('mensajes','msg_sel','select','exists (select 1 from public.conversaciones c where c.edificio_id = mensajes.edificio_id and c.id = mensajes.conv_id)');
+select public._pol('mensajes','msg_ins','insert','uid = auth.uid() and exists (select 1 from public.conversaciones c where c.edificio_id = mensajes.edificio_id and c.id = mensajes.conv_id)');
 
 -- comunicados / documentos: todos activos (menos mantención en documentos) leen; comité/admin escriben
 select public._pol('comunicados','com_sel','select','public.mi_rol() is not null');
@@ -435,6 +807,22 @@ select public._pol('ot','ot_sel','select','public.mi_rol() in (''comite'',''admi
 select public._pol('ot','ot_ins','insert','public.es_admin()');
 select public._pol('ot','ot_upd','update','public.es_admin() or (public.mi_rol() = ''mantencion'' and empresa_id = public.mi_empresa())');
 
+-- encuestas: residentes, comité y admin leen; comité/admin crean, cierran y eliminan
+select public._pol('encuestas','enc_sel','select','public.mi_rol() in (''residente'',''propietario'',''comite'',''admin'')');
+select public._pol('encuestas','enc_ins','insert','public.mi_rol() in (''comite'',''admin'')');
+select public._pol('encuestas','enc_upd','update','public.mi_rol() in (''comite'',''admin'')');
+select public._pol('encuestas','enc_del','delete','public.mi_rol() in (''comite'',''admin'')');
+-- votos: cada unidad ve y emite solo el suyo; los totales salen de resultados_encuestas()
+select public._pol('votos','vot_sel','select','depto = public.mi_depto()');
+select public._pol('votos','vot_ins','insert','uid = auth.uid() and length(depto) > 0 and depto = public.mi_depto() and public.puede_votar(encuesta_id, opcion)');
+select public._pol('votos','vot_upd','update','depto = public.mi_depto()','uid = auth.uid() and length(depto) > 0 and depto = public.mi_depto() and public.puede_votar(encuesta_id, opcion)');
+
+-- push_subs: cada usuario ve y borra las suyas; se guardan con guardar_push()
+select public._pol('push_subs','push_sel','select','uid = auth.uid()');
+select public._pol('push_subs','push_del','delete','uid = auth.uid()');
+
+drop function public._pol(text, text, text, text, text, boolean);
+
 -- ---------------------------------------------------------------------
 -- Storage: bucket público de lectura "fotos" (logo, incidencias, rondas, documentos)
 -- ---------------------------------------------------------------------
@@ -445,8 +833,9 @@ drop policy if exists "fotos_read"   on storage.objects;
 drop policy if exists "fotos_insert" on storage.objects;
 drop policy if exists "fotos_delete" on storage.objects;
 create policy "fotos_read"   on storage.objects for select using (bucket_id = 'fotos');
-create policy "fotos_insert" on storage.objects for insert to authenticated with check (bucket_id = 'fotos' and public.mi_rol() is not null);
-create policy "fotos_delete" on storage.objects for delete to authenticated using (bucket_id = 'fotos' and (public.es_admin() or public.mi_rol() = 'comite'));
+-- Los archivos de cada edificio viven bajo la carpeta <edificio_id>/
+create policy "fotos_insert" on storage.objects for insert to authenticated with check (bucket_id = 'fotos' and (storage.foldername(name))[1] = public.mi_edificio()::text);
+create policy "fotos_delete" on storage.objects for delete to authenticated using (bucket_id = 'fotos' and (storage.foldername(name))[1] = public.mi_edificio()::text and public.mi_rol() in ('admin','comite'));
 
 -- ---------------------------------------------------------------------
 -- Realtime
@@ -454,7 +843,7 @@ create policy "fotos_delete" on storage.objects for delete to authenticated usin
 do $$
 declare t text;
 begin
-  foreach t in array array['config','empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot']
+  foreach t in array array['edificios','empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos']
   loop
     begin
       execute format('alter publication supabase_realtime add table public.%I', t);
@@ -463,4 +852,4 @@ begin
   end loop;
 end $$;
 
--- Listo. Siguiente paso: crea tu usuario desde la app (el primero queda como administrador).
+-- Listo. Siguiente paso: crea tu cuenta desde la app y crea el edificio (quedarás como su administrador).

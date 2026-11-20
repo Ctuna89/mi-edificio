@@ -1,6 +1,7 @@
 /* =====================================================================
    Mi Edificio — frontend (vanilla JS) sobre Supabase
    Auth (email/clave) · Postgres con RLS · Storage (bucket "fotos") · Realtime
+   Varios edificios por instalación: RLS limita cada consulta al edificio del usuario.
    ===================================================================== */
 (function(){
 'use strict';
@@ -30,6 +31,12 @@ function askText(label, def=''){ return new Promise(res=>{ const m=modal(`<h3>${
 function formData(form){ const o={}; new FormData(form).forEach((v,k)=>{ o[k]=v; }); $$('input[type=checkbox]',form).forEach(c=>{ o[c.name]=c.checked; }); return o; }
 function busy(btn,on,txt){ if(!btn) return; btn.disabled=on; if(on){ btn.dataset.t=btn.textContent; btn.textContent=txt||'Guardando…'; } else if(btn.dataset.t){ btn.textContent=btn.dataset.t; } }
 
+function descargar(blob, nombre){ const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=nombre; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(a.href),5000); }
+// Imprime (o guarda como PDF) solo el HTML indicado: ver reglas @media print en index.html
+function imprimir(titulo, html){ $('#printArea')?.remove(); const d=document.createElement('div'); d.id='printArea'; d.innerHTML=html; document.body.appendChild(d); const prev=document.title; document.title=titulo; document.body.classList.add('printing');
+  const fin=()=>{ document.body.classList.remove('printing'); document.title=prev; d.remove(); window.removeEventListener('afterprint',fin); }; window.addEventListener('afterprint',fin);
+  const imgs=$$('img',d); Promise.all(imgs.map(i=>i.complete?null:new Promise(r=>{ i.onload=i.onerror=r; setTimeout(r,2500); }))).then(()=>window.print()); }
+
 // ---------- Supabase ----------
 const CFG = window.APP_CONFIG||{};
 if(!CFG.SUPABASE_URL || CFG.SUPABASE_URL.includes('TU-PROYECTO')){ document.getElementById('app').innerHTML='<div class="auth"><div class="card"><h3>Falta configurar Supabase</h3><p>Edita <code>config.js</code> con la URL y la anon key de tu proyecto (Project Settings → API).</p></div></div>'; return; }
@@ -52,16 +59,17 @@ function watch(tables, fetcher, cb, opts={}){
   return {reload:load, un};
 }
 
-// Fotos: comprimir y subir al bucket "fotos"
+// Fotos: comprimir y subir al bucket "fotos", bajo la carpeta del edificio (lo exige la política de storage)
+const dirEdif = ()=> (S.me?.edificio_id||'sin-edificio')+'/';
 async function uploadImage(file, folder='img'){
   const blob = await new Promise((res,rej)=>{ const img=new Image(); const url=URL.createObjectURL(file);
     img.onload=()=>{ const max=1280; let w=img.width,h=img.height; if(w>max||h>max){ if(w>h){h=Math.round(h*max/w);w=max;} else {w=Math.round(w*max/h);h=max;} } const c=document.createElement('canvas'); c.width=w;c.height=h; c.getContext('2d').drawImage(img,0,0,w,h); c.toBlob(b=>{URL.revokeObjectURL(url); b?res(b):rej(new Error('No se pudo procesar la imagen'));},'image/jpeg',0.82); };
     img.onerror=()=>rej(new Error('El archivo no es una imagen válida')); img.src=url; });
-  const path=`${folder}/${todayStr()}/${rnd()}.jpg`;
+  const path=`${dirEdif()}${folder}/${todayStr()}/${rnd()}.jpg`;
   await q(sb.storage.from('fotos').upload(path, blob, {contentType:'image/jpeg'}));
   return path;
 }
-async function uploadFile(file, folder='docs'){ const ext=(file.name.split('.').pop()||'bin').toLowerCase().replace(/[^a-z0-9]/g,''); const path=`${folder}/${todayStr()}/${rnd()}.${ext}`; await q(sb.storage.from('fotos').upload(path, file, {contentType:file.type||undefined})); return path; }
+async function uploadFile(file, folder='docs'){ const ext=(file.name.split('.').pop()||'bin').toLowerCase().replace(/[^a-z0-9]/g,''); const path=`${dirEdif()}${folder}/${todayStr()}/${rnd()}.${ext}`; await q(sb.storage.from('fotos').upload(path, file, {contentType:file.type||undefined})); return path; }
 async function subirFotos(input, folder){ const ids=[]; for(const f of Array.from(input?.files||[])){ try{ ids.push(await uploadImage(f, folder)); }catch(e){ toast('Foto no subida: '+errMsg(e)); } } return ids; }
 const fotoInput=(name='fotos')=>`<label class="f"><span>Fotos (puedes tomar varias)</span><input type="file" name="${name}" accept="image/*" capture="environment" multiple></label>`;
 function viewImg(path){ modal(`<img src="${fotoUrl(path)}" style="width:100%;border-radius:10px"><div class="center" style="margin-top:10px"><button class="btn sec" onclick="this.closest('.modal').remove()">Cerrar</button></div>`); }
@@ -94,6 +102,7 @@ const MODULES = [
   {id:'incidencias', ic:'🛠️', t:'Incidencias', d:'Reportar problemas', roles:['residente','propietario','conserje','comite','admin']},
   {id:'mensajes', ic:'💬', t:'Mensajes', d:'Conserjería, comité, administración', roles:['residente','propietario','conserje','comite','admin']},
   {id:'comunicados', ic:'📣', t:'Comunicados', d:'Avisos de la comunidad', roles:['residente','propietario','conserje','comite','admin','mantencion']},
+  {id:'encuestas', ic:'🗳️', t:'Encuestas', d:'Votaciones de la comunidad', roles:['residente','propietario','comite','admin']},
   {id:'encomiendas', ic:'📦', t:'Encomiendas', d:'Paquetes recibidos', roles:['residente','propietario','conserje','admin']},
   {id:'visitas', ic:'🚪', t:'Visitas', d:'Anunciar y registrar', roles:['residente','propietario','conserje','admin']},
   {id:'documentos', ic:'📁', t:'Documentos', d:'Reglamento, actas, balances', roles:['residente','propietario','conserje','comite','admin']},
@@ -104,16 +113,41 @@ const MODULES = [
 ];
 const BOTTOM = { residente:['inicio','gastos','reservas','incidencias','mensajes'], propietario:['inicio','gastos','reservas','incidencias','mensajes'], conserje:['inicio','rondas','incidencias','encomiendas','mensajes'], comite:['inicio','gastos','incidencias','mensajes','mantencion'], admin:['inicio','incidencias','mensajes','mantencion','admin'], mantencion:['inicio','mantencion','comunicados','perfil'] };
 
+// ---------- notificaciones push ----------
+// El navegador se suscribe con la clave pública VAPID y la suscripción se guarda en push_subs.
+// Los avisos los envía la Edge Function "push", llamada por triggers de la base de datos.
+const PUSH_KEY = CFG.VAPID_PUBLIC_KEY||'';
+const pushOk = ()=> 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+const b64u = s=>{ const r=atob((s+'='.repeat((4-s.length%4)%4)).replace(/-/g,'+').replace(/_/g,'/')); return Uint8Array.from(r,c=>c.charCodeAt(0)); };
+async function pushSub(){ if(!pushOk()) return null; const reg=await navigator.serviceWorker.getRegistration(); return reg? reg.pushManager.getSubscription() : null; }
+async function pushGuardar(sub){ const j=sub.toJSON(); await q(sb.rpc('guardar_push',{p_endpoint:j.endpoint, p_p256dh:j.keys.p256dh, p_auth:j.keys.auth, p_ua:navigator.userAgent})); }
+async function pushActivar(){ if(await Notification.requestPermission()!=='granted') throw new Error('Debes permitir las notificaciones en el navegador.'); const reg=await navigator.serviceWorker.ready; await pushGuardar(await reg.pushManager.subscribe({userVisibleOnly:true, applicationServerKey:b64u(PUSH_KEY)})); }
+async function pushDesactivar(){ const sub=await pushSub(); if(!sub) return; await T('push_subs').delete().eq('endpoint',sub.endpoint); await sub.unsubscribe(); }
+// Si este navegador ya estaba suscrito, lo deja asociado a quien inició sesión
+async function pushSync(){ try{ if(!PUSH_KEY || S.me?.estado!=='activo') return; const sub=await pushSub(); if(sub) await pushGuardar(sub); }catch(e){ console.warn('push',e); } }
+async function pushCard(){
+  if(!$('#pushBody')) return;
+  if(!PUSH_KEY){ $('#pushBody').textContent='Esta instalación aún no tiene configuradas las notificaciones push.'; return; }
+  if(!pushOk()){ $('#pushBody').textContent='Este navegador no admite notificaciones push. En iPhone y iPad, primero agrega la app a la pantalla de inicio (Compartir → Agregar a inicio).'; return; }
+  let sub=null; try{ sub=await pushSub(); }catch(e){}
+  const el=$('#pushBody'); if(!el) return;
+  el.innerHTML=`<p style="margin:0 0 10px">Recibe un aviso en este dispositivo cuando llegue una encomienda, te escriban o haya algo por aprobar.</p>${Notification.permission==='denied'?'<div class="err">Las notificaciones están bloqueadas para este sitio. Permítelas en la configuración del navegador.</div>':''}<button class="btn ${sub?'sec':''}" id="bPush">${sub?'Desactivar en este dispositivo':'Activar notificaciones'}</button>`;
+  $('#bPush').addEventListener('click', async e=>{ busy(e.target,true,'Un momento…'); try{ if(sub) await pushDesactivar(); else await pushActivar(); toast(sub?'Notificaciones desactivadas':'Notificaciones activadas'); }catch(err){ toast(errMsg(err)); } pushCard(); });
+}
+
 // ---------- arranque / auth ----------
 function render(html){ applyColor(); $('#app').innerHTML=html; }
 const applyColor=()=>{ const c=S.cfg?.color; if(c){ document.documentElement.style.setProperty('--p',c); document.documentElement.style.setProperty('--p2',c+'22'); } };
 
 async function boot(){
+  const cod=new URLSearchParams(location.search).get('e'); if(cod){ lsSet('codigo',cod.trim().toUpperCase()); history.replaceState(null,'',location.pathname+location.hash); }
+  if('serviceWorker' in navigator){ navigator.serviceWorker.register('sw.js').catch(e=>console.warn('sw',e)); navigator.serviceWorker.addEventListener('message',e=>{ if(e.data?.ir) location.hash=e.data.ir; }); }
   const {data:{session}} = await sb.auth.getSession();
   sb.auth.onAuthStateChange((ev,sess)=>{ const was=S.uid; S.session=sess; S.uid=sess?.user?.id||null; if(was!==S.uid){ teardown(); S.uid? start() : viewAuth(); } });
   S.session=session; S.uid=session?.user?.id||null;
   S.uid? start() : viewAuth();
 }
+async function salir(){ try{ await pushDesactivar(); }catch(e){} lsSet('verComo',null); return sb.auth.signOut(); }
 function teardown(){ clearViewSubs(); S.globalSubs.forEach(u=>{try{u();}catch(e){}}); S.globalSubs=[]; S.ready=false; S.cfgLoaded=false; S.meLoaded=false; S.cfg=null; S.me=null; S.users={}; S.unidades={}; S.empresas={}; S.activos={}; }
 function clearViewSubs(){ S.viewSubs.forEach(u=>{ try{u();}catch(e){} }); S.viewSubs=[]; }
 
@@ -135,15 +169,15 @@ function traducirAuth(m){ if(/invalid login/i.test(m)) return 'Correo o contrase
 async function start(){
   render(`<div class="loading"><div class="spin"></div>Cargando…</div>`);
   // catálogos globales (RLS limita lo que cada rol ve)
-  watch('config', ()=>q(T('config').select('*').eq('id',1).maybeSingle()), d=>{ const k=cfgKey(); S.cfg=d; S.cfgLoaded=true; applyColor(); if(S.ready && cfgKey()!==k && !$('.modal')) routeNow(); else if(S.ready) updateBrand(); gate(); }, {global:true});
-  watch({table:'usuarios'}, ()=>q(T('usuarios').select('*')), rows=>{ S.users={}; rows.forEach(u=>S.users[u.id]=u); const me=S.users[S.uid]||null; const k=meKey(); S.me=me; S.meLoaded=true; if(S.ready && meKey()!==k && !$('.modal')) routeNow(); else if(S.ready) refreshView(); gate(); }, {global:true, silent:true});
+  S.cfgW=watch('edificios', ()=>q(T('edificios').select('*').maybeSingle()), d=>{ const k=cfgKey(); S.cfg=d; S.cfgLoaded=true; applyColor(); if(S.ready && cfgKey()!==k && !$('.modal')) routeNow(); else if(S.ready) updateBrand(); gate(); }, {global:true});
+  S.usersW=watch({table:'usuarios'}, ()=>q(T('usuarios').select('*')), rows=>{ S.users={}; rows.forEach(u=>S.users[u.id]=u); const me=S.users[S.uid]||null; const k=meKey(); S.me=me; S.meLoaded=true; if((me?.edificio_id||null)!==(S.cfg?.id||null)) S.cfgW?.reload(); if(S.ready && meKey()!==k && !$('.modal')) routeNow(); else if(S.ready) refreshView(); gate(); }, {global:true, silent:true});
   watch('unidades', ()=>q(T('unidades').select('*')), rows=>{ S.unidades={}; rows.forEach(u=>S.unidades[u.depto]=u); refreshView(); }, {global:true, silent:true});
   watch('empresas', ()=>q(T('empresas').select('*')), rows=>{ S.empresas={}; rows.forEach(u=>S.empresas[u.id]=u); refreshView(); }, {global:true, silent:true});
   watch('activos', ()=>q(T('activos').select('*')), rows=>{ S.activos={}; rows.forEach(u=>S.activos[u.id]=u); refreshView(); }, {global:true, silent:true});
 }
-function meKey(){ const m=S.me||{}; return [m.rol,m.estado,m.nombre,m.depto,m.empresa_id].join('|'); }
-function cfgKey(){ const c=S.cfg||{}; return [c.nombre,c.direccion,c.logo,c.color,JSON.stringify(c.espacios||[])].join('|'); }
-function gate(){ if(S.ready) return; if(!S.cfgLoaded || !S.meLoaded) return; S.ready=true; routeNow(); }
+function meKey(){ const m=S.me||{}; return [m.edificio_id,m.rol,m.estado,m.nombre,m.depto,m.empresa_id].join('|'); }
+function cfgKey(){ const c=S.cfg||{}; return [c.id,c.nombre,c.direccion,c.logo,c.color,JSON.stringify(c.espacios||[])].join('|'); }
+function gate(){ if(S.ready) return; if(!S.cfgLoaded || !S.meLoaded) return; S.ready=true; routeNow(); pushSync(); }
 
 // ---------- router ----------
 let currentView='inicio', currentParam=null; const REFRESH={};
@@ -152,7 +186,7 @@ function routeNow(){
   if(!S.ready) return;
   clearViewSubs();
   if(!S.me) return viewCrearPerfil();
-  if(S.me.estado!=='activo') return render(shellLess(`<div class="card"><h3>${S.me.estado==='pendiente'?'Solicitud enviada':'Acceso bloqueado'}</h3><p>Hola ${esc(S.me.nombre)}. ${S.me.estado==='pendiente'?`Tu acceso para ${esc(S.me.depto||'el edificio')} está <b>pendiente de aprobación</b> por la administración.`:'Tu cuenta fue bloqueada por la administración.'}</p><button class="btn sec" id="out">Cerrar sesión</button></div>`), $('#out').addEventListener('click',()=>sb.auth.signOut()));
+  if(S.me.estado!=='activo') return render(shellLess(`<div class="card"><h3>${S.me.estado==='pendiente'?'Solicitud enviada':'Acceso bloqueado'}</h3><p>Hola ${esc(S.me.nombre)}. ${S.me.estado==='pendiente'?`Tu acceso para ${esc(S.me.depto||'el edificio')} está <b>pendiente de aprobación</b> por la administración.`:'Tu cuenta fue bloqueada por la administración.'}</p><button class="btn sec" id="out">Cerrar sesión</button></div>`), $('#out').addEventListener('click',()=>salir()));
   const h=(location.hash||'#inicio').replace('#',''); const [v,p]=h.split('--');
   const mod=MODULES.find(m=>m.id===v && m.roles.includes(role()));
   currentView = mod? v : 'inicio'; currentParam=p||null;
@@ -180,15 +214,36 @@ function renderShell(){
 }
 function setMain(html){ $('#main').innerHTML=html; }
 
-function viewCrearPerfil(){
-  render(shellLess(`<div class="card"><h3>Completa tu perfil</h3><p class="small muted">Si eres la primera persona en registrarse quedarás como administrador. Si no, la administración aprobará tu acceso.</p><div id="pErr"></div>
-  <form id="fAcc"><label class="f"><span>Nombre completo</span><input type="text" name="nombre" required></label>
-  <label class="f"><span>Departamento / unidad</span><input type="text" name="depto" placeholder="Ej: 1204 (vacío si eres conserje o empresa)"></label>
-  <label class="f"><span>Teléfono</span><input type="tel" name="telefono"></label>
-  <label class="f"><span>Soy</span><select name="rol"><option value="residente">Residente (arrendatario)</option><option value="propietario">Propietario</option><option value="conserje">Conserje</option><option value="mantencion">Empresa de mantención</option></select></label>
-  <button class="btn full">Guardar</button></form><div class="links" style="margin-top:10px"><a href="#" id="out">Cerrar sesión</a></div></div>`));
-  $('#out').addEventListener('click',e=>{e.preventDefault(); sb.auth.signOut();});
-  $('#fAcc').addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); const b=$('button',e.target); busy(b,true); try{ await q(T('usuarios').insert({id:S.uid, nombre:d.nombre.trim(), depto:d.depto.trim(), telefono:d.telefono.trim(), rol:d.rol})); }catch(err){ $('#pErr').innerHTML=`<div class="err">${esc(errMsg(err))}</div>`; busy(b,false); } });
+// Cuenta sin perfil: unirse a un edificio (por enlace/código de invitación, o directo si la
+// instalación tiene uno solo) o crear uno nuevo y quedar como su administrador.
+async function viewCrearPerfil(){
+  render(shellLess(`<div class="loading"><div class="spin"></div>Buscando tu edificio…</div>`));
+  let edif=null, puede=false, aviso='';
+  const buscar=async cod=>(await q(sb.rpc('buscar_edificio',{p_codigo:cod||null})))[0]||null;
+  try{ const cod=lsGet('codigo'); [edif,puede]=await Promise.all([buscar(cod), q(sb.rpc('puede_crear_edificio'))]);
+    if(cod&&!edif){ aviso='El código de invitación no corresponde a ningún edificio.'; lsSet('codigo',null); edif=await buscar(null); }
+  }catch(e){ aviso='No se pudo consultar el edificio: '+errMsg(e); }
+  if(S.me) return;
+  const err=m=>{ $('#pErr').innerHTML=m?`<div class="err">${esc(m)}</div>`:''; };
+  const listo=()=>{ lsSet('codigo',null); S.usersW?.reload(); };
+  const draw=()=>{
+    const pie=`<div class="links" style="margin-top:10px"><a href="#" id="out">Cerrar sesión</a>${edif?'<a href="#" id="otro">Mi edificio es otro</a>':''}</div>`;
+    render(shellLess(edif?`<div class="card"><h3>Únete a ${esc(edif.nombre)}</h3><p class="small muted">La administración del edificio aprobará tu acceso.</p><div id="pErr"></div>
+      <form id="fAcc"><label class="f"><span>Nombre completo</span><input type="text" name="nombre" required></label>
+      <label class="f"><span>Departamento / unidad</span><input type="text" name="depto" placeholder="Ej: 1204 (vacío si eres conserje o empresa)"></label>
+      <label class="f"><span>Teléfono</span><input type="tel" name="telefono"></label>
+      <label class="f"><span>Soy</span><select name="rol"><option value="residente">Residente (arrendatario)</option><option value="propietario">Propietario</option><option value="conserje">Conserje</option><option value="mantencion">Empresa de mantención</option></select></label>
+      <button class="btn full">Enviar solicitud</button></form>${pie}</div>`
+    :`<div id="pErr"></div><div class="card"><h3>Unirme a mi edificio</h3><p class="small muted">Pide a la administración de tu edificio el enlace o el código de invitación.</p><form id="fCod" class="row"><input type="text" name="codigo" class="grow" placeholder="Código de invitación" required autocapitalize="characters" autocomplete="off"><button class="btn">Buscar</button></form></div>
+      ${puede?`<div class="card"><h3>Crear un edificio nuevo</h3><p class="small muted">Quedarás como administrador y podrás invitar a tu comunidad.</p><form id="fNew"><label class="f"><span>Nombre del edificio o condominio</span><input type="text" name="edificio" required></label><label class="f"><span>Tu nombre completo</span><input type="text" name="nombre" required></label><label class="f"><span>Teléfono</span><input type="tel" name="telefono"></label><button class="btn full">Crear edificio</button></form></div>`:''}${pie}`));
+    err(aviso); aviso='';
+    $('#out').addEventListener('click',e=>{e.preventDefault(); salir();});
+    $('#otro')?.addEventListener('click',e=>{e.preventDefault(); lsSet('codigo',null); edif=null; draw();});
+    $('#fAcc')?.addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); const b=$('button',e.target); busy(b,true); try{ await q(T('usuarios').insert({id:S.uid, edificio_id:edif.id, nombre:d.nombre.trim(), depto:d.depto.trim(), telefono:d.telefono.trim(), rol:d.rol})); listo(); }catch(ex){ err(errMsg(ex)); busy(b,false); } });
+    $('#fCod')?.addEventListener('submit', async e=>{ e.preventDefault(); const cod=formData(e.target).codigo.trim().toUpperCase(); const b=$('button',e.target); busy(b,true,'Buscando…'); try{ const x=await buscar(cod); if(x){ edif=x; lsSet('codigo',cod); draw(); } else { err('No existe un edificio con ese código.'); busy(b,false); } }catch(ex){ err(errMsg(ex)); busy(b,false); } });
+    $('#fNew')?.addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); const b=$('button',e.target); busy(b,true,'Creando…'); try{ await q(sb.rpc('crear_edificio',{p_edificio:d.edificio.trim(), p_nombre:d.nombre.trim(), p_telefono:d.telefono.trim()})); listo(); }catch(ex){ err(errMsg(ex)); busy(b,false); } });
+  };
+  draw();
 }
 
 // ---------- VISTAS ----------
@@ -197,10 +252,12 @@ const VIEWS = {};
 VIEWS.perfil = function(){
   setMain(`<h1>Mi cuenta</h1><div class="card"><form id="fP"><label class="f"><span>Nombre</span><input type="text" name="nombre" value="${esc(S.me.nombre)}" required></label><label class="f"><span>Teléfono</span><input type="tel" name="telefono" value="${esc(S.me.telefono||'')}"></label><div class="small muted" style="margin-bottom:10px">Depto: <b>${esc(S.me.depto||'—')}</b> · Rol: <b>${ROLES[S.me.rol]}</b> · ${esc(S.session?.user?.email||'')}<br>Para cambiar depto o rol, contacta a la administración.</div><button class="btn">Guardar</button></form></div>
   <div class="card"><h3>Contraseña</h3><form id="fPw"><label class="f"><span>Nueva contraseña</span><input type="password" name="pw" minlength="8" required autocomplete="new-password"></label><button class="btn sec">Cambiar contraseña</button></form></div>
+  <div class="card"><h3>Notificaciones</h3><div id="pushBody" class="small muted">Comprobando…</div></div>
   <button class="btn dan" id="out">Cerrar sesión</button>`);
+  pushCard();
   $('#fP').addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); try{ await q(T('usuarios').update({nombre:d.nombre.trim(), telefono:d.telefono.trim()}).eq('id',S.uid)); toast('Guardado'); }catch(err){ toast(errMsg(err)); } });
   $('#fPw').addEventListener('submit', async e=>{ e.preventDefault(); try{ await q(sb.auth.updateUser({password:$('[name=pw]',e.target).value})); toast('Contraseña actualizada'); e.target.reset(); }catch(err){ toast(errMsg(err)); } });
-  $('#out').addEventListener('click',()=>sb.auth.signOut());
+  $('#out').addEventListener('click',()=>salir());
 };
 
 // INICIO
@@ -209,6 +266,7 @@ VIEWS.inicio = function(){
   const setupPend = isAdmin() && (!S.cfg || S.cfg.nombre==='Mi Edificio');
   setMain(`<h1>Hola, ${esc(S.me.nombre.split(' ')[0])}</h1>
   ${setupPend?`<div class="note">Configura el nombre, logo y dirección del edificio en <a href="#admin">Administración</a>.</div>`:''}
+  ${PUSH_KEY&&pushOk()&&Notification.permission==='default'?`<div class="info">🔔 <a href="#perfil">Activa las notificaciones</a> para enterarte de encomiendas, mensajes y aprobaciones.</div>`:''}
   <div class="grid">${mods.map(m=>`<a class="tile" href="#${m.id}" data-tile="${m.id}"><span class="ic">${m.ic}</span><b>${m.t}</b><small>${m.d||''}</small></a>`).join('')}</div>
   <h2>Últimos comunicados</h2><div id="homeCom" class="list"><div class="empty">Cargando…</div></div>`);
   watch('comunicados', ()=>q(T('comunicados').select('*').order('ts',{ascending:false}).limit(3)), rows=>{ const el=$('#homeCom'); if(!el) return; el.innerHTML = rows.length? rows.map(c=>`<div class="item static"><div class="hd"><b>${esc(c.titulo)}</b><span class="muted small">${fmtDate(c.ts)}</span></div><div class="small" style="margin-top:4px">${esc(c.cuerpo).slice(0,160)}${c.cuerpo.length>160?'…':''}</div></div>`).join('') : '<div class="empty">Sin comunicados aún</div>'; });
@@ -217,6 +275,7 @@ VIEWS.inicio = function(){
   if(['residente','propietario'].includes(r)){
     count('encomiendas', ()=>q(T('encomiendas').select('id').eq('depto',myDepto()).eq('entregado',false)), 'encomiendas');
     count('conversaciones', ()=>q(T('conversaciones').select('id').eq('depto',myDepto()).eq('no_leido_residente',true)), 'mensajes');
+    count(['encuestas','votos'], async()=>{ const [e,v]=await Promise.all([q(T('encuestas').select('id,cierra,solo_propietarios').eq('estado','abierta')), q(T('votos').select('encuesta_id').eq('depto',myDepto()))]); const ya=new Set(v.map(x=>x.encuesta_id)); return e.filter(x=>(!x.cierra||x.cierra>=todayStr())&&!ya.has(x.id)&&(!x.solo_propietarios||r==='propietario')); }, 'encuestas');
   } else if(isStaff()){
     const canal = Object.keys(canalRol).find(c=>canalRol[c]===r);
     if(canal) count('conversaciones', ()=>q(T('conversaciones').select('id').eq('canal',canal).eq('no_leido_staff',true)), 'mensajes');
@@ -233,6 +292,7 @@ VIEWS.gastos = function(){
   const staff = ['comite','admin'].includes(role());
   setMain(`<h1>Gastos comunes</h1>${isAdmin()?`<div class="row" style="margin-bottom:12px"><button class="btn" id="bNuevoG">+ Nuevo período</button></div>`:''}<div id="gList"></div>`);
   $('#bNuevoG')?.addEventListener('click',()=>formGasto());
+  let aviso=null; $('#gList').addEventListener('click',e=>{ const x=e.target.closest('[data-x]'); if(x&&aviso?.mio) exportGasto(x.dataset.x, aviso.g, null, aviso.mio); });
   watch(['gastos','gasto_unidades'], async()=>{ const g=await q(T('gastos').select('*').order('periodo',{ascending:false}).limit(24)); const gu=await q(T('gasto_unidades').select('*')); return {g,gu}; }, ({g,gu})=>{
     const el=$('#gList'); if(!el) return;
     const pr={}; gu.forEach(x=>{ (pr[x.periodo]=pr[x.periodo]||{})[x.depto]=x; });
@@ -242,10 +302,11 @@ VIEWS.gastos = function(){
       $$('#gList [data-g]').forEach(it=>it.addEventListener('click',()=>detalleGastoAdmin(g.find(x=>x.periodo===it.dataset.g), pr[it.dataset.g]||{})));
     } else {
       const dep=myDepto(); const vis=g.filter(x=>x.publicado); if(!vis.length){ el.innerHTML='<div class="empty">Aún no hay períodos publicados.</div>'; return; }
-      const cur=vis[0]; const mio=pr[cur.periodo]?.[dep];
+      const cur=vis[0]; const mio=pr[cur.periodo]?.[dep]; aviso={g:cur, mio};
       el.innerHTML = `<div class="card"><div class="row"><div class="grow"><span class="muted small">${esc(fmtMonth(cur.periodo))} · Depto ${esc(dep)}</span><div style="font-size:28px;font-weight:700">${mio?clp(mio.monto):'—'}</div></div>${mio?`<span class="pill ${mio.pagado?'ok':'wa'}">${mio.pagado?'Pagado':'Pendiente'}</span>`:''}</div>
       ${mio?`<div class="small muted" style="margin:6px 0 10px">Alícuota ${Number(mio.alicuota)}% · Vence ${cur.vence?fmtDay(cur.vence):'—'}</div>`:'<div class="small muted">Tu unidad no está en el prorrateo de este período. Consulta a administración.</div>'}
-      ${S.cfg?.datos_bancarios?`<details><summary>Datos para transferir</summary><pre style="white-space:pre-wrap;font:inherit;margin:8px 0 0">${esc(S.cfg.datos_bancarios)}</pre></details>`:''}</div>
+      ${S.cfg?.datos_bancarios?`<details><summary>Datos para transferir</summary><pre style="white-space:pre-wrap;font:inherit;margin:8px 0 0">${esc(S.cfg.datos_bancarios)}</pre></details>`:''}
+      ${mio?`<div class="row" style="margin-top:10px;gap:6px"><button class="btn sec sm" data-x="pdf">Descargar PDF</button><button class="btn sec sm" data-x="xls">Descargar Excel</button></div>`:''}</div>
       <h2>Desglose del período</h2><div class="card"><table><thead><tr><th>Ítem</th><th class="num">Total edificio</th><th class="num">Tu parte</th></tr></thead><tbody>
       ${(cur.items||[]).map(it=>`<tr><td>${esc(it.categoria)}<br><span class="muted small">${esc(it.descripcion||'')}</span></td><td class="num">${clp(it.monto)}</td><td class="num">${mio?clp(it.monto*Number(mio.alicuota)/100):'—'}</td></tr>`).join('')}
       <tr><th>Total</th><th class="num">${clp(cur.total)}</th><th class="num">${mio?clp(mio.monto):'—'}</th></tr></tbody></table></div>
@@ -268,15 +329,48 @@ function formGasto(g){
   m.addEventListener('input',recalc); m.addEventListener('click',e=>{ if(e.target.closest('[data-rm]')){ e.target.closest('.row').remove(); recalc(); } }); recalc();
   $('#delG',m)?.addEventListener('click', async()=>{ if(await confirmBox('¿Eliminar este período?')){ await q(T('gastos').delete().eq('periodo',g.periodo)); closeModal(); toast('Eliminado'); } });
   $('#fG',m).addEventListener('submit', async e=>{ e.preventDefault(); const rows=$$('#items .row',m).map(r=>({categoria:$('[name=cat]',r).value.trim(), descripcion:$('[name=des]',r).value.trim(), monto:Number($('[name=mon]',r).value)||0})); const total=rows.reduce((a,b)=>a+b.monto,0); const periodo=$('[name=periodo]',m).value; const vence=$('[name=vence]',m).value||null; const publicado=$('[name=publicado]',m).checked;
-    try{ await q(T('gastos').upsert({periodo, vence, items:rows, total, publicado, actualizado:now()})); await q(sb.rpc('recalcular_prorrateo',{p_periodo:periodo})); closeModal(); toast('Período guardado'); }catch(err){ toast('Error: '+errMsg(err)); } });
+    try{ await q(T('gastos').upsert({edificio_id:S.me.edificio_id, periodo, vence, items:rows, total, publicado, actualizado:now()})); await q(sb.rpc('recalcular_prorrateo',{p_periodo:periodo})); closeModal(); toast('Período guardado'); }catch(err){ toast('Error: '+errMsg(err)); } });
 }
 function detalleGastoAdmin(g, pr){
-  const m=modal(`<h3>${esc(fmtMonth(g.periodo))}</h3><div class="row wrap" style="margin-bottom:10px"><span class="pill ${g.publicado?'ok':'wa'}">${g.publicado?'Publicado':'Borrador'}</span><b>${clp(g.total)}</b><span class="grow"></span>${isAdmin()?`<button class="btn sec sm" id="edG">Editar</button><button class="btn sec sm" id="recG">Recalcular prorrateo</button>`:''}</div>
+  const m=modal(`<h3>${esc(fmtMonth(g.periodo))}</h3><div class="row wrap" style="margin-bottom:10px"><span class="pill ${g.publicado?'ok':'wa'}">${g.publicado?'Publicado':'Borrador'}</span><b>${clp(g.total)}</b><span class="grow"></span><button class="btn sec sm" id="xPdf">PDF</button><button class="btn sec sm" id="xXls">Excel</button>${isAdmin()?`<button class="btn sec sm" id="edG">Editar</button><button class="btn sec sm" id="recG">Recalcular prorrateo</button>`:''}</div>
   <table><thead><tr><th>Ítem</th><th class="num">Monto</th></tr></thead><tbody>${(g.items||[]).map(it=>`<tr><td>${esc(it.categoria)} <span class="muted small">${esc(it.descripcion||'')}</span></td><td class="num">${clp(it.monto)}</td></tr>`).join('')}</tbody></table>
   <h2>Prorrateo por unidad</h2><table><thead><tr><th>Unidad</th><th class="num">Alíc.</th><th class="num">Monto</th><th>Pago</th></tr></thead><tbody>${Object.values(pr).sort((a,b)=>a.depto.localeCompare(b.depto,undefined,{numeric:true})).map(p=>`<tr><td>${esc(p.depto)}</td><td class="num">${Number(p.alicuota)}%</td><td class="num">${clp(p.monto)}</td><td>${isAdmin()?`<label class="sw"><input type="checkbox" data-pag="${esc(p.depto)}" ${p.pagado?'checked':''}> <span>${p.pagado?'Pagado':'Pendiente'}</span></label>`:`<span class="pill ${p.pagado?'ok':'wa'}">${p.pagado?'Pagado':'Pendiente'}</span>`}</td></tr>`).join('')||'<tr><td colspan="4" class="muted">Sin unidades. Agrega unidades con alícuota en Administración.</td></tr>'}</tbody></table>`);
+  $('#xPdf',m).addEventListener('click',()=>{ closeModal(); exportGasto('pdf',g,pr); });
+  $('#xXls',m).addEventListener('click',()=>exportGasto('xls',g,pr));
   $('#edG',m)?.addEventListener('click',()=>formGasto(g));
   $('#recG',m)?.addEventListener('click', async()=>{ try{ await q(sb.rpc('recalcular_prorrateo',{p_periodo:g.periodo})); toast('Prorrateo recalculado'); closeModal(); }catch(err){ toast(errMsg(err)); } });
   m.addEventListener('change', async e=>{ const c=e.target.closest('[data-pag]'); if(!c) return; try{ await q(T('gasto_unidades').update({pagado:c.checked, pagado_at:c.checked?now():null}).eq('periodo',g.periodo).eq('depto',c.dataset.pag)); c.nextElementSibling.textContent=c.checked?'Pagado':'Pendiente'; }catch(err){ toast(errMsg(err)); } });
+}
+
+// Exportar un período a Excel (.xlsx) o PDF (diálogo de impresión → "Guardar como PDF").
+// Con `mio` (fila de gasto_unidades del residente) genera su aviso de cobro; sin él, el informe completo.
+function exportGasto(tipo, g, pr, mio){
+  const c=S.cfg||{}; const items=g.items||[]; const mes=fmtMonth(g.periodo);
+  const dmy=d=>d?String(d).slice(8,10)+'-'+String(d).slice(5,7)+'-'+String(d).slice(0,4):'—';
+  const us=Object.values(pr||{}).sort((a,b)=>a.depto.localeCompare(b.depto,undefined,{numeric:true}));
+  const parte=it=>Math.round(Number(it.monto)*Number(mio.alicuota)/100);
+  const archivo='gastos-comunes-'+g.periodo+(mio?'-depto-'+seg(mio.depto):'');
+  if(tipo==='xls'){
+    const B=v=>({v,b:true}); let hojas;
+    if(mio) hojas=[{name:'Aviso de cobro', widths:[34,34,16,16], rows:[[B(c.nombre||'')],[B('Gastos comunes '+mes)],[],['Unidad',String(mio.depto)],['Alícuota %',Number(mio.alicuota)],['Vencimiento',dmy(g.vence)],['Estado',mio.pagado?'Pagado':'Pendiente'],[],
+      [B('Ítem'),B('Detalle'),B('Total edificio'),B('Tu parte')], ...items.map(it=>[it.categoria,it.descripcion||'',Number(it.monto)||0,parte(it)]), [B('Total'),'',B(Number(g.total)),B(Number(mio.monto))]]}];
+    else hojas=[{name:'Resumen', widths:[34,34,16], rows:[[B(c.nombre||'')],[B('Gastos comunes '+mes)],[],['Vencimiento',dmy(g.vence)],['Estado',g.publicado?'Publicado':'Borrador'],['Unidades pagadas',us.filter(u=>u.pagado).length+' de '+us.length],[],
+        [B('Ítem'),B('Detalle'),B('Monto')], ...items.map(it=>[it.categoria,it.descripcion||'',Number(it.monto)||0]), [B('Total'),'',B(Number(g.total))]]},
+      {name:'Prorrateo', widths:[12,30,12,16,12,16], rows:[[B('Unidad'),B('Propietario'),B('Alícuota %'),B('Monto'),B('Estado'),B('Fecha de pago')],
+        ...us.map(u=>[String(u.depto),S.unidades[u.depto]?.prop||'',Number(u.alicuota),Number(u.monto),u.pagado?'Pagado':'Pendiente',u.pagado_at?dmy(u.pagado_at):'']),
+        [B('Total'),'',B(us.reduce((a,u)=>a+Number(u.alicuota),0)),B(us.reduce((a,u)=>a+Number(u.monto),0))]]}];
+    descargar(new Blob([window.MiniXlsx.build(hojas)],{type:window.MiniXlsx.MIME}), archivo+'.xlsx'); return;
+  }
+  const cab=`<div class="ph">${c.logo?`<img src="${fotoUrl(c.logo)}" alt="">`:''}<div><b>${esc(c.nombre||'')}</b><br>${esc([c.direccion,c.comuna].filter(Boolean).join(', '))}</div></div>`;
+  const banco=c.datos_bancarios?`<h2>Datos para transferir</h2><div class="pie">${esc(c.datos_bancarios)}</div>`:'';
+  imprimir(archivo, mio?
+    `${cab}<h1>Aviso de cobro · Gastos comunes ${esc(mes)}</h1><p class="sub">Depto ${esc(mio.depto)} · Alícuota ${Number(mio.alicuota)}% · Vence ${dmy(g.vence)} · ${mio.pagado?'Pagado':'Pendiente de pago'}</p>
+    <table><thead><tr><th>Ítem</th><th class="num">Total edificio</th><th class="num">Tu parte</th></tr></thead><tbody>${items.map(it=>`<tr><td>${esc(it.categoria)}${it.descripcion?' <span class="muted">'+esc(it.descripcion)+'</span>':''}</td><td class="num">${clp(it.monto)}</td><td class="num">${clp(parte(it))}</td></tr>`).join('')}
+    <tr class="tot"><td>Total a pagar</td><td class="num">${clp(g.total)}</td><td class="num">${clp(mio.monto)}</td></tr></tbody></table>${banco}`
+  : `${cab}<h1>Gastos comunes ${esc(mes)}</h1><p class="sub">Total ${clp(g.total)} · Vence ${dmy(g.vence)} · ${g.publicado?'Publicado':'Borrador'} · ${us.filter(u=>u.pagado).length} de ${us.length} unidades pagadas</p>
+    <table><thead><tr><th>Ítem</th><th>Detalle</th><th class="num">Monto</th></tr></thead><tbody>${items.map(it=>`<tr><td>${esc(it.categoria)}</td><td>${esc(it.descripcion||'')}</td><td class="num">${clp(it.monto)}</td></tr>`).join('')}<tr class="tot"><td>Total</td><td></td><td class="num">${clp(g.total)}</td></tr></tbody></table>
+    <h2>Prorrateo por unidad</h2><table><thead><tr><th>Unidad</th><th>Propietario</th><th class="num">Alícuota</th><th class="num">Monto</th><th>Estado</th></tr></thead><tbody>${us.map(u=>`<tr><td>${esc(u.depto)}</td><td>${esc(S.unidades[u.depto]?.prop||'')}</td><td class="num">${Number(u.alicuota)}%</td><td class="num">${clp(u.monto)}</td><td>${u.pagado?'Pagado '+dmy(u.pagado_at):'Pendiente'}</td></tr>`).join('')}
+    <tr class="tot"><td>Total</td><td></td><td class="num">${us.reduce((a,u)=>a+Number(u.alicuota),0).toFixed(2)}%</td><td class="num">${clp(us.reduce((a,u)=>a+Number(u.monto),0))}</td><td></td></tr></tbody></table>${banco}`);
 }
 
 // RESERVAS
@@ -393,7 +487,7 @@ VIEWS.mensajes = function(){
       // marcar leído
       const field=resid?'no_leido_residente':'no_leido_staff'; T('conversaciones').update({[field]:false}).eq('id',cid).eq(field,true).then(()=>{}); });
     $('#fMsg').addEventListener('submit', async e=>{ e.preventDefault(); const inp=$('[name=t]',e.target); const t=inp.value.trim(); if(!t) return; inp.value=''; try{
-      await q(T('conversaciones').upsert({id:cid, canal, depto, ultimo:t.slice(0,80), ultimo_ts:now(), ultimo_uid:S.uid, no_leido_staff: resid, no_leido_residente: !resid}));
+      await q(T('conversaciones').upsert({edificio_id:S.me.edificio_id, id:cid, canal, depto, ultimo:t.slice(0,80), ultimo_ts:now(), ultimo_uid:S.uid, no_leido_staff: resid, no_leido_residente: !resid}));
       await q(T('mensajes').insert({conv_id:cid, texto:t, uid:S.uid, rol:role()}));
     }catch(err){ toast('Error: '+errMsg(err)); } });
   }
@@ -410,6 +504,45 @@ VIEWS.comunicados = function(){
 function formComunicado(c={}){
   const m=modal(`<h3>${c.id?'Editar':'Nuevo'} comunicado</h3><form id="fC"><label class="f"><span>Título</span><input type="text" name="titulo" value="${esc(c.titulo||'')}" required></label><label class="f"><span>Mensaje</span><textarea name="cuerpo" required style="min-height:140px">${esc(c.cuerpo||'')}</textarea></label><label class="f"><span>Adjunto (PDF o imagen, opcional)</span><input type="file" name="adj" accept="application/pdf,image/*"></label><button class="btn full">Publicar</button></form>`);
   $('#fC',m).addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); const b=$('button',e.target); busy(b,true); try{ let adjunto=c.adjunto||''; const f=$('[name=adj]',m).files[0]; if(f) adjunto=await uploadFile(f,'comunicados'); if(c.id) await q(T('comunicados').update({titulo:d.titulo.trim(), cuerpo:d.cuerpo.trim(), adjunto, editado:now()}).eq('id',c.id)); else await q(T('comunicados').insert({titulo:d.titulo.trim(), cuerpo:d.cuerpo.trim(), adjunto, uid:S.uid, rol:realRole()})); closeModal(); toast('Publicado'); }catch(err){ toast('Error: '+errMsg(err)); busy(b,false); } });
+}
+
+// ENCUESTAS (un voto por unidad; los totales vienen de la función resultados_encuestas)
+VIEWS.encuestas = function(){
+  const r=role(); const puede=['comite','admin'].includes(r); const resid=['residente','propietario'].includes(r);
+  setMain(`<h1>Encuestas</h1>${puede?'<div style="margin-bottom:10px"><button class="btn" id="bNewEn">+ Nueva encuesta</button></div>':''}<div id="enList" class="list"><div class="empty">Cargando…</div></div>`);
+  $('#bNewEn')?.addEventListener('click',()=>formEncuesta());
+  let docs=[], mios={}, res={};
+  const abierta=e=>e.estado==='abierta'&&(!e.cierra||e.cierra>=todayStr());
+  const draw=()=>{ const el=$('#enList'); if(!el) return; const nUn=Object.keys(S.unidades).length;
+    el.innerHTML=docs.map(e=>{ const ab=abierta(e), ops=e.opciones||[], rs=res[e.id]||[], mio=mios[e.id];
+      const habil=resid&&ab&&(!e.solo_propietarios||r==='propietario'); const verRes=puede||!ab||!!mio;
+      const tot=rs.reduce((a,x)=>a+x.n,0), totAl=rs.reduce((a,x)=>a+Number(x.alicuota),0);
+      return `<div class="item static" data-en="${e.id}"><div class="hd"><b>${esc(e.titulo)}</b><span class="pill ${ab?'ok':'mu'}">${ab?'Abierta':'Cerrada'}</span></div>
+      ${e.descripcion?`<div style="margin-top:6px;white-space:pre-wrap">${esc(e.descripcion)}</div>`:''}
+      <div class="meta">${e.cierra?(ab?'Cierra el ':'Cerró el ')+fmtDay(e.cierra)+' · ':''}${e.solo_propietarios?'Solo propietarios · ':''}Un voto por unidad${verRes?` · ${tot} de ${nUn} unidades han votado`:''}</div>
+      ${habil?(myDepto()?`<form style="margin-top:10px">${ops.map((o,i)=>`<label class="sw" style="margin-bottom:6px"><input type="radio" name="op" value="${i}" ${mio&&mio.opcion===i?'checked':''} required> ${esc(o)}</label>`).join('')}<div class="row" style="margin-top:4px"><button class="btn sm">${mio?'Cambiar voto':'Votar'}</button>${mio?`<span class="small muted">Tu unidad votó el ${fmtDate(mio.ts)}</span>`:''}</div></form>`:'<div class="note" style="margin-top:10px">Tu usuario no tiene departamento asignado.</div>')
+        :(resid&&mio?`<div class="small muted" style="margin-top:8px">Tu unidad votó: <b>${esc(ops[mio.opcion]||'')}</b></div>`:(resid&&ab?'<div class="small muted" style="margin-top:8px">Esta votación es solo para propietarios.</div>':''))}
+      ${verRes?`<div style="margin-top:12px">${ops.map((o,i)=>{ const x=rs.find(y=>y.opcion===i)||{n:0,alicuota:0}; const pct=tot?Math.round(x.n/tot*100):0; return `<div style="margin-bottom:8px"><div class="row" style="justify-content:space-between;font-size:13px"><span>${esc(o)}</span><span class="muted">${x.n} ${x.n===1?'voto':'votos'} · ${pct}%${totAl?' · alícuota '+Number(x.alicuota).toFixed(2)+'%':''}</span></div><div class="bar"><i style="width:${pct}%;background:var(--p)"></i></div></div>`; }).join('')}</div>`
+        :(habil?'<div class="small muted" style="margin-top:8px">Verás los resultados cuando tu unidad vote o al cerrar la encuesta.</div>':'')}
+      ${puede?`<div class="row" style="margin-top:8px;gap:6px"><button class="btn sec sm" data-est="${e.estado==='abierta'?'cerrada':'abierta'}">${e.estado==='abierta'?'Cerrar votación':'Reabrir'}</button><button class="btn sec sm" data-del>Eliminar</button></div>`:''}</div>`; }).join('')||'<div class="empty">Sin encuestas</div>'; };
+  const w=watch(['encuestas','votos'], async()=>{ const [e,v,rs]=await Promise.all([q(T('encuestas').select('*').order('ts',{ascending:false}).limit(100)), q(T('votos').select('*')), q(sb.rpc('resultados_encuestas'))]); return {e,v,rs}; },
+    ({e,v,rs})=>{ docs=e; mios={}; v.filter(x=>x.depto===myDepto()).forEach(x=>mios[x.encuesta_id]=x); res={}; rs.forEach(x=>(res[x.encuesta_id]=res[x.encuesta_id]||[]).push(x)); draw(); });
+  $('#enList').addEventListener('submit', async ev=>{ ev.preventDefault(); const id=ev.target.closest('[data-en]').dataset.en; const op=new FormData(ev.target).get('op'); if(op==null) return;
+    try{ await q(T('votos').upsert({edificio_id:S.me.edificio_id, encuesta_id:id, depto:myDepto(), opcion:Number(op), uid:S.uid, ts:now()})); toast('Voto registrado'); w.reload(); }catch(err){ toast('No se pudo registrar el voto: '+errMsg(err)); } });
+  $('#enList').addEventListener('click', async ev=>{ const est=ev.target.closest('[data-est]'), del=ev.target.closest('[data-del]'); if(!est&&!del) return; const id=ev.target.closest('[data-en]').dataset.en;
+    try{ if(est) await q(T('encuestas').update({estado:est.dataset.est}).eq('id',id)); else if(await confirmBox('¿Eliminar la encuesta y sus votos?')) await q(T('encuestas').delete().eq('id',id)); w.reload(); }catch(err){ toast('Error: '+errMsg(err)); } });
+};
+function formEncuesta(){
+  const m=modal(`<h3>Nueva encuesta</h3><form id="fEn"><label class="f"><span>Pregunta</span><input type="text" name="titulo" required placeholder="Ej: ¿Aprobamos pintar la fachada?"></label>
+  <label class="f"><span>Detalle (opcional)</span><textarea name="descripcion"></textarea></label>
+  <label class="f"><span>Opciones (una por línea)</span><textarea name="opciones" required>${['Sí','No','Me abstengo'].join('\n')}</textarea></label>
+  <label class="f"><span>Último día para votar (opcional)</span><input type="date" name="cierra" min="${todayStr()}"></label>
+  <label class="sw" style="margin-bottom:10px"><input type="checkbox" name="solo_propietarios"> Solo votan propietarios</label>
+  <p class="small muted">Cada unidad emite un voto y puede cambiarlo mientras la encuesta esté abierta. Nadie ve el voto de otra unidad, solo los totales. Las opciones no se pueden editar después de publicar.</p>
+  <button class="btn full">Publicar encuesta</button></form>`);
+  $('#fEn',m).addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); const b=$('button',e.target);
+    const opciones=[...new Set(d.opciones.split('\n').map(x=>x.trim()).filter(Boolean))]; if(opciones.length<2){ toast('Escribe al menos dos opciones'); return; }
+    busy(b,true); try{ await q(T('encuestas').insert({titulo:d.titulo.trim(), descripcion:d.descripcion.trim(), opciones, cierra:d.cierra||null, solo_propietarios:!!d.solo_propietarios, uid:S.uid})); closeModal(); toast('Encuesta publicada'); }catch(err){ toast('Error: '+errMsg(err)); busy(b,false); } });
 }
 
 // ENCOMIENDAS
@@ -569,12 +702,14 @@ ADMIN.edificio = function(el){
   <label class="f"><span>Email administración</span><input type="email" name="email" value="${esc(c.email||'')}"></label>
   <label class="f"><span>Datos bancarios para transferir gastos comunes (visibles a residentes)</span><textarea name="datos_bancarios" placeholder="Banco, tipo de cuenta, número, RUT, correo">${esc(c.datos_bancarios||'')}</textarea></label>
   <label class="f"><span>Color principal</span><input type="color" name="color" value="${esc(c.color||'#1e5eff')}" style="width:60px;height:36px;padding:2px;border:1px solid var(--bd);border-radius:8px"></label>
-  <button class="btn">Guardar cambios</button></form></div>`;
+  <button class="btn">Guardar cambios</button></form></div>
+  <div class="card"><h3>Invitar a la comunidad</h3><p class="small muted">Comparte este enlace con residentes, conserjes y empresas. Al crear su cuenta quedarán asociados a este edificio y pendientes de tu aprobación en Usuarios.</p><div class="row wrap"><input type="text" id="invUrl" class="grow" readonly value="${esc(location.origin+location.pathname+'?e='+(c.codigo||''))}"><button type="button" class="btn sec" id="bInv">Copiar enlace</button></div><p class="small muted" style="margin:8px 0 0">Código de invitación: <code>${esc(c.codigo||'')}</code></p></div>`;
+  $('#bInv',el).addEventListener('click', async()=>{ const i=$('#invUrl',el); try{ await navigator.clipboard.writeText(i.value); toast('Enlace copiado'); }catch(e){ i.select(); toast('Copia el enlace seleccionado'); } });
   let newLogo=null;
   $('#bLogo',el).addEventListener('click',()=>$('#logoIn',el).click());
   $('#logoIn',el).addEventListener('change', async e=>{ const f=e.target.files[0]; if(!f) return; try{ toast('Subiendo logo…'); newLogo=await uploadImage(f,'logo'); $('#logoPrev',el).innerHTML=`<img src="${fotoUrl(newLogo)}">`; toast('Logo listo, guarda los cambios'); }catch(err){ toast('Error: '+errMsg(err)); } });
   $('#bLogoDel',el)?.addEventListener('click',()=>{ newLogo=''; $('#logoPrev',el).innerHTML='🏢'; });
-  $('#fEd',el).addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); try{ await q(T('config').update({nombre:d.nombre.trim(), direccion:d.direccion.trim(), comuna:d.comuna.trim(), telefono:d.telefono.trim(), email:d.email.trim(), datos_bancarios:d.datos_bancarios.trim(), color:d.color, ...(newLogo!==null?{logo:newLogo}:{}), actualizado:now()}).eq('id',1)); toast('Guardado'); }catch(err){ toast('Error: '+errMsg(err)); } });
+  $('#fEd',el).addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); try{ await q(T('edificios').update({nombre:d.nombre.trim(), direccion:d.direccion.trim(), comuna:d.comuna.trim(), telefono:d.telefono.trim(), email:d.email.trim(), datos_bancarios:d.datos_bancarios.trim(), color:d.color, ...(newLogo!==null?{logo:newLogo}:{}), actualizado:now()}).eq('id',S.cfg.id)); toast('Guardado'); }catch(err){ toast('Error: '+errMsg(err)); } });
 };
 ADMIN.usuarios = function(el){
   const us=Object.values(S.users); const pend=us.filter(u=>u.estado==='pendiente'); const act=us.filter(u=>u.estado!=='pendiente');
@@ -589,15 +724,15 @@ ADMIN.unidades = function(el){
   <form id="fU" class="row wrap" style="margin-bottom:12px"><input type="text" name="depto" placeholder="Depto (ej: 1204)" required style="width:130px"><input type="number" name="alicuota" placeholder="Alícuota %" step="0.0001" min="0" required style="width:120px"><input type="text" name="prop" placeholder="Propietario (opcional)" class="grow"><button class="btn">Agregar</button></form>
   <details><summary>Carga masiva (pegar: depto;alícuota;propietario por línea)</summary><textarea id="bulk" placeholder="101;1.25;Juan Pérez&#10;102;1.30;"></textarea><button class="btn sec sm" id="bBulk" style="margin-top:6px">Cargar</button></details>
   <div style="overflow:auto;margin-top:10px"><table><thead><tr><th>Unidad</th><th class="num">Alícuota</th><th>Propietario</th><th></th></tr></thead><tbody>${us.map(u=>`<tr><td>${esc(u.depto)}</td><td class="num"><input type="number" value="${Number(u.alicuota)}" step="0.0001" data-al="${esc(u.depto)}" style="width:100px;padding:4px 6px;text-align:right"></td><td><input type="text" value="${esc(u.prop||'')}" data-pr="${esc(u.depto)}" style="padding:4px 6px"></td><td><button class="btn sec sm" data-del="${esc(u.depto)}">✕</button></td></tr>`).join('')||'<tr><td colspan="4" class="muted">Sin unidades</td></tr>'}</tbody></table></div></div>`;
-  $('#fU',el).addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); try{ await q(T('unidades').upsert({depto:d.depto.trim(), alicuota:Number(d.alicuota), prop:d.prop.trim()})); e.target.reset(); toast('Unidad agregada'); }catch(err){ toast(errMsg(err)); } });
-  $('#bBulk',el).addEventListener('click', async()=>{ const lines=$('#bulk',el).value.split('\n').map(l=>l.trim()).filter(Boolean); const rows=lines.map(l=>{ const [d,a,p]=l.split(/[;,\t]/); return d?{depto:d.trim(), alicuota:Number(String(a||'0').replace(',','.'))||0, prop:(p||'').trim()}:null; }).filter(Boolean); if(!rows.length) return; try{ await q(T('unidades').upsert(rows)); toast(rows.length+' unidades cargadas'); }catch(err){ toast(errMsg(err)); } });
+  $('#fU',el).addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); try{ await q(T('unidades').upsert({edificio_id:S.me.edificio_id, depto:d.depto.trim(), alicuota:Number(d.alicuota), prop:d.prop.trim()})); e.target.reset(); toast('Unidad agregada'); }catch(err){ toast(errMsg(err)); } });
+  $('#bBulk',el).addEventListener('click', async()=>{ const lines=$('#bulk',el).value.split('\n').map(l=>l.trim()).filter(Boolean); const rows=lines.map(l=>{ const [d,a,p]=l.split(/[;,\t]/); return d?{edificio_id:S.me.edificio_id, depto:d.trim(), alicuota:Number(String(a||'0').replace(',','.'))||0, prop:(p||'').trim()}:null; }).filter(Boolean); if(!rows.length) return; try{ await q(T('unidades').upsert(rows)); toast(rows.length+' unidades cargadas'); }catch(err){ toast(errMsg(err)); } });
   el.addEventListener('change', async e=>{ const t=e.target; try{ if(t.dataset.al) await q(T('unidades').update({alicuota:Number(t.value)||0}).eq('depto',t.dataset.al)); if(t.dataset.pr) await q(T('unidades').update({prop:t.value.trim()}).eq('depto',t.dataset.pr)); }catch(err){ toast(errMsg(err)); } });
   el.addEventListener('click', async e=>{ const b=e.target.closest('[data-del]'); if(b&&await confirmBox('¿Eliminar unidad '+b.dataset.del+'?')) await q(T('unidades').delete().eq('depto',b.dataset.del)); });
 };
 ADMIN.espacios = function(el){
   const esp=S.cfg?.espacios||[];
   el.innerHTML=`<div class="card"><h3>Áreas comunes reservables</h3><div class="list">${esp.map((e,i)=>`<div class="item static"><div class="hd"><b>${esc(e.nombre)}</b><span class="row" style="gap:4px"><button class="btn sec sm" data-ed="${i}">Editar</button><button class="btn sec sm" data-del="${i}">✕</button></span></div><div class="meta">Capacidad ${e.capacidad} · ${e.desde}–${e.hasta} · máx ${e.maxHoras} h · ${e.anticipacionDias} días anticipación · ${e.aprobacion?'requiere aprobación':'automática'}${e.costo?' · '+clp(e.costo):''}</div></div>`).join('')||'<div class="muted">Sin espacios</div>'}</div><div class="row" style="margin-top:10px;gap:6px"><button class="btn" id="bAdd">+ Agregar espacio</button>${esp.length?'':'<button class="btn sec" id="bDef">Cargar ejemplos (quincho, salón, gimnasio, sala de juegos)</button>'}</div></div>`;
-  const save=arr=>q(T('config').update({espacios:arr}).eq('id',1));
+  const save=arr=>q(T('edificios').update({espacios:arr}).eq('id',S.cfg.id));
   const form=(e={}, idx=-1)=>{ const m=modal(`<h3>${idx>=0?'Editar':'Nuevo'} espacio</h3><form id="fE"><label class="f"><span>Nombre</span><input type="text" name="nombre" value="${esc(e.nombre||'')}" required></label><div class="row"><label class="f grow"><span>Capacidad</span><input type="number" name="capacidad" value="${e.capacidad||10}"></label><label class="f grow"><span>Costo (CLP)</span><input type="number" name="costo" value="${e.costo||0}"></label></div><div class="row"><label class="f grow"><span>Desde</span><input type="time" name="desde" value="${e.desde||'09:00'}" required></label><label class="f grow"><span>Hasta</span><input type="time" name="hasta" value="${e.hasta||'22:00'}" required></label></div><div class="row"><label class="f grow"><span>Máx. horas por reserva</span><input type="number" name="maxHoras" value="${e.maxHoras||2}" min="1"></label><label class="f grow"><span>Anticipación máx. (días)</span><input type="number" name="anticipacionDias" value="${e.anticipacionDias||30}" min="1"></label></div><label class="sw"><input type="checkbox" name="aprobacion" ${e.aprobacion?'checked':''}> Requiere aprobación del comité/administración</label><button class="btn full" style="margin-top:12px">Guardar</button></form>`);
     $('#fE',m).addEventListener('submit', async ev=>{ ev.preventDefault(); const d=formData(ev.target); const obj={id:e.id||seg(d.nombre).toLowerCase()+'_'+rnd().slice(-4), nombre:d.nombre.trim(), capacidad:Number(d.capacidad), costo:Number(d.costo)||0, desde:d.desde, hasta:d.hasta, maxHoras:Number(d.maxHoras)||1, anticipacionDias:Number(d.anticipacionDias)||30, aprobacion:!!d.aprobacion}; const arr=esp.slice(); if(idx>=0) arr[idx]=obj; else arr.push(obj); closeModal(); try{ await save(arr); toast('Guardado'); }catch(err){ toast(errMsg(err)); } }); };
   $('#bAdd',el).addEventListener('click',()=>form());

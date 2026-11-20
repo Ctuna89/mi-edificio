@@ -18,9 +18,32 @@ jobs:
       - name: Sintaxis JS
         run: |
           for f in web/*.js; do node --check "$f"; done
+      - name: Generador de Excel
+        run: node -e "const u=require('./web/xlsx.js').build([{name:'A',rows:[['x',1]]}]); if(u[0]!==0x50||u[1]!==0x4b) process.exit(1)"
       - name: JSON del manifest
         run: node -e "JSON.parse(require('fs').readFileSync('web/manifest.webmanifest','utf8'))"
       - name: config.js sin claves reales
         run: |
           grep -q 'TU-PROYECTO.supabase.co' web/config.js
           grep -q '"TU_ANON_KEY"' web/config.js
+
+  base-de-datos:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      PGHOST: localhost
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGOPTIONS: -c client_min_messages=warning
+    steps:
+      - uses: actions/checkout@v4
+      - name: schema.sql (instalación nueva, idempotencia, RLS, migración)
+        run: supabase/tests/run.sh

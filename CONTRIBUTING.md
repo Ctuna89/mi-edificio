@@ -9,6 +9,7 @@ Antes de proponer un cambio, ten presentes las decisiones de diseño (más detal
 - **Sin frameworks ni build.** El frontend es HTML + JS vanilla en `web/`. No agregues dependencias ni pasos de compilación.
 - **La seguridad vive en la base de datos.** Todo permiso se expresa como política RLS en `supabase/schema.sql`. El frontend solo decide qué mostrar.
 - **`schema.sql` es idempotente** y debe seguir siéndolo: se tiene que poder ejecutar completo varias veces sin error ni pérdida de datos.
+- **Cada fila pertenece a un edificio.** Toda tabla nueva lleva `edificio_id` y sus políticas se crean con el helper `_pol`, que las limita al edificio del usuario.
 - **UI en español de Chile.**
 
 ## Entorno de desarrollo
@@ -34,7 +35,17 @@ Antes de proponer un cambio, ten presentes las decisiones de diseño (más detal
 1. Abre un *issue* describiendo el problema o la idea antes de un cambio grande.
 2. Haz un *fork*, crea una rama (`feat/encuestas`, `fix/reserva-solapada`, …) y envía un *pull request*.
 3. En el PR indica qué roles probaste (residente, conserje, comité, admin, mantención) y, si tocaste `schema.sql`, que lo ejecutaste dos veces seguidas sin errores.
-4. La CI verifica la sintaxis de los archivos JS; debe pasar.
+4. La CI verifica la sintaxis de los archivos JS y ejecuta las pruebas del esquema; debe pasar.
+
+## Pruebas del esquema
+
+Si tocas `supabase/schema.sql`, ejecuta las pruebas en un Postgres local (16 o superior) y agrega casos a `supabase/tests/rls.sql` para los permisos nuevos:
+
+```bash
+PGHOST=localhost PGUSER=postgres supabase/tests/run.sh
+```
+
+Crea y borra las bases `mi_edificio_test` y `mi_edificio_mig`; no lo apuntes a un servidor con datos reales.
 
 ## Reportar vulnerabilidades
 
@@ -42,4 +53,4 @@ Si encuentras un problema de seguridad (por ejemplo, una política RLS que permi
 
 ## Ideas para aportar
 
-Revisa la sección "Próximos pasos sugeridos" del `README.md`: notificaciones push, exportar gastos comunes, encuestas del comité y soporte multi-edificio.
+Revisa la sección "Próximos pasos sugeridos" del `README.md`.
