@@ -33,12 +33,18 @@ VIAddVersionKey "LegalCopyright" "Licencia MIT"
 
 !include "MUI2.nsh"
 !include "LogicLib.nsh"
+!include "nsDialogs.nsh"
+!include "WinMessages.nsh"
+
+!define GUIA_NUBE "https://github.com/Ctuna89/mi-edificio#instalaci%C3%B3n-alternativa-supabase"
+Var RadioLocal
+Var RadioNube
 
 !define MUI_ABORTWARNING
 !define MUI_ICON "${ETAPA}\icono.ico"
 !define MUI_UNICON "${ETAPA}\icono.ico"
 !define MUI_WELCOMEPAGE_TITLE "Instalar ${NOMBRE} ${VERSION}"
-!define MUI_WELCOMEPAGE_TEXT "Este asistente instala ${NOMBRE} en este computador, que quedará como servidor del edificio.$\r$\n$\r$\nLa app, la base de datos y los archivos se guardan aquí mismo: no se necesita ninguna cuenta ni servicio externo.$\r$\n$\r$\nConviene instalarlo en un computador que permanezca encendido, como el de conserjería o administración."
+!define MUI_WELCOMEPAGE_TEXT "${NOMBRE} es una app para residentes, conserjería, comité y administración de un edificio.$\r$\n$\r$\nEste asistente te preguntará primero dónde quieres que funcione y, si eliges este computador, lo deja instalado y listo para usar.$\r$\n$\r$\nLo habitual es instalarlo en un computador que permanezca encendido, como el de conserjería o administración."
 !define MUI_COMPONENTSPAGE_SMALLDESC
 !define MUI_FINISHPAGE_TITLE "${NOMBRE} quedó instalado"
 !define MUI_FINISHPAGE_TEXT "Al abrirlo se mostrará en tu navegador. La primera persona que cree una cuenta configura el edificio y queda como administradora.$\r$\n$\r$\nSi Windows pregunta por el acceso a la red, permítelo en redes privadas para que otros equipos del edificio puedan entrar.$\r$\n$\r$\nPara que los residentes entren desde sus teléfonos, revisa $\"Acceso desde internet$\" en la documentación."
@@ -49,6 +55,7 @@ VIAddVersionKey "LegalCopyright" "Licencia MIT"
 !define MUI_FINISHPAGE_LINK_LOCATION "https://github.com/Ctuna89/mi-edificio"
 
 !insertmacro MUI_PAGE_WELCOME
+Page custom PaginaDonde PaginaDondeSalir
 !insertmacro MUI_PAGE_LICENSE "${ETAPA}\LICENSE.txt"
 !insertmacro MUI_PAGE_COMPONENTS
 !insertmacro MUI_PAGE_DIRECTORY
@@ -57,6 +64,36 @@ VIAddVersionKey "LegalCopyright" "Licencia MIT"
 !insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "Spanish"
+
+; Primera decisión: ¿en este computador o en la nube? Este instalador solo hace lo primero;
+; para la nube muestra la guía y termina, sin instalar nada. (En modo silencioso no se pregunta.)
+Function PaginaDonde
+  !insertmacro MUI_HEADER_TEXT "¿Dónde va a funcionar ${NOMBRE}?" "Elige una opción para continuar."
+  nsDialogs::Create 1018
+  Pop $0
+  ${NSD_CreateRadioButton} 0 0 100% 12u "En este computador  (recomendado: más simple)"
+  Pop $RadioLocal
+  ${NSD_AddStyle} $RadioLocal ${WS_GROUP}
+  ${NSD_CreateLabel} 12u 14u 96% 34u "Todo queda instalado y guardado aquí, sin cuentas ni servicios externos. A cambio, este computador debe permanecer encendido y conectado: si se apaga, la app deja de responder. Conviene respaldar los datos en una nube (se configura después, dentro de la app)."
+  Pop $0
+  ${NSD_CreateRadioButton} 0 56u 100% 12u "En la nube  (avanzado: más complejo)"
+  Pop $RadioNube
+  ${NSD_CreateLabel} 12u 70u 96% 42u "No depende de este computador, pero hay que crear y configurar cuentas en servicios externos (Supabase y un hosting web), lo que requiere conocimientos técnicos y puede tener costo. Este instalador no lo hace: te muestra la guía y termina sin instalar nada. Es una opción todavía experimental."
+  Pop $0
+  ${NSD_Check} $RadioLocal
+  nsDialogs::Show
+FunctionEnd
+
+Function PaginaDondeSalir
+  ${NSD_GetState} $RadioNube $0
+  ${If} $0 == ${BST_CHECKED}
+    MessageBox MB_OKCANCEL|MB_ICONINFORMATION "La instalación en la nube se hace a mano, siguiendo la guía del proyecto.$\r$\n$\r$\nAl aceptar se abrirá la guía en el navegador y este instalador se cerrará sin instalar nada.$\r$\n$\r$\nSi prefieres la opción simple, cancela y elige $\"En este computador$\"." IDCANCEL seguir_aqui
+    ExecShell "open" "${GUIA_NUBE}"
+    Quit
+    seguir_aqui:
+    Abort
+  ${EndIf}
+FunctionEnd
 
 ; Detiene el servidor si está corriendo (para actualizar o desinstalar sin archivos en uso)
 !macro DetenerServidor

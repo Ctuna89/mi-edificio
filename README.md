@@ -30,7 +30,7 @@ Elige un computador que quede encendido, como el de conserjería o administraci�
 ### Windows
 
 1. Descarga `MiEdificio-Instalar-<versión>.exe` desde [Releases](https://github.com/Ctuna89/mi-edificio/releases/latest).
-2. Ábrelo y sigue el asistente: aceptar la licencia, elegir si parte junto con Windows (recomendado) y si quieres el ícono en el escritorio, e instalar. No pide permisos de administrador ni instalar nada más: trae incluidos Node.js y el programa para el acceso desde internet.
+2. Ábrelo y sigue el asistente. Lo primero que pregunta es **dónde va a funcionar**: *en este computador* (lo simple y recomendado; el computador debe quedar encendido) o *en la nube* (más complejo: el instalador no lo hace, abre la [guía de Supabase](#instalación-alternativa-supabase) y termina sin instalar nada). Eligiendo este computador: aceptar la licencia, elegir si parte junto con Windows (recomendado) y si quieres el ícono en el escritorio, e instalar. No pide permisos de administrador ni instalar nada más: trae incluidos Node.js y el programa para el acceso desde internet.
 3. Al terminar se abre la app en el navegador, en `http://localhost:8080`.
 
 Cosas que conviene saber:
