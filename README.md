@@ -70,6 +70,7 @@ Como administrador tienes el selector **"Ver como"** para revisar la interfaz de
 | Documentos (reglamento, actas, balances) | lee | lee | sube | sube | – |
 | Encomiendas | ve las suyas | registra / entrega | – | registra / entrega | – |
 | Visitas con QR | anuncia y comparte el QR | escanea, registra ingreso/salida | – | escanea, registra | – |
+| Estacionamientos de visita | ve el de su visita | ocupa / libera | ve, recibe excesos | define, ocupa / libera, recibe excesos | – |
 | Rondas NFC y bitácora (cumplimiento diario) | – | registra | ve | registra, ve | – |
 | Mantención: activos, plan preventivo, OT | – | – | ve | crea, aprueba | acepta, agenda, ejecuta, cierra |
 | Administración (edificio, usuarios, unidades, espacios, activos, empresas) | – | – | – | ✔ | – |
@@ -155,7 +156,7 @@ Lo que la app ya trae para cumplir:
 | Acceso y portabilidad | Mi cuenta → **Descargar mis datos** (JSON). |
 | Rectificación | Cada persona edita su nombre y teléfono; unidad y rol los corrige la administración. |
 | Supresión | Mi cuenta → **Eliminar mi cuenta**: borra nombre, teléfono y unidad y bloquea el acceso. El correo queda en Supabase Auth hasta que el operador elimine el usuario en *Authentication → Users*. |
-| Conservación limitada | Administración → Edificio → **Conservación de datos**: la administración fija cuántos meses se guardan visitas, rondas, encomiendas entregadas, mensajes, reservas e incidencias cerradas. Lo que supera el plazo se borra a diario. |
+| Conservación limitada | Administración → Edificio → **Conservación de datos**: la administración fija cuántos meses se guardan visitas, rondas, encomiendas entregadas, mensajes, reservas, incidencias cerradas y uso de estacionamientos. Lo que supera el plazo se borra a diario. |
 | Seguridad y mínimo acceso | RLS por rol y por edificio; cada unidad ve solo sus cobros, encomiendas, visitas y voto. |
 
 Lo que debe resolver cada comunidad (no lo hace el software):
@@ -181,6 +182,16 @@ Al anunciar una visita, el residente obtiene un QR (con el nombre del edificio, 
 Al anunciar la visita se puede marcar que **necesita estacionamiento**. En Administración → Edificio, la administración decide si en ese caso la patente es obligatoria, pensado para accesos con lectura automática de patentes (LPR). La patente se guarda normalizada (mayúsculas, sin espacios ni guiones) para poder compararla con lo que lea la cámara. La app no se conecta a ningún sistema LPR: deja el dato disponible en la tabla `visitas`.
 
 El QR no contiene datos personales, solo un código aleatorio: para saber a qué visita corresponde hay que tener sesión de conserjería o administración en ese edificio. La lectura usa el lector de códigos del navegador cuando existe (Chrome en Android) y, si no (iPhone, Firefox), una librería incluida en `web/vendor/`. La cámara requiere que la app esté publicada con HTTPS.
+
+## Estacionamientos de visita
+
+- **Administración → Estacionamientos**: se crean los estacionamientos de visita (por ejemplo V1…V6), se indica cuáles están reservados (discapacidad, carga y descarga, etc.) y se configuran dos tiempos en minutos.
+- **Conserjería** ve el tablero en el módulo Estacionamientos: toca uno libre para marcarlo ocupado (departamento, patente y, si corresponde, la visita anunciada) y uno ocupado para liberarlo. Cada casilla muestra cuánto tiempo lleva y cambia de color al superar cada tiempo. Si una visita anunciada con estacionamiento registra su ingreso, la app lleva directo a elegirle un lugar.
+- **Avisos**: al ocupar se avisa al residente con el tiempo máximo; al cumplirse el primer tiempo recibe una alerta; al cumplirse el segundo se informa a administración y comité, y el uso queda en la pestaña **Excedidos** como respaldo para cursar una multa según el reglamento. La app no calcula ni cobra multas.
+- Los avisos al teléfono requieren las notificaciones push configuradas; sin ellas, los colores, la pestaña Excedidos y el aviso en la pantalla Visitas del residente funcionan igual.
+- Los tiempos los revisa una tarea cada 5 minutos (`pg_cron`). Sin esa extensión, se revisan solo mientras conserjería o administración tienen abierto el módulo.
+
+La hora de inicio y de término las pone la base de datos, no el teléfono de conserjería, y no se pueden editar desde la app.
 
 ## NFC
 

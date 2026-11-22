@@ -36,6 +36,8 @@ create table if not exists public.edificios (
   privacidad    text default '',          -- aviso de privacidad que se muestra al registrarse
   retencion     jsonb not null default '{}'::jsonb,  -- plazos de conservación en meses, por tipo de dato
   visita_patente boolean not null default false,     -- exigir patente a visitas con estacionamiento
+  est_alerta_min int not null default 0,             -- estacionamiento de visita: minutos para avisar al residente
+  est_aviso_min  int not null default 0,             -- ... y para informar a administración y comité
   creado_por    uuid,
   creado        timestamptz default now(),
   actualizado   timestamptz default now()
@@ -43,8 +45,12 @@ create table if not exists public.edificios (
 alter table public.edificios add column if not exists privacidad text default '';
 -- true: una visita que necesita estacionamiento debe indicar su patente (p. ej. acceso con lectura de patentes, LPR)
 alter table public.edificios add column if not exists visita_patente boolean not null default false;
+-- Estacionamientos de visita: minutos tras los cuales se avisa al residente y, después, a
+-- administración y comité (0 = sin aviso)
+alter table public.edificios add column if not exists est_alerta_min int not null default 0;
+alter table public.edificios add column if not exists est_aviso_min int not null default 0;
 -- Plazos de conservación en meses, definidos por la administración de cada edificio.
--- Claves: visitas, registros, encomiendas, mensajes, reservas, incidencias. Sin clave o 0 = no se borra.
+-- Claves: visitas, registros, encomiendas, mensajes, reservas, incidencias, estacionamientos. Sin clave o 0 = no se borra.
 alter table public.edificios add column if not exists retencion jsonb not null default '{}'::jsonb;
 
 -- Ajustes de la instalación (1 fila). Sin políticas RLS: solo se edita desde el SQL Editor.
@@ -320,6 +326,34 @@ create table if not exists public.push_subs (
   creado      timestamptz default now()
 );
 
+-- Estacionamientos de visita y su ocupación (un uso abierto = fin nulo)
+create table if not exists public.estacionamientos (
+  id          uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  nombre      text not null,
+  reservado   text default '',          -- p. ej. 'Discapacidad'; vacío = uso general
+  orden       int default 0,
+  creado      timestamptz default now()
+);
+
+create table if not exists public.estacionamiento_usos (
+  id          uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  estacionamiento_id uuid references public.estacionamientos(id) on delete set null,
+  est_nombre  text default '',          -- copia del nombre, para el historial
+  depto       text not null default '',
+  patente     text default '',
+  visita_id   uuid references public.visitas(id) on delete set null,
+  nota        text default '',
+  inicio      timestamptz not null default now(),
+  fin         timestamptz,
+  registrado_por uuid references public.usuarios(id),
+  liberado_por   uuid,
+  alerta_residente_at timestamptz,      -- cuándo se avisó al residente
+  aviso_admin_at      timestamptz       -- cuándo se informó a administración y comité
+);
+create unique index if not exists est_usos_abierto_idx on public.estacionamiento_usos (estacionamiento_id) where fin is null;
+
 -- Archivos de filas borradas por plazo de conservación, pendientes de eliminar del bucket.
 -- Los elimina la app de la administración (la base de datos no puede borrar archivos de Storage).
 create table if not exists public.archivos_por_borrar (
@@ -358,7 +392,7 @@ begin
   end if;
 
   select id into def from public.edificios order by creado, id limit 1;
-  foreach t in array array['empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar']
+  foreach t in array array['empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos']
   loop
     execute format('alter table public.%I add column if not exists edificio_id uuid references public.edificios(id) on delete cascade', t);
     execute format('select count(*) from public.%I where edificio_id is null', t) into n;
@@ -446,7 +480,7 @@ $$;
 do $$
 declare t text;
 begin
-  foreach t in array array['empresas','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar']
+  foreach t in array array['empresas','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos']
   loop
     execute format('alter table public.%I alter column edificio_id set default public.mi_edificio()', t);
   end loop;
@@ -628,6 +662,36 @@ end $$;
 drop trigger if exists visitas_antes_insert on public.visitas;
 create trigger visitas_antes_insert before insert on public.visitas
 for each row execute function public.visitas_antes_insert();
+
+-- Uso de estacionamientos: la hora de inicio y de término las pone la base de datos, y los
+-- avisos solo los marca la revisión periódica (privado.revisar_estacionamientos)
+create or replace function public.est_usos_antes() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare e public.estacionamientos;
+begin
+  if auth.uid() is null or current_setting('mi_edificio.interno', true) = '1' then return new; end if;
+  if tg_op = 'INSERT' then
+    select * into e from public.estacionamientos where id = new.estacionamiento_id and edificio_id = new.edificio_id;
+    if not found then raise exception 'Estacionamiento no válido'; end if;
+    if exists (select 1 from public.estacionamiento_usos where estacionamiento_id = e.id and fin is null) then
+      raise exception 'Ese estacionamiento ya está ocupado';
+    end if;
+    if coalesce(trim(new.depto), '') = '' then raise exception 'Indica el departamento que recibe la visita'; end if;
+    new.est_nombre := e.nombre; new.inicio := now(); new.fin := null; new.liberado_por := null;
+    new.registrado_por := auth.uid(); new.alerta_residente_at := null; new.aviso_admin_at := null;
+    new.depto := trim(new.depto); new.patente := upper(regexp_replace(coalesce(new.patente, ''), '[^A-Za-z0-9]', '', 'g'));
+  else
+    new.inicio := old.inicio; new.estacionamiento_id := old.estacionamiento_id; new.est_nombre := old.est_nombre;
+    new.depto := old.depto; new.registrado_por := old.registrado_por;
+    new.alerta_residente_at := old.alerta_residente_at; new.aviso_admin_at := old.aviso_admin_at;
+    if old.fin is not null then new.fin := old.fin; new.liberado_por := old.liberado_por;
+    elsif new.fin is not null then new.fin := now(); new.liberado_por := auth.uid(); end if;
+  end if;
+  return new;
+end $$;
+drop trigger if exists est_usos_antes on public.estacionamiento_usos;
+create trigger est_usos_antes before insert or update on public.estacionamiento_usos
+for each row execute function public.est_usos_antes();
 
 -- Órdenes de trabajo: la empresa avanza su flujo, pero no aprueba su propio trabajo,
 -- no se reasigna la orden ni la modifica una vez cerrada
@@ -815,6 +879,70 @@ end $$;
 
 drop trigger if exists push_visita on public.visitas;
 create trigger push_visita after insert or update on public.visitas for each row execute function privado.tg_push_visita();
+-- Estacionamientos de visita -------------------------------------------------------
+create or replace function privado.dur(m int) returns text
+language sql immutable as $$
+  select case when m < 60 then m || ' min'
+              else (m / 60) || ' h' || case when m % 60 > 0 then ' ' || (m % 60) || ' min' else '' end end
+$$;
+
+create or replace function privado.tg_push_est_uso() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare lim int;
+begin
+  select est_aviso_min into lim from public.edificios where id = new.edificio_id;
+  perform privado.push(new.edificio_id, privado.usuarios_de(new.edificio_id, '{residente,propietario}', new.depto),
+    '🅿️ Tu visita ocupa el estacionamiento ' || new.est_nombre,
+    concat_ws(' · ', nullif(new.patente, ''), case when lim > 0 then 'Tiempo máximo: ' || privado.dur(lim) end), '#visitas');
+  return null;
+end $$;
+drop trigger if exists push_est_uso on public.estacionamiento_usos;
+create trigger push_est_uso after insert on public.estacionamiento_usos for each row execute function privado.tg_push_est_uso();
+
+-- Revisa los estacionamientos ocupados: al cumplirse el primer plazo avisa al residente; al
+-- cumplirse el segundo informa a administración y comité. Cada aviso se envía una sola vez.
+create or replace function privado.revisar_estacionamientos(p_e uuid default null) returns int
+language plpgsql security definer set search_path = public as $$
+declare r record; mins int; n int := 0;
+begin
+  perform set_config('mi_edificio.interno', '1', true);
+  for r in select u.*, e.est_alerta_min a, e.est_aviso_min m
+           from public.estacionamiento_usos u join public.edificios e on e.id = u.edificio_id
+           where u.fin is null and (p_e is null or u.edificio_id = p_e) and (e.est_alerta_min > 0 or e.est_aviso_min > 0)
+  loop
+    mins := floor(extract(epoch from now() - r.inicio) / 60);
+    if r.a > 0 and mins >= r.a and r.alerta_residente_at is null then
+      update public.estacionamiento_usos set alerta_residente_at = now() where id = r.id; n := n + 1;
+      perform privado.push(r.edificio_id, privado.usuarios_de(r.edificio_id, '{residente,propietario}', r.depto),
+        '🅿️ Tu visita lleva ' || privado.dur(mins) || ' estacionada',
+        'Estacionamiento ' || r.est_nombre || case when r.m > r.a then '. Al cumplir ' || privado.dur(r.m) || ' se informará a la administración.' else '' end, '#visitas');
+    end if;
+    if r.m > 0 and mins >= r.m and r.aviso_admin_at is null then
+      update public.estacionamiento_usos set aviso_admin_at = now() where id = r.id; n := n + 1;
+      perform privado.push(r.edificio_id, privado.usuarios_de(r.edificio_id, '{comite,admin}'),
+        '🅿️ Estacionamiento de visita excedido',
+        concat_ws(' · ', r.est_nombre, 'Depto ' || r.depto, nullif(r.patente, ''), privado.dur(mins)), '#estacionamientos');
+    end if;
+  end loop;
+  perform set_config('mi_edificio.interno', '', true);
+  return n;
+end $$;
+
+-- La app de conserjería la llama mientras está abierta (respaldo si no hay pg_cron)
+create or replace function public.revisar_estacionamientos() returns int
+language plpgsql security definer set search_path = public as $$
+begin
+  if not public.es_staff() then raise exception 'Sin permiso'; end if;
+  return privado.revisar_estacionamientos(public.mi_edificio());
+end $$;
+
+do $$ begin
+  create extension if not exists pg_cron;
+  perform cron.schedule('mi-edificio-estacionamientos', '*/5 * * * *', 'select privado.revisar_estacionamientos()');
+exception when others then
+  raise notice 'pg_cron no disponible: los avisos de estacionamiento solo se revisan mientras conserjería tiene la app abierta';
+end $$;
+
 drop trigger if exists push_encomienda on public.encomiendas;
 create trigger push_encomienda after insert on public.encomiendas for each row execute function privado.tg_push_encomienda();
 drop trigger if exists push_mensaje on public.mensajes;
@@ -879,6 +1007,12 @@ begin
   if m > 0 then
     delete from public.reservas where edificio_id = p_e and fecha < (public.hoy() - make_interval(months => m))::date;
     get diagnostics n = row_count; res := res || jsonb_build_object('reservas', n);
+  end if;
+
+  m := privado.meses(r, 'estacionamientos');
+  if m > 0 then
+    delete from public.estacionamiento_usos where edificio_id = p_e and fin is not null and fin < now() - make_interval(months => m);
+    get diagnostics n = row_count; res := res || jsonb_build_object('estacionamientos', n);
   end if;
 
   m := privado.meses(r, 'incidencias');
@@ -962,6 +1096,8 @@ alter table public.encuestas      enable row level security;
 alter table public.votos          enable row level security;
 alter table public.push_subs      enable row level security;
 alter table public.archivos_por_borrar enable row level security;
+alter table public.estacionamientos enable row level security;
+alter table public.estacionamiento_usos enable row level security;
 
 -- helper para (re)crear políticas sin errores. Salvo que se indique lo contrario, toda
 -- política queda además limitada a las filas del edificio del usuario.
@@ -1081,6 +1217,16 @@ select public._pol('votos','vot_upd','update','depto = public.mi_depto()','uid =
 select public._pol('push_subs','push_sel','select','uid = auth.uid()');
 select public._pol('push_subs','push_del','delete','uid = auth.uid()');
 
+-- estacionamientos de visita: el personal los ve; la administración los define.
+-- usos: conserjería/admin ocupan y liberan; cada unidad ve los de sus visitas
+select public._pol('estacionamientos','est_sel','select','public.es_staff()');
+select public._pol('estacionamientos','est_ins','insert','public.es_admin()');
+select public._pol('estacionamientos','est_upd','update','public.es_admin()');
+select public._pol('estacionamientos','est_del','delete','public.es_admin()');
+select public._pol('estacionamiento_usos','eu_sel','select','public.es_staff() or (public.es_residente() and depto = public.mi_depto())');
+select public._pol('estacionamiento_usos','eu_ins','insert','public.mi_rol() in (''conserje'',''admin'')');
+select public._pol('estacionamiento_usos','eu_upd','update','public.mi_rol() in (''conserje'',''admin'')');
+
 -- archivos_por_borrar: la administración los lee y los quita de la cola al borrarlos del bucket
 select public._pol('archivos_por_borrar','apb_sel','select','public.es_admin()');
 select public._pol('archivos_por_borrar','apb_del','delete','public.es_admin()');
@@ -1109,7 +1255,7 @@ create policy "fotos_delete" on storage.objects for delete to authenticated usin
 do $$
 declare t text;
 begin
-  foreach t in array array['edificios','empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos']
+  foreach t in array array['edificios','empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','estacionamientos','estacionamiento_usos']
   loop
     begin
       execute format('alter publication supabase_realtime add table public.%I', t);

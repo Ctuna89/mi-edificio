@@ -199,6 +199,41 @@ reset role;
 select t.ok((select count(*) = 1 and bool_and(body->>'titulo' = '🚪 Llegó tu visita' and body->'uids' = to_jsonb(array[:'a2'::uuid])) from net.llamadas), 'el ingreso avisa al residente');
 select t.soy(:'b1'); select t.ok((select count(*) = 0 from visitas where id = :'vis'), 'otro edificio no ve la visita');
 
+-- ---------- estacionamientos de visita ----------
+select t.soy(:'a1');
+insert into estacionamientos (nombre, reservado, orden) values ('V1', '', 1), ('V2', 'Discapacidad', 2);
+update edificios set est_alerta_min = 60, est_aviso_min = 120 where id = :'ea';
+select id as e1 from estacionamientos where nombre = 'V1' \gset
+select t.soy(:'a2');
+select t.ok((select count(*) = 0 from estacionamientos), 'el residente no ve la lista de estacionamientos');
+select t.falla(format($$insert into estacionamiento_usos (estacionamiento_id, depto) values (%L, '101')$$, :'e1'), 'un residente marca un estacionamiento ocupado');
+reset role; truncate net.llamadas;
+select t.soy(:'a4');
+insert into estacionamiento_usos (estacionamiento_id, depto, patente, inicio) values (:'e1', '101', 'ab-cd 12', now() - interval '5 hours') returning id as uso \gset
+select t.ok((select est_nombre = 'V1' and patente = 'ABCD12' and inicio > now() - interval '1 minute' and registrado_por = :'a4' from estacionamiento_usos where id = :'uso'), 'la hora de inicio la pone la base de datos');
+select t.falla(format($$insert into estacionamiento_usos (estacionamiento_id, depto) values (%L, '102')$$, :'e1'), 'ocupar un estacionamiento ya ocupado');
+select t.ok(public.revisar_estacionamientos() = 0, 'dentro del plazo no hay avisos');
+select t.soy(:'a2'); select t.ok((select count(*) = 1 from estacionamiento_usos), 'el residente ve el uso de su visita');
+select t.soy(:'b1'); select t.ok((select count(*) = 0 from estacionamiento_usos) and (select count(*) = 0 from estacionamientos), 'otro edificio no ve nada');
+reset role;
+select t.ok((select body->>'titulo' = '🅿️ Tu visita ocupa el estacionamiento V1' and body->>'cuerpo' = 'ABCD12 · Tiempo máximo: 2 h' from net.llamadas), 'aviso al residente al ocupar, con el tiempo máximo');
+truncate net.llamadas;
+select set_config('request.jwt.claim.sub', '', false);  -- como el sistema, sin usuario
+update estacionamiento_usos set inicio = now() - interval '65 minutes' where id = :'uso';
+select t.soy(:'a4'); select t.ok(public.revisar_estacionamientos() = 1, 'primer plazo: un aviso');
+reset role;
+select t.ok((select count(*) = 1 and bool_and(body->>'titulo' = '🅿️ Tu visita lleva 1 h 5 min estacionada' and body->'uids' = to_jsonb(array[:'a2'::uuid])) from net.llamadas), 'el primer aviso va al residente');
+select set_config('request.jwt.claim.sub', '', false);  -- como el sistema, sin usuario
+update estacionamiento_usos set inicio = now() - interval '130 minutes' where id = :'uso';
+select privado.revisar_estacionamientos(); select privado.revisar_estacionamientos();
+select t.ok((select count(*) = 2 from net.llamadas), 'cada aviso se envía una sola vez');
+select t.ok((select body->>'cuerpo' = 'V1 · Depto 101 · ABCD12 · 2 h 10 min' and body->'uids' = to_jsonb(array[:'a1'::uuid]) from net.llamadas where body->>'titulo' = '🅿️ Estacionamiento de visita excedido'), 'el segundo aviso va a administración y comité');
+select t.soy(:'a4');
+update estacionamiento_usos set aviso_admin_at = null, inicio = now(), fin = now() - interval '1 day' where id = :'uso';
+select t.ok((select aviso_admin_at is not null and inicio < now() - interval '2 hours' and fin > now() - interval '1 minute' and liberado_por = :'a4' from estacionamiento_usos where id = :'uso'), 'al liberar no se pueden alterar horas ni avisos');
+insert into estacionamiento_usos (estacionamiento_id, depto) values (:'e1', '102');
+select t.ok((select count(*) = 2 from estacionamiento_usos), 'liberado, se puede volver a ocupar');
+
 -- ---------- conservación de datos ----------
 reset role;
 insert into visitas (edificio_id, depto, nombre, rut, fecha) values (:'ea', '101', 'Visita antigua', '1-9', current_date - 400), (:'ea', '101', 'Visita reciente', '', current_date - 5), (:'eb', '101', 'Visita antigua de B', '', current_date - 400);

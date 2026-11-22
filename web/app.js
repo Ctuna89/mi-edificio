@@ -22,6 +22,8 @@ const fmtDay = ymd => { if(!ymd) return ''; const [y,m,d]=String(ymd).slice(0,10
 const fmtMonth = ym => { if(!ym) return ''; const [y,m]=ym.split('-').map(Number); return new Date(y,m-1,1).toLocaleDateString('es-CL',{month:'long',year:'numeric'}); };
 const seg = s => String(s||'').normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^A-Za-z0-9_\-]/g,'_').slice(0,60)||'x';
 const sortBy = (arr,f,desc)=>arr.slice().sort((a,b)=>{const x=f(a),y=f(b);return (x<y?-1:x>y?1:0)*(desc?-1:1);});
+const durTxt = ms => { const m=Math.max(0,Math.floor(ms/60000)); return m<60? m+' min' : Math.floor(m/60)+' h'+(m%60?' '+(m%60)+' min':''); };
+const horaDe = iso => { const d=new Date(iso); return pad(d.getHours())+':'+pad(d.getMinutes()); };
 const errMsg = e => (e&&(e.message||e.error_description||e.msg))||String(e);
 
 let toastT; function toast(m){ let t=$('.toast'); if(!t){t=document.createElement('div');t.className='toast';document.body.appendChild(t);} t.textContent=m; clearTimeout(toastT); toastT=setTimeout(()=>t.remove(),3000); }
@@ -77,7 +79,7 @@ const fotoInput=(name='fotos')=>`<label class="f"><span>Fotos (puedes tomar vari
 function viewImg(path){ modal(`<img src="${fotoUrl(path)}" style="width:100%;border-radius:10px"><div class="center" style="margin-top:10px"><button class="btn sec" data-close>Cerrar</button></div>`); }
 
 // ---------- estado ----------
-const S = { session:null, uid:null, cfg:null, me:null, users:{}, unidades:{}, empresas:{}, activos:{}, viewSubs:[], globalSubs:[], ready:false };
+const S = { session:null, uid:null, cfg:null, me:null, users:{}, unidades:{}, empresas:{}, activos:{}, estac:{}, viewSubs:[], globalSubs:[], ready:false };
 const ROLES = { residente:'Residente', propietario:'Propietario', conserje:'Conserjería', comite:'Comité', admin:'Administración', mantencion:'Empresa de mantención' };
 const CANALES = { conserjeria:'Conserjería', comite:'Comité', administracion:'Administración' };
 const canalRol = { conserjeria:'conserje', comite:'comite', administracion:'admin' };
@@ -115,6 +117,7 @@ const MODULES = [
   {id:'encuestas', ic:'🗳️', t:'Encuestas', d:'Votaciones de la comunidad', roles:['residente','propietario','comite','admin']},
   {id:'encomiendas', ic:'📦', t:'Encomiendas', d:'Paquetes recibidos', roles:['residente','propietario','conserje','admin']},
   {id:'visitas', ic:'🚪', t:'Visitas', d:'Anunciar y registrar', roles:['residente','propietario','conserje','admin']},
+  {id:'estacionamientos', ic:'🅿️', t:'Estacionamientos', d:'Visitas: ocupación y tiempos', roles:['conserje','comite','admin']},
   {id:'documentos', ic:'📁', t:'Documentos', d:'Reglamento, actas, balances', roles:['residente','propietario','conserje','comite','admin']},
   {id:'rondas', ic:'📍', t:'Rondas', d:'Checkpoints NFC y bitácora', roles:['conserje','comite','admin']},
   {id:'mantencion', ic:'🔧', t:'Mantención', d:'Órdenes de trabajo y activos', roles:['comite','admin','mantencion']},
@@ -158,7 +161,7 @@ async function boot(){
   S.uid? start() : viewAuth();
 }
 async function salir(){ try{ await pushDesactivar(); }catch(e){} lsSet('verComo',null); return sb.auth.signOut(); }
-function teardown(){ clearViewSubs(); S.globalSubs.forEach(u=>{try{u();}catch(e){}}); S.globalSubs=[]; S.ready=false; S.cfgLoaded=false; S.meLoaded=false; S.cfg=null; S.me=null; S.users={}; S.unidades={}; S.empresas={}; S.activos={}; }
+function teardown(){ clearViewSubs(); S.globalSubs.forEach(u=>{try{u();}catch(e){}}); S.globalSubs=[]; S.ready=false; S.cfgLoaded=false; S.meLoaded=false; S.cfg=null; S.me=null; S.users={}; S.unidades={}; S.empresas={}; S.activos={}; S.estac={}; }
 function clearViewSubs(){ S.viewSubs.forEach(u=>{ try{u();}catch(e){} }); S.viewSubs=[]; }
 
 function viewAuth(mode='login', msg=''){
@@ -184,6 +187,7 @@ async function start(){
   watch('unidades', ()=>q(T('unidades').select('*')), rows=>{ S.unidades={}; rows.forEach(u=>S.unidades[u.depto]=u); refreshView(); }, {global:true, silent:true});
   watch('empresas', ()=>q(T('empresas').select('*')), rows=>{ S.empresas={}; rows.forEach(u=>S.empresas[u.id]=u); refreshView(); }, {global:true, silent:true});
   watch('activos', ()=>q(T('activos').select('*')), rows=>{ S.activos={}; rows.forEach(u=>S.activos[u.id]=u); refreshView(); }, {global:true, silent:true});
+  watch('estacionamientos', ()=>q(T('estacionamientos').select('*')), rows=>{ S.estac={}; rows.forEach(u=>S.estac[u.id]=u); refreshView(); }, {global:true, silent:true});
 }
 function meKey(){ const m=S.me||{}; return [m.edificio_id,m.rol,m.estado,m.nombre,m.depto,m.empresa_id].join('|'); }
 function cfgKey(){ const c=S.cfg||{}; return [c.id,c.nombre,c.direccion,c.logo,c.color,JSON.stringify(c.espacios||[])].join('|'); }
@@ -299,6 +303,7 @@ VIEWS.inicio = function(){
     if(canal) count('conversaciones', ()=>q(T('conversaciones').select('id').eq('canal',canal).eq('no_leido_staff',true)), 'mensajes');
     count('incidencias', ()=>q(T('incidencias').select('id').eq('estado','abierta')), 'incidencias');
     if(r!=='conserje') count('reservas', ()=>q(T('reservas').select('id').eq('estado','pendiente')), 'reservas');
+    count('estacionamiento_usos', ()=>q(T('estacionamiento_usos').select('id,aviso_admin_at').is('fin',null)).then(x=>x.filter(u=>u.aviso_admin_at)), 'estacionamientos');
     if(r==='admin') count('usuarios', ()=>q(T('usuarios').select('id').eq('estado','pendiente')), 'admin');
   } else if(r==='mantencion' && S.me.empresa_id){
     count('ot', ()=>q(T('ot').select('id').eq('empresa_id',S.me.empresa_id).eq('estado','asignada')), 'mantencion');
@@ -578,7 +583,7 @@ VIEWS.encomiendas = function(){
 // VISITAS
 VIEWS.visitas = function(){
   const r=role(); const resid=['residente','propietario'].includes(r);
-  setMain(`<h1>Visitas</h1><div class="row wrap" style="margin-bottom:10px"><button class="btn" id="bNewV">+ ${resid?'Anunciar visita':'Registrar visita'}</button>${resid?'':`<button class="btn sec" id="bScan">📷 Escanear QR</button><input type="text" id="vCode" placeholder="o código de la visita" style="width:190px" autocapitalize="characters" autocomplete="off"><button class="btn sec" id="bVCode">Buscar</button>`}</div>${resid?'<p class="small muted">Al anunciar una visita obtienes un QR para enviarle. En conserjería lo escanean y queda registrado su ingreso.</p>':''}<div class="tabs" id="vTabs"><button data-t="hoy" class="on">Hoy</button><button data-t="prox">Próximas</button><button data-t="hist">Historial</button></div><div id="vList" class="list"></div>`);
+  setMain(`<h1>Visitas</h1><div class="row wrap" style="margin-bottom:10px"><button class="btn" id="bNewV">+ ${resid?'Anunciar visita':'Registrar visita'}</button>${resid?'':`<button class="btn sec" id="bScan">📷 Escanear QR</button><input type="text" id="vCode" placeholder="o código de la visita" style="width:190px" autocapitalize="characters" autocomplete="off"><button class="btn sec" id="bVCode">Buscar</button>`}</div>${resid?'<div id="vEst"></div>':''}${resid?'<p class="small muted">Al anunciar una visita obtienes un QR para enviarle. En conserjería lo escanean y queda registrado su ingreso.</p>':''}<div class="tabs" id="vTabs"><button data-t="hoy" class="on">Hoy</button><button data-t="prox">Próximas</button><button data-t="hist">Historial</button></div><div id="vList" class="list"></div>`);
   $('#bNewV').addEventListener('click',()=>{ const m=modal(`<h3>${resid?'Anunciar visita':'Registrar visita'}</h3><form id="fV">${resid?'':`<label class="f"><span>Departamento</span><input type="text" name="depto" list="dl" required><datalist id="dl">${Object.keys(S.unidades).map(d=>`<option value="${esc(d)}">`).join('')}</datalist></label>`}<label class="f"><span>Nombre del visitante</span><input type="text" name="nombre" required></label><div class="row"><label class="f grow"><span>RUT / documento</span><input type="text" name="rut"></label><label class="f grow"><span id="lPat">Patente (opcional)</span><input type="text" name="patente" autocapitalize="characters" autocomplete="off"></label></div><label class="sw" style="margin-bottom:10px"><input type="checkbox" name="estacionamiento"> Necesita estacionamiento de visitas</label><div class="row"><label class="f grow"><span>Fecha</span><input type="date" name="fecha" value="${todayStr()}" required></label><label class="f grow"><span>Hora aprox.</span><input type="time" name="hora"></label></div><label class="f"><span>Nota</span><input type="text" name="nota" placeholder="Ej: delivery, técnico, familiar"></label><button class="btn full">Guardar</button></form>`);
     const pat=()=>{ const ob=!!S.cfg?.visita_patente && $('[name=estacionamiento]',m).checked; $('[name=patente]',m).required=ob; $('#lPat',m).textContent=ob?'Patente (obligatoria para estacionar)':'Patente (opcional)'; }; $('[name=estacionamiento]',m).addEventListener('change',pat); pat();
     $('#fV',m).addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); try{ const rows=await q(T('visitas').insert({depto:resid?myDepto():d.depto.trim(), nombre:d.nombre.trim(), rut:d.rut.trim(), patente:d.patente.trim().toUpperCase(), estacionamiento:!!d.estacionamiento, fecha:d.fecha, hora:d.hora, nota:d.nota.trim(), estado:resid?'anunciada':'ingreso', ingreso_at:resid?null:now(), uid:S.uid}).select()); closeModal(); toast('Guardado'); if(resid&&rows[0]?.codigo) qrVisita(rows[0]); }catch(err){ toast('Error: '+errMsg(err)); } }); });
@@ -592,7 +597,7 @@ VIEWS.visitas = function(){
     ${v.fecha!==todayStr()?`<div class="note">Esta visita está anunciada para el ${esc(fmtDay(v.fecha))}, no para hoy.</div>`:''}
     <div class="small muted">${fmtDay(v.fecha)} ${esc(v.hora||'')}${v.rut?' · '+esc(v.rut):''}${v.patente?' · '+esc(v.patente):''}${v.nota?' · '+esc(v.nota):''}${v.ingreso_at?' · ingreso '+fmtDate(v.ingreso_at):''}${v.salida_at?' · salida '+fmtDate(v.salida_at):''}</div>
     <div class="row" style="margin-top:14px;justify-content:flex-end">${v.estado==='anunciada'?'<button class="btn ok" id="fvIn">Registrar ingreso</button>':v.estado==='ingreso'?'<button class="btn" id="fvOut">Registrar salida</button>':''}<button class="btn sec" data-close>Cerrar</button></div>`);
-    const act=async p=>{ try{ await q(T('visitas').update(p).eq('id',v.id)); closeModal(); toast(p.estado==='ingreso'?'Ingreso registrado':'Salida registrada'); }catch(err){ toast('Error: '+errMsg(err)); } };
+    const act=async p=>{ try{ await q(T('visitas').update(p).eq('id',v.id)); closeModal(); toast(p.estado==='ingreso'?'Ingreso registrado':'Salida registrada'); if(p.estado==='ingreso'&&v.estacionamiento&&Object.keys(S.estac).length) location.hash='#estacionamientos--'+v.id; }catch(err){ toast('Error: '+errMsg(err)); } };
     $('#fvIn',m)?.addEventListener('click',()=>act({estado:'ingreso', ingreso_at:now()})); $('#fvOut',m)?.addEventListener('click',()=>act({estado:'salida', salida_at:now()})); };
   const abrirCodigo=async txt=>{ const cod=codigoQR(txt); try{ const v=cod&&await q(T('visitas').select('*').eq('codigo',cod).maybeSingle()); if(v) fichaVisita(v); else toast('No hay una visita con ese código'); }catch(err){ toast('Error: '+errMsg(err)); } };
   $('#bVCode')?.addEventListener('click',()=>abrirCodigo($('#vCode').value));
@@ -600,6 +605,8 @@ VIEWS.visitas = function(){
   $('#bScan')?.addEventListener('click', async()=>{ try{ const txt=await escanearQR(); if(txt) abrirCodigo(txt); }catch(err){ toast(err.name==='NotAllowedError'?'Debes permitir el uso de la cámara.':errMsg(err)); } });
   $('#vList').addEventListener('click', async e=>{ const i=e.target.closest('[data-in]'), o=e.target.closest('[data-out]'), d=e.target.closest('[data-del]'), k=e.target.closest('[data-qr]'); if(k){ const v=docs.find(x=>x.id===k.dataset.qr); if(v) qrVisita(v); return; } try{ if(i) await q(T('visitas').update({estado:'ingreso', ingreso_at:now()}).eq('id',i.dataset.in)); if(o) await q(T('visitas').update({estado:'salida', salida_at:now()}).eq('id',o.dataset.out)); if(d&&await confirmBox('¿Cancelar la visita anunciada?')) await q(T('visitas').delete().eq('id',d.dataset.del)); }catch(err){ toast('Error: '+errMsg(err)); } });
   watch('visitas', ()=>q(T('visitas').select('*').order('fecha',{ascending:false}).limit(600)), rows=>{ docs=rows; draw(); });
+  if(resid&&myDepto()) watch('estacionamiento_usos', ()=>q(T('estacionamiento_usos').select('*').eq('depto',myDepto()).is('fin',null)), us=>{ const el=$('#vEst'); if(!el) return; const lim=Number(S.cfg?.est_aviso_min)||0;
+    el.innerHTML=us.map(u=>`<div class="${u.aviso_admin_at?'err':u.alerta_residente_at?'note':'info'}">🅿️ Tu visita ocupa el estacionamiento <b>${esc(u.est_nombre)}</b>${u.patente?' ('+esc(u.patente)+')':''} desde las ${horaDe(u.inicio)}: lleva ${durTxt(Date.now()-new Date(u.inicio))}.${lim?' Tiempo máximo: '+durTxt(lim*60000)+'.':''}${u.aviso_admin_at?' Se informó a la administración por exceder el tiempo.':''}</div>`).join(''); }, {silent:true});
 };
 
 // QR de acceso de visitas. El QR solo lleva un código aleatorio (ningún dato personal);
@@ -645,6 +652,52 @@ async function escanearQR(){
     tick();
   });
 }
+
+// ESTACIONAMIENTOS DE VISITA
+// Conserjería marca ocupado/libre; la base de datos pone las horas y envía los avisos por tiempo.
+const estOrden = ()=>Object.values(S.estac).sort((a,b)=>(a.orden-b.orden)||a.nombre.localeCompare(b.nombre,undefined,{numeric:true}));
+VIEWS.estacionamientos = function(param){
+  const r=role(); const opera=['conserje','admin'].includes(r);
+  const lim=()=>({a:Number(S.cfg?.est_alerta_min)||0, m:Number(S.cfg?.est_aviso_min)||0});
+  setMain(`<h1>Estacionamientos de visita</h1><div id="esPend"></div>
+  <div class="tabs" id="esTabs"><button data-t="ahora" class="on">Ahora</button><button data-t="exc">Excedidos</button><button data-t="hist">Historial</button></div><div id="esBody"></div>`);
+  let usos=[], visHoy=[], tab='ahora', pend=null;
+  const minDe=u=>(new Date(u.fin||Date.now())-new Date(u.inicio))/60000;
+  const nivel=u=>{ const {a,m}=lim(), x=minDe(u); return m&&x>=m?'er':a&&x>=a?'wa':''; };
+  const filaUso=u=>`<div class="item ${u.fin?'static':''}" ${u.fin?'':`data-u="${u.id}"`}><div class="hd"><b>${esc(u.est_nombre||'—')} · Depto ${esc(u.depto)}${u.patente?' · '+esc(u.patente):''}</b><span class="row" style="gap:4px">${u.aviso_admin_at?'<span class="pill er">Excedido</span>':''}<span class="pill ${u.fin?'mu':'in'}">${u.fin?'Liberado':'Ocupado'}</span></span></div><div class="meta">${fmtDate(u.inicio)}${u.fin?' → '+fmtDate(u.fin):''} · ${durTxt(minDe(u)*60000)}${u.aviso_admin_at&&lim().m?' · excede el máximo de '+durTxt(lim().m*60000):''}${u.nota?' · '+esc(u.nota):''}</div></div>`;
+  const draw=()=>{ const el=$('#esBody'); if(!el) return; const sp=estOrden(); const ab={}; usos.filter(u=>!u.fin).forEach(u=>ab[u.estacionamiento_id]=u); const {a,m}=lim();
+    $('#esPend').innerHTML=pend?`<div class="info">Elige un estacionamiento libre para <b>${esc(pend.nombre)}</b> · Depto ${esc(pend.depto)}${pend.patente?' · '+esc(pend.patente):''}. <a href="#" id="esNoPend">Cancelar</a></div>`:'';
+    if(tab==='ahora'){
+      el.innerHTML=!sp.length?`<div class="empty">No hay estacionamientos de visita definidos.${isAdmin()?' Créalos en <a href="#admin--estacionamientos">Administración → Estacionamientos</a>.':''}</div>`
+      :`<p class="small muted">${Object.keys(ab).length} de ${sp.length} ocupados${a?' · aviso al residente a los '+durTxt(a*60000):''}${m?' · informe a administración a los '+durTxt(m*60000):''}</p>
+      <div class="grid">${sp.map(e=>{ const u=ab[e.id]; return `<div class="tile est ${u?'oc '+nivel(u):''}" data-e="${e.id}"><div class="row" style="justify-content:space-between;gap:6px"><b style="font-size:17px">${esc(e.nombre)}</b>${e.reservado?`<span class="pill in">${esc(e.reservado)}</span>`:''}</div>${u?`<span>Depto ${esc(u.depto)}${u.patente?' · '+esc(u.patente):''}</span><small>${durTxt(minDe(u)*60000)} · desde las ${horaDe(u.inicio)}</small>`:'<small>Libre</small>'}</div>`; }).join('')}</div>`;
+    } else { const d=usos.filter(u=>tab==='exc'?u.aviso_admin_at:true); el.innerHTML=(tab==='exc'?'<p class="small muted">Usos que superaron el tiempo máximo y fueron informados a administración y comité.</p>':'')+`<div class="list">${d.map(filaUso).join('')||'<div class="empty">Nada por aquí</div>'}</div>`; } };
+  const ocupar=e=>{ const cand=visHoy.filter(v=>v.estacionamiento&&['anunciada','ingreso'].includes(v.estado)&&!usos.some(u=>!u.fin&&u.visita_id===v.id));
+    const m=modal(`<h3>Ocupar ${esc(e.nombre)}</h3>${e.reservado?`<div class="note">Reservado: ${esc(e.reservado)}</div>`:''}<form id="fOc">
+    ${cand.length?`<label class="f"><span>Visita anunciada para hoy (opcional)</span><select name="visita_id"><option value="">— Sin anuncio —</option>${cand.map(v=>`<option value="${v.id}" ${pend?.id===v.id?'selected':''}>${esc(v.nombre)} · Depto ${esc(v.depto)}${v.patente?' · '+esc(v.patente):''}</option>`).join('')}</select></label>`:''}
+    <div class="row"><label class="f grow"><span>Departamento que visita</span><input type="text" name="depto" list="dlEs" required><datalist id="dlEs">${Object.keys(S.unidades).map(d=>`<option value="${esc(d)}">`).join('')}</datalist></label><label class="f grow"><span>Patente${S.cfg?.visita_patente?'':' (opcional)'}</span><input type="text" name="patente" autocapitalize="characters" autocomplete="off" ${S.cfg?.visita_patente?'required':''}></label></div>
+    <label class="f"><span>Nota</span><input type="text" name="nota" placeholder="Opcional"></label><button class="btn full">Marcar ocupado</button></form>`);
+    const sel=$('[name=visita_id]',m); const fill=()=>{ const v=cand.find(x=>x.id===sel?.value)||(sel?null:pend); if(v){ $('[name=depto]',m).value=v.depto; $('[name=patente]',m).value=v.patente||''; } }; sel?.addEventListener('change',fill); fill();
+    $('#fOc',m).addEventListener('submit', async ev=>{ ev.preventDefault(); const d=formData(ev.target); const b=$('button',ev.target); busy(b,true); try{ await q(T('estacionamiento_usos').insert({estacionamiento_id:e.id, depto:d.depto.trim(), patente:d.patente.trim().toUpperCase(), visita_id:d.visita_id||null, nota:d.nota.trim()})); pend=null; closeModal(); toast(e.nombre+' ocupado'); w.reload(); }catch(err){ toast('Error: '+errMsg(err)); busy(b,false); } }); };
+  const ficha=u=>{ const {a,m:mx}=lim(); const m=modal(`<h3>${esc(u.est_nombre)} · Depto ${esc(u.depto)}</h3><div class="row wrap" style="gap:6px;margin-bottom:8px">${u.patente?`<span class="pill mu">${esc(u.patente)}</span>`:''}<span class="pill ${nivel(u)||'in'}">${durTxt(minDe(u)*60000)}</span></div>
+    <div class="small muted">Ocupado desde las ${horaDe(u.inicio)} (${fmtDate(u.inicio)}) · registró ${esc(userName(u.registrado_por))}${u.nota?' · '+esc(u.nota):''}</div>
+    <div class="timeline" style="margin-top:12px">${a?`<div><b>Aviso al residente</b> <span class="muted">· ${u.alerta_residente_at?'enviado '+fmtDate(u.alerta_residente_at):'a los '+durTxt(a*60000)}</span></div>`:''}${mx?`<div><b>Informe a administración y comité</b> <span class="muted">· ${u.aviso_admin_at?'enviado '+fmtDate(u.aviso_admin_at):'a los '+durTxt(mx*60000)}</span></div>`:''}</div>
+    <div class="row" style="justify-content:flex-end;margin-top:12px">${opera?'<button class="btn ok" id="esLib">Liberar</button>':''}<button class="btn sec" data-close>Cerrar</button></div>`);
+    $('#esLib',m)?.addEventListener('click', async()=>{ try{ await q(T('estacionamiento_usos').update({fin:now()}).eq('id',u.id)); closeModal(); toast(u.est_nombre+' liberado'); w.reload(); }catch(err){ toast('Error: '+errMsg(err)); } }); };
+  $('#esTabs').addEventListener('click',e=>{ const b=e.target.closest('button'); if(!b) return; $$('#esTabs button').forEach(x=>x.classList.remove('on')); b.classList.add('on'); tab=b.dataset.t; draw(); });
+  $('#esPend').addEventListener('click',e=>{ if(e.target.id==='esNoPend'){ e.preventDefault(); pend=null; draw(); } });
+  $('#esBody').addEventListener('click',e=>{ const t=e.target.closest('[data-e]'), it=e.target.closest('[data-u]');
+    if(it){ const u=usos.find(x=>x.id===it.dataset.u); if(u) ficha(u); return; } if(!t) return;
+    const u=usos.find(x=>!x.fin&&x.estacionamiento_id===t.dataset.e); if(u) ficha(u); else if(opera) ocupar(S.estac[t.dataset.e]); });
+  const d0=new Date(); d0.setDate(d0.getDate()-90);
+  const w=watch('estacionamiento_usos', ()=>q(T('estacionamiento_usos').select('*').gte('inicio',d0.toISOString()).order('inicio',{ascending:false}).limit(1000)), rows=>{ usos=rows; if(!$('.modal')) draw(); });
+  if(opera) watch('visitas', ()=>q(T('visitas').select('*').eq('fecha',todayStr())), rows=>{ visHoy=rows; if(param){ pend=rows.find(v=>v.id===param)||null; param=null; if(pend) draw(); } }, {silent:true});
+  // el tiempo corre: redibujar cada 30 s y, como respaldo de la tarea programada, pedir la revisión de plazos
+  const rev=()=>{ if(lim().a||lim().m) sb.rpc('revisar_estacionamientos').then(()=>{},()=>{}); };
+  const iv=setInterval(()=>{ if(tab==='ahora'&&!$('.modal')) draw(); },30000), iv2=setInterval(rev,60000); rev();
+  S.viewSubs.push(()=>{ clearInterval(iv); clearInterval(iv2); });
+  REFRESH.estacionamientos=draw; draw();
+};
 
 // DOCUMENTOS
 VIEWS.documentos = function(){
@@ -761,7 +814,7 @@ function detalleOT(o){
 
 // ADMINISTRACIÓN
 VIEWS.admin = function(param){
-  const tabs={edificio:'Edificio',usuarios:'Usuarios',unidades:'Unidades',espacios:'Espacios',activos:'Activos',empresas:'Empresas'};
+  const tabs={edificio:'Edificio',usuarios:'Usuarios',unidades:'Unidades',espacios:'Espacios',estacionamientos:'Estacionamientos',activos:'Activos',empresas:'Empresas'};
   let tab = tabs[param]? param : (tabs[S._adminTab]? S._adminTab : 'edificio');
   setMain(`<h1>Administración</h1><div class="tabs" id="aTabs">${Object.entries(tabs).map(([k,v])=>`<button data-t="${k}" class="${k===tab?'on':''}">${v}</button>`).join('')}</div><div id="aBody"></div>`);
   $('#aTabs').addEventListener('click',e=>{ const b=e.target.closest('button'); if(!b) return; $$('#aTabs button').forEach(x=>x.classList.remove('on')); b.classList.add('on'); tab=b.dataset.t; S._adminTab=tab; draw(); });
@@ -769,7 +822,7 @@ VIEWS.admin = function(param){
   REFRESH.admin=()=>{ if(tab!=='edificio') draw(); };
 };
 const ADMIN={};
-const RETENCION=[['visitas','Visitas','Nombre, RUT y patente de quienes visitan'],['registros','Rondas y bitácora','Registros y fotos de las rondas'],['encomiendas','Encomiendas entregadas','Desde la fecha de entrega'],['mensajes','Mensajes','Conversaciones con conserjería, comité y administración'],['reservas','Reservas','Desde la fecha reservada'],['incidencias','Incidencias cerradas','Con sus fotos e historial']];
+const RETENCION=[['visitas','Visitas','Nombre, RUT y patente de quienes visitan'],['registros','Rondas y bitácora','Registros y fotos de las rondas'],['encomiendas','Encomiendas entregadas','Desde la fecha de entrega'],['mensajes','Mensajes','Conversaciones con conserjería, comité y administración'],['reservas','Reservas','Desde la fecha reservada'],['incidencias','Incidencias cerradas','Con sus fotos e historial'],['estacionamientos','Uso de estacionamientos','Patentes y horarios, desde que se libera']];
 ADMIN.edificio = function(el){
   const c=S.cfg||{};
   el.innerHTML=`<div class="card"><h3>Datos del edificio</h3><form id="fEd"><div class="row" style="align-items:flex-start"><div><div class="logo-prev" id="logoPrev">${c.logo?`<img src="${fotoUrl(c.logo)}">`:'🏢'}</div><input type="file" id="logoIn" accept="image/*" style="display:none"><div class="row" style="margin-top:6px;gap:4px"><button type="button" class="btn sec sm" id="bLogo">Cambiar logo</button>${c.logo?'<button type="button" class="btn sec sm" id="bLogoDel">Quitar</button>':''}</div></div><div class="grow"><label class="f"><span>Nombre</span><input type="text" name="nombre" value="${esc(c.nombre||'')}" required></label><label class="f"><span>Dirección</span><input type="text" name="direccion" value="${esc(c.direccion||'')}"></label></div></div>
@@ -824,6 +877,21 @@ ADMIN.espacios = function(el){
     {id:'gym', nombre:'Gimnasio', capacidad:4, desde:'06:00', hasta:'23:00', maxHoras:1, anticipacionDias:3, aprobacion:false, costo:0},
     {id:'juegos', nombre:'Sala de juegos', capacidad:8, desde:'10:00', hasta:'22:00', maxHoras:2, anticipacionDias:7, aprobacion:false, costo:0}]); });
   el.addEventListener('click', async e=>{ const ed=e.target.closest('[data-ed]'), del=e.target.closest('[data-del]'); if(ed) form(esp[+ed.dataset.ed],+ed.dataset.ed); if(del&&await confirmBox('¿Eliminar espacio?')){ const arr=esp.slice(); arr.splice(+del.dataset.del,1); await save(arr); } });
+};
+ADMIN.estacionamientos = function(el){
+  const c=S.cfg||{}; const sp=estOrden();
+  el.innerHTML=`<div class="card"><h3>Tiempos y avisos</h3><p class="small muted">Cuando un auto de visita supera el primer tiempo se avisa al residente; al superar el segundo se informa a administración y comité (por ejemplo, para cursar una multa según el reglamento) y el uso queda en "Excedidos". Vacío = sin aviso.</p>
+  <form id="fET"><div class="grid2"><label class="f"><span>Avisar al residente a los (minutos)</span><input type="number" name="a" min="1" max="10080" placeholder="Sin aviso" value="${Number(c.est_alerta_min)||''}"></label><label class="f"><span>Informar a administración y comité a los (minutos)</span><input type="number" name="m" min="1" max="10080" placeholder="Sin aviso" value="${Number(c.est_aviso_min)||''}"></label></div><button class="btn">Guardar tiempos</button></form></div>
+  <div class="card"><h3>Estacionamientos de visita (${sp.length})</h3><p class="small muted">Indica en "Reservado para" los que tienen uso especial; conserjería lo verá al asignarlos.</p>
+  <form id="fEN" class="row wrap" style="margin-bottom:12px"><span class="small">Agregar</span><input type="number" name="n" min="1" max="50" value="1" required style="width:80px"><span class="small">con prefijo</span><input type="text" name="pre" value="V" maxlength="6" style="width:80px"><button class="btn">Agregar</button></form>
+  <datalist id="dlRes"><option value="Discapacidad"><option value="Embarazadas"><option value="Carga y descarga"><option value="Proveedores"></datalist>
+  <div style="overflow:auto"><table><thead><tr><th>Nombre</th><th>Reservado para</th><th></th></tr></thead><tbody>${sp.map(e=>`<tr><td><input type="text" value="${esc(e.nombre)}" data-en="${e.id}" style="width:110px;padding:5px 7px"></td><td><input type="text" value="${esc(e.reservado||'')}" data-er="${e.id}" list="dlRes" placeholder="Uso general" style="padding:5px 7px"></td><td><button class="btn sec sm" data-del="${e.id}">✕</button></td></tr>`).join('')||'<tr><td colspan="3" class="muted">Aún no hay estacionamientos de visita</td></tr>'}</tbody></table></div></div>`;
+  $('#fET',el).addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); const a=Math.floor(Number(d.a))||0, m=Math.floor(Number(d.m))||0; if(a&&m&&m<=a){ toast('El informe a administración debe ser posterior al aviso al residente'); return; } try{ await q(T('edificios').update({est_alerta_min:a, est_aviso_min:m}).eq('id',S.cfg.id)); toast('Tiempos guardados'); }catch(err){ toast('Error: '+errMsg(err)); } });
+  $('#fEN',el).addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); const pre=d.pre.trim(); const n=Math.min(50,Math.max(1,Math.floor(Number(d.n))||1));
+    const usados=sp.map(x=>x.nombre.startsWith(pre)?parseInt(x.nombre.slice(pre.length),10):NaN).filter(x=>!isNaN(x)); let k=usados.length?Math.max(...usados):0; const ord=sp.reduce((a,x)=>Math.max(a,x.orden||0),0);
+    try{ await q(T('estacionamientos').insert(Array.from({length:n},(_, i)=>({nombre:pre+(k+i+1), orden:ord+i+1, reservado:''})))); toast(n===1?'Estacionamiento agregado':n+' estacionamientos agregados'); }catch(err){ toast('Error: '+errMsg(err)); } });
+  el.addEventListener('change', async e=>{ const t=e.target; try{ if(t.dataset.en){ if(!t.value.trim()) return; await q(T('estacionamientos').update({nombre:t.value.trim()}).eq('id',t.dataset.en)); } if(t.dataset.er) await q(T('estacionamientos').update({reservado:t.value.trim()}).eq('id',t.dataset.er)); }catch(err){ toast(errMsg(err)); } });
+  el.addEventListener('click', async e=>{ const b=e.target.closest('[data-del]'); if(b&&await confirmBox('¿Eliminar el estacionamiento '+(S.estac[b.dataset.del]?.nombre||'')+'? Su historial de uso se conserva.')){ try{ await q(T('estacionamientos').delete().eq('id',b.dataset.del)); }catch(err){ toast(errMsg(err)); } } });
 };
 ADMIN.activos = function(el){
   const acts=Object.values(S.activos);
