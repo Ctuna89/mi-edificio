@@ -135,7 +135,6 @@ En Windows con el instalador, abre una ventana de comandos y ejecuta:
   ./local/iniciar.sh --restaurar local/datos/respaldos/mi-edificio-AAAA-MM-DD.tar.gz
   ```
 
-- **Actualizar**: en Windows, instala la versión nueva encima. En Mac o Linux, detén el servidor, reemplaza los archivos del repositorio por los nuevos (sin tocar `local/datos`) e inícialo. Los cambios de la base de datos se aplican solos.
 - **Si el computador se apaga** o se corta internet, la app deja de responder hasta que vuelva. Conviene configurar que el servidor parta al encender el equipo.
 
 Límites: está pensada para un edificio. La base de datos atiende una consulta a la vez, lo que alcanza de sobra para ese tamaño, y usa PGlite, un Postgres embebido todavía joven.

@@ -315,10 +315,11 @@ VIEWS.inicio = function(){
   setMain(`<h1>Hola, ${esc(S.me.nombre.split(' ')[0])}</h1>
   ${setupPend?`<div class="note">Falta terminar la configuración inicial del edificio. <a href="#" id="bWizHome">Continuar con el asistente</a></div>`:''}
   ${PUSH_KEY&&pushOk()&&Notification.permission==='default'?`<div class="info">🔔 <a href="#perfil">Activa las notificaciones</a> para enterarte de encomiendas, mensajes y aprobaciones.</div>`:''}
-  <div id="homeTun"></div><div id="homeResp"></div>
+  <div id="homeVer"></div><div id="homeTun"></div><div id="homeResp"></div>
   <div class="grid">${mods.map(m=>`<a class="tile" href="#${m.id}" data-tile="${m.id}"><span class="ic">${m.ic}</span><b>${m.t}</b><small>${m.d||''}</small></a>`).join('')}</div>
   <h2>Últimos comunicados</h2><div id="homeCom" class="list"><div class="empty">Cargando…</div></div>`);
   $('#bWizHome')?.addEventListener('click',e=>{ e.preventDefault(); asistente(); });
+  if(CFG.LOCAL && realRole()==='admin') sb.local.sistema.estado().then(({data:e})=>{ const el=$('#homeVer'); if(el&&e&&e.hayNueva) el.innerHTML=`<div class="info">Hay una versión nueva de Mi Edificio (${esc(e.ultima.version)}). <a href="#admin">Ver y actualizar</a>.</div>`; });
   if(CFG.LOCAL && realRole()==='admin') sb.local.tunel.estado().then(({data:e})=>{ const el=$('#homeTun'); if(!el||!e) return; S.dirPublica=e.estado==='conectado'&&e.direccion?e.direccion+'/':'';
     el.innerHTML=e.modo==='apagado'?'<div class="note">La app solo se puede usar dentro del edificio. <a href="#admin">Activa el acceso desde internet</a>.</div>':e.estado==='error'||e.estado==='sin-programa'?'<div class="err">El acceso desde internet no está funcionando. <a href="#admin">Revisar</a>.</div>':''; });
   if(CFG.LOCAL && realRole()==='admin') sb.local.respaldo.estado().then(({data:e})=>{ const el=$('#homeResp'); if(!el||!e) return; const viejo=e.ultimo&&Date.now()-new Date(e.ultimo.fecha)>3*86400000;
@@ -975,6 +976,23 @@ function detalleOT(o){
   }catch(err){ toast('Error: '+errMsg(err)); } });
 }
 
+// VERSIÓN Y ACTUALIZACIONES (solo instalación local)
+async function tarjetaVersion(){ const el=$('#verBody'); if(!el) return; let e; try{ e=await q(sb.local.sistema.estado()); }catch(err){ el.innerHTML=`<div class="err">${esc(errMsg(err))}</div>`; return; } if(!$('#verBody')) return;
+  el.innerHTML=`<p style="margin:0 0 8px">Versión instalada: <b>${esc(e.version)}</b>${e.hayNueva?'':' · es la más reciente'}${e.revisado?` <span class="muted">(revisado ${fmtDate(e.revisado)})</span>`:''}</p>
+    ${e.hayNueva?`<div class="info">Hay una versión nueva: <b>${esc(e.ultima.version)}</b>. <a href="${esc(e.ultima.pagina)}" target="_blank" rel="noopener">Ver qué cambia</a></div>
+      ${e.autoinstalable?'<p>Al actualizar, la app deja de responder unos minutos. Antes de tocar nada se guarda una copia de los datos, y si la actualización falla los datos quedan como estaban.</p><button class="btn" id="bActualizar">Actualizar ahora</button>':'<p>Para actualizar, descarga la versión nueva desde ese enlace e instálala encima (en Windows), o reemplaza los archivos y reinicia el servidor (en Mac o Linux). Tus datos se conservan, y antes de aplicar cambios se guarda una copia.</p>'}`:''}
+    ${e.error?`<div class="note">${esc(e.error)}</div>`:''}
+    <div class="row wrap" style="margin-top:8px"><button class="btn sec sm" id="bBuscarVer">Buscar actualizaciones</button></div>
+    ${e.historial.length?`<details style="margin-top:10px"><summary>Historial de versiones</summary><div class="small muted" style="margin-top:6px">${e.historial.slice().reverse().map(x=>`${fmtDate(x.fecha)} · ${x.de?esc(x.de)+' → ':'instalación de la '}${esc(x.a)}`).join('<br>')}</div></details>`:''}`;
+  $('#bBuscarVer').addEventListener('click', async ev=>{ busy(ev.target,true,'Buscando…'); try{ await q(sb.local.sistema.buscar()); }catch(err){ toast(errMsg(err)); } tarjetaVersion(); });
+  $('#bActualizar')?.addEventListener('click', async ev=>{ if(!await confirmBox(`Se instalará la versión ${e.ultima.version}. La app dejará de responder unos minutos para todos. ¿Actualizar ahora?`)) return;
+    busy($('#bActualizar'),true,'Descargando…'); try{ await q(sb.local.sistema.actualizar()); }catch(err){ toast(errMsg(err)); tarjetaVersion(); return; }
+    modal(`<h3>Actualizando Mi Edificio</h3><div class="loading"><div class="spin"></div><span id="actMsg">Instalando la versión ${esc(e.ultima.version)}. No cierres esta página: se recargará sola.</span></div>`);
+    const t0=Date.now(); const ver=async()=>{ let j=null; try{ j=await (await fetch('/api/auth/sesion',{cache:'no-store'})).json(); }catch(x){}
+      if(j&&j.mantencion){ $('#actMsg').textContent='La actualización no se pudo aplicar. Los datos no cambiaron. Abre Mi Edificio en el computador del edificio para ver qué hacer.'; return; }
+      if(j&&Date.now()-t0>20000){ try{ const s=await q(sb.local.sistema.estado()); if(s.version!==e.version){ location.reload(); return; } }catch(x){} }
+      if(Date.now()-t0>15*60000){ $('#actMsg').textContent='Está tardando más de lo esperado. Revisa el computador del edificio.'; return; } setTimeout(ver,4000); }; setTimeout(ver,8000); }); }
+
 // ACCESO DESDE INTERNET (solo instalación local)
 // El servidor maneja un túnel de Cloudflare hacia una dirección fija con el dominio del edificio.
 // Se usa en Administración y en el asistente.
@@ -1109,6 +1127,7 @@ ADMIN.edificio = function(el){
   <label class="f"><span>Aviso de privacidad (se muestra al registrarse y en Mi cuenta; vacío = texto por defecto)</span><textarea name="privacidad" placeholder="Quién es responsable de los datos, para qué se usan, por cuánto tiempo se guardan y cómo ejercer los derechos de acceso, rectificación y eliminación.">${esc(c.privacidad||'')}</textarea></label>
   <label class="f"><span>Color principal</span><input type="color" name="color" value="${esc(c.color||'#1e5eff')}" style="width:60px;height:36px;padding:2px;border:1px solid var(--bd);border-radius:8px"></label>
   <button class="btn">Guardar cambios</button></form></div>
+  ${CFG.LOCAL?'<div class="card"><h3>Versión y actualizaciones</h3><div id="verBody" class="small muted">Consultando…</div></div>':''}
   ${CFG.LOCAL?'<div class="card"><h3>Acceso desde internet</h3><div id="tunBody" class="small muted">Consultando…</div></div>':''}
   ${CFG.LOCAL?'<div class="card"><h3>Respaldo en la nube</h3><div id="respBody" class="small muted">Cargando…</div></div>':''}
   <div class="card"><h3>Conservación de datos</h3><p class="small muted">Define por cuántos meses se guarda cada tipo de dato. Lo que supere el plazo se borra en forma definitiva, cada día. Vacío = se conserva indefinidamente.</p>
@@ -1119,7 +1138,7 @@ ADMIN.edificio = function(el){
   $('#fRet',el).addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); const retencion={}; RETENCION.forEach(([k])=>{ const n=Math.floor(Number(d[k])); if(n>0) retencion[k]=n; }); try{ await q(T('edificios').update({retencion}).eq('id',S.cfg.id)); toast('Plazos guardados'); }catch(err){ toast('Error: '+errMsg(err)); } });
   $('#bDep',el).addEventListener('click', async e=>{ if(!await confirmBox('Se borrarán en forma definitiva los datos que superen los plazos guardados. ¿Continuar?')) return; try{ const r=await q(sb.rpc('depurar_ahora'))||{}; const n=Object.values(r).reduce((a,b)=>a+Number(b),0); toast(n?(n===1?'Se borró 1 registro':`Se borraron ${n} registros`):'No había datos fuera de plazo'); limpiarArchivos(); }catch(err){ toast('Error: '+errMsg(err)); } });
   $('#bWiz',el).addEventListener('click',()=>asistente());
-  if(CFG.LOCAL){ tarjetaRespaldo(); tunelUI($('#tunBody',el), ()=>{ const i=$('#invUrl',el); if(i) i.value=S.dirPublica||location.origin+location.pathname; }); }
+  if(CFG.LOCAL){ tarjetaVersion(); tarjetaRespaldo(); tunelUI($('#tunBody',el), ()=>{ const i=$('#invUrl',el); if(i) i.value=S.dirPublica||location.origin+location.pathname; }); }
   let newLogo=null;
   $('#bLogo',el).addEventListener('click',()=>$('#logoIn',el).click());
   $('#logoIn',el).addEventListener('change', async e=>{ const f=e.target.files[0]; if(!f) return; try{ toast('Subiendo logo…'); newLogo=await uploadImage(f,'logo'); $('#logoPrev',el).innerHTML=`<img data-f="${esc(newLogo)}">`; toast('Logo listo, guarda los cambios'); }catch(err){ toast('Error: '+errMsg(err)); } });

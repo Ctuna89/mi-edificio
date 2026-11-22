@@ -11,6 +11,7 @@
 //  Variables: PUERTO (8080) · MI_EDIFICIO_DATOS (local/datos) · MI_EDIFICIO_CONTACTO (mailto:…)
 // =====================================================================
 import http from 'node:http';
+import https from 'node:https';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -76,9 +77,77 @@ if (iNube > 0) {
 }
 
 const db = await PGlite.create({ dataDir: DIR.db, ...opcionesDb });
-await db.exec(fs.readFileSync(path.join(AQUI, 'base.sql'), 'utf8'));
-await db.exec(fs.readFileSync(path.join(RAIZ, 'supabase', 'schema.sql'), 'utf8'));
-await db.exec(`update public.plataforma set push_url = 'local' where coalesce(push_url, '') = ''`);
+
+// ---------------------------------------------------------------------
+// Actualización segura de la base de datos
+//  1. La base recuerda qué versión del programa la dejó como está (sistema.instalacion).
+//  2. Antes de que una versión distinta la toque, se guarda una copia completa.
+//  3. El esquema se aplica dentro de una sola transacción: o queda todo, o no cambia nada.
+//  4. Si falla, o si el programa es más antiguo que la base, el servidor NO atiende la app:
+//     muestra una página de mantención con qué hacer. Nunca corre código nuevo sobre datos a medio migrar.
+// (MI_EDIFICIO_VERSION y MI_EDIFICIO_ESQUEMA existen para las pruebas.)
+// ---------------------------------------------------------------------
+const leer = f => { try { return fs.readFileSync(f, 'utf8').trim(); } catch { return ''; } };
+const VERSION_APP = process.env.MI_EDIFICIO_VERSION || leer(path.join(RAIZ, 'VERSION')) || leer(path.join(RAIZ, 'instalado.txt')) || '0.0.0';
+const REPO = process.env.MI_EDIFICIO_REPO || 'Ctuna89/mi-edificio';
+const cmpVersion = (a, b) => { const x = String(a).split('.').map(n => parseInt(n, 10) || 0), y = String(b).split('.').map(n => parseInt(n, 10) || 0); for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) < (y[i] || 0) ? -1 : 1; return 0; };
+const tablaExiste = async t => (await db.query(`select to_regclass($1) is not null as ok`, [t])).rows[0].ok;
+const versionDb = await tablaExiste('sistema.instalacion') ? ((await db.query(`select version from sistema.instalacion where id = 1`)).rows[0]?.version || null) : null;
+const baseConDatos = await tablaExiste('public.usuarios');
+let MANTENCION = null, copiaPrevia = '';
+if (versionDb && cmpVersion(versionDb, VERSION_APP) > 0 && !process.env.MI_EDIFICIO_PERMITIR_RETROCESO) {
+  MANTENCION = { motivo: 'retroceso', de: versionDb, a: VERSION_APP };
+} else {
+  if (baseConDatos && versionDb !== VERSION_APP) {
+    copiaPrevia = `antes-de-actualizar-${versionDb || 'anterior'}-a-${VERSION_APP}-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.tar.gz`;
+    fs.writeFileSync(path.join(DIR.respaldos, copiaPrevia), Buffer.from(await (await db.dumpDataDir('gzip')).arrayBuffer()));
+    fs.readdirSync(DIR.respaldos).filter(x => x.startsWith('antes-de-actualizar-')).sort((a, b) => a.slice(-26) < b.slice(-26) ? -1 : 1).slice(0, -5).forEach(x => fs.rmSync(path.join(DIR.respaldos, x), { force: true }));
+    log(`Actualizando la base de datos de ${versionDb || 'una versión anterior'} a ${VERSION_APP}. Copia previa: ${copiaPrevia}`);
+  }
+  try {
+    await db.transaction(async tx => {
+      await tx.exec(fs.readFileSync(path.join(AQUI, 'base.sql'), 'utf8'));
+      await tx.exec(fs.readFileSync(process.env.MI_EDIFICIO_ESQUEMA || path.join(RAIZ, 'supabase', 'schema.sql'), 'utf8'));
+      await tx.exec(`update public.plataforma set push_url = 'local' where coalesce(push_url, '') = '';
+        create schema if not exists sistema;
+        create table if not exists sistema.instalacion (id int primary key default 1 check (id = 1), version text not null, actualizado timestamptz default now(), historial jsonb not null default '[]'::jsonb);`);
+      if (versionDb !== VERSION_APP) await tx.query(`insert into sistema.instalacion (id, version, historial) values (1, $1, jsonb_build_array(jsonb_build_object('de', $2::text, 'a', $1::text, 'fecha', now())))
+        on conflict (id) do update set version = excluded.version, actualizado = now(), historial = sistema.instalacion.historial || excluded.historial`, [VERSION_APP, versionDb]);
+    });
+    if (baseConDatos && versionDb !== VERSION_APP) log(`Base de datos actualizada a ${VERSION_APP}.`);
+  } catch (e) {
+    MANTENCION = { motivo: 'fallo', de: versionDb, a: VERSION_APP, detalle: e.message, copia: copiaPrevia };
+    log(`LA ACTUALIZACIÓN A ${VERSION_APP} FALLÓ y se deshizo completa; los datos no cambiaron. Error: ${e.message}`);
+  }
+}
+if (MANTENCION) await modoMantencion(MANTENCION);   // no retorna: el resto del servidor no se inicia
+
+// Servidor mínimo para cuando no es seguro atender la app. Explica qué pasó y cómo volver a funcionar.
+function modoMantencion(m) {
+  const enlace = v => `https://github.com/${REPO}/releases/tag/v${v}`, h = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const cuerpo = m.motivo === 'retroceso'
+    ? `<p>Los datos de este edificio fueron actualizados por la versión <b>${h(m.de)}</b> de Mi Edificio, pero el programa instalado es la <b>${h(m.a)}</b>, que es más antigua y podría dañarlos.</p>
+       <h2>Qué hacer</h2><p>Instala la versión ${h(m.de)} o una más nueva: <a href="${enlace(m.de)}">${enlace(m.de)}</a>. Los datos están intactos.</p>`
+    : `<p>La actualización a la versión <b>${h(m.a)}</b> no se pudo aplicar. <b>Los datos del edificio no se modificaron</b>: el cambio se deshizo completo${m.copia ? ' y además quedó una copia previa en la carpeta de respaldos' : ''}.</p>
+       <h2>Qué hacer</h2><ol>${m.de ? `<li>Vuelve a instalar la versión anterior (${h(m.de)}): <a href="${enlace(m.de)}">${enlace(m.de)}</a>. La app funcionará como antes.</li>` : '<li>Vuelve a instalar la versión que usabas antes. La app funcionará como antes.</li>'}
+       <li>Avisa del problema en <a href="https://github.com/${REPO}/issues">github.com/${REPO}/issues</a>, con el detalle de más abajo, para que se corrija.</li></ol>`;
+  const pagina = local => `<!DOCTYPE html><html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Mi Edificio · En mantención</title>
+    <body style="font:16px/1.5 system-ui,sans-serif;max-width:640px;margin:40px auto;padding:0 16px;color:#141a26"><h1>Mi Edificio está en mantención</h1>
+    ${local ? cuerpo + (m.detalle ? `<h2>Detalle técnico</h2><pre style="white-space:pre-wrap;background:#f4f6fa;padding:12px;border-radius:8px;font-size:13px">${h(m.detalle)}</pre>` : '') + (m.copia ? `<p style="color:#6b7280;font-size:14px">Copia previa: ${h(m.copia)}</p>` : '')
+            : '<p>La administración está actualizando el sistema. Tus datos están a salvo. Vuelve a intentarlo más tarde.</p>'}</body></html>`;
+  // el detalle solo se muestra a quien abre la página en este mismo computador
+  const esLocal = req => ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress) && !req.headers['x-forwarded-for'] && !req.headers['cf-connecting-ip'];
+  const srv = http.createServer((req, res) => {
+    if (req.url.startsWith('/api/')) { res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); return res.end(JSON.stringify({ data: null, error: 'Mi Edificio está en mantención.', mantencion: m.motivo })); }
+    res.writeHead(503, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Retry-After': '600' }); res.end(pagina(esLocal(req)));
+  });
+  const salir = async () => { srv.close(); try { await db.close(); } catch {} fs.rmSync(path.join(DATOS, 'servidor.pid'), { force: true }); process.exit(0); };
+  const bandera = path.join(DATOS, 'detener'); fs.rmSync(bandera, { force: true }); fs.writeFileSync(path.join(DATOS, 'servidor.pid'), String(process.pid));
+  setInterval(() => { if (fs.existsSync(bandera)) { fs.rmSync(bandera, { force: true }); salir(); } }, 1500);
+  process.on('SIGINT', salir); process.on('SIGTERM', salir);
+  srv.listen(PUERTO, () => { log(`Mi Edificio está funcionando EN MANTENCIÓN (${m.motivo}). Abre http://localhost:${PUERTO} en este computador para ver qué hacer.`); });
+  return new Promise(() => {});
+}
 
 // Secreto para firmar enlaces a archivos y claves VAPID de las notificaciones: se crean una vez
 const rutaCfg = path.join(DATOS, 'config.json');
@@ -358,6 +427,69 @@ async function respaldarNube() {
   return r.ultimo;
 }
 
+// --- Versión y actualizaciones ------------------------------------------------------------------
+// Una vez al día se consulta la última versión publicada. En Windows instalado con el instalador,
+// la administración puede actualizar con un clic: se descarga el instalador de esa versión, se
+// comprueba su suma y se ejecuta en silencio; él detiene el servidor, reemplaza el programa y lo
+// vuelve a iniciar. Al arrancar, la versión nueva aplica la actualización segura de más arriba.
+const INSTALADO_WIN = process.platform === 'win32' && fs.existsSync(path.join(RAIZ, 'instalado.txt'));
+const URL_ULTIMA = process.env.MI_EDIFICIO_ACTUALIZACIONES_URL || `https://api.github.com/repos/${REPO}/releases/latest`;
+// las descargas solo se aceptan desde las publicaciones del repositorio (o del servidor de pruebas)
+const ORIGEN_DESCARGAS = process.env.MI_EDIFICIO_ACTUALIZACIONES_URL ? new URL(URL_ULTIMA).origin + '/' : `https://github.com/${REPO}/releases/download/`;
+const novedad = { ultima: null, revisado: null, error: '', enCurso: false };
+// Descarga una URL siguiendo redirecciones (las publicaciones de GitHub redirigen), con tope de tamaño
+function pedirUrl(url, { max = 5e6, ms = 30000, saltos = 5 } = {}) {
+  return new Promise((ok, mal) => {
+    let u; try { u = new URL(url); } catch { return mal(new Error('dirección no válida')); }
+    const mod = u.protocol === 'https:' ? https : u.protocol === 'http:' ? http : null; if (!mod) return mal(new Error('dirección no válida'));
+    const r = mod.get(u, { headers: { 'User-Agent': 'mi-edificio', Accept: 'application/vnd.github+json, */*' }, timeout: ms }, res => {
+      if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location && saltos > 0) { res.resume(); return ok(pedirUrl(new URL(res.headers.location, u).href, { max, ms, saltos: saltos - 1 })); }
+      if (res.statusCode !== 200) { res.resume(); return mal(new Error('respondió ' + res.statusCode)); }
+      const t = []; let n = 0;
+      res.on('data', d => { n += d.length; if (n > max) { r.destroy(); mal(new Error('la descarga es más grande de lo esperado')); } else t.push(d); });
+      res.on('end', () => ok(Buffer.concat(t))); res.on('error', mal);
+    });
+    r.on('timeout', () => r.destroy(new Error('sin respuesta'))); r.on('error', mal);
+  });
+}
+async function buscarActualizacion() {
+  if (process.env.MI_EDIFICIO_SIN_ACTUALIZACIONES) return;
+  try {
+    const j = JSON.parse((await pedirUrl(URL_ULTIMA)).toString('utf8')), activos = Array.isArray(j.assets) ? j.assets : [];
+    novedad.ultima = { version: String(j.tag_name || '').replace(/^v/, ''), pagina: String(j.html_url || ''), notas: String(j.body || '').slice(0, 4000),
+      exe: activos.find(a => /^MiEdificio-Instalar-[\w.]+\.exe$/.test(a.name))?.browser_download_url || '', suma: activos.find(a => /\.exe\.sha256$/.test(a.name))?.browser_download_url || '' };
+    novedad.error = '';
+  } catch (e) { novedad.error = 'No se pudo consultar si hay una versión nueva: ' + e.message; }
+  novedad.revisado = new Date().toISOString();
+}
+async function estadoSistema() {
+  const u = novedad.ultima, hayNueva = !!u?.version && cmpVersion(u.version, VERSION_APP) > 0;
+  const h = await db.query(`select historial from sistema.instalacion where id = 1`);
+  return { version: VERSION_APP, hayNueva, ultima: u ? { version: u.version, pagina: u.pagina, notas: u.notas } : null, revisado: novedad.revisado, error: novedad.error,
+    autoinstalable: hayNueva && INSTALADO_WIN && !!u.exe && !!u.suma, enCurso: novedad.enCurso, historial: (h.rows[0]?.historial || []).slice(-10) };
+}
+async function actualizarAhora() {
+  const u = novedad.ultima;
+  if (!u || cmpVersion(u.version, VERSION_APP) <= 0) throw new Fallo('No hay una versión más nueva');
+  if (!INSTALADO_WIN) throw new Fallo('La actualización con un clic solo existe en Windows con el instalador. En este equipo, reemplaza los archivos por los de la versión nueva y reinicia.');
+  if (!u.exe || !u.suma || !u.exe.startsWith(ORIGEN_DESCARGAS) || !u.suma.startsWith(ORIGEN_DESCARGAS)) throw new Fallo('La versión publicada no trae un instalador verificable');
+  if (novedad.enCurso) throw new Fallo('Ya hay una actualización en curso');
+  novedad.enCurso = true;
+  try {
+    const dir = path.join(DATOS, 'actualizaciones'); fs.mkdirSync(dir, { recursive: true });
+    const bajar = (url, max) => pedirUrl(url, { max, ms: 120000 }).catch(e => { throw new Fallo('No se pudo descargar la actualización: ' + e.message); });
+    const esperada = ((await bajar(u.suma, 1000)).toString('utf8').match(/[0-9a-f]{64}/i) || [''])[0].toLowerCase();
+    const exe = await bajar(u.exe, 300 * 1024 * 1024);
+    if (!esperada || crypto.createHash('sha256').update(exe).digest('hex') !== esperada) throw new Fallo('El instalador descargado no coincide con su suma de verificación. No se instaló.');
+    fs.readdirSync(dir).forEach(x => fs.rmSync(path.join(dir, x), { force: true }));
+    const destino = path.join(dir, `MiEdificio-Instalar-${u.version.replace(/[^\w.]/g, '')}.exe`); fs.writeFileSync(destino, exe);
+    log(`Actualizando de ${VERSION_APP} a ${u.version} con ${destino}`);
+    spawn(destino, ['/S'], { detached: true, stdio: 'ignore', windowsHide: true }).unref();   // el instalador detiene este servidor y lo vuelve a iniciar
+    return { version: u.version };
+  } catch (e) { novedad.enCurso = false; throw e; }
+}
+setTimeout(buscarActualizacion, 60000).unref(); setInterval(buscarActualizacion, 24 * 3600000).unref();
+
 // --- Acceso desde internet: túnel de Cloudflare ------------------------------------------------
 // El servidor maneja el programa cloudflared, que publica este computador en una dirección HTTPS
 // sin abrir puertos. El túnel se crea en la cuenta Cloudflare del edificio, con su dominio, y se
@@ -477,6 +609,13 @@ async function api(req, res, url) {
   if (ruta.startsWith('/api/rpc/')) { const r = await llamar(uid, decodeURIComponent(ruta.slice('/api/rpc/'.length)), cuerpo); if (r.cambia) trasCambio(); return responder(res, 200, { data: r.dato }); }
   if (ruta === '/api/archivos/firmar') return responder(res, 200, { data: await firmar(uid, cuerpo.rutas, cuerpo.seg) });
   if (ruta === '/api/archivos/borrar') return responder(res, 200, { data: await borrar(uid, cuerpo.rutas) });
+  if (ruta.startsWith('/api/sistema/')) {   // solo administración
+    const adm = await como(uid, tx => tx.query(`select public.es_admin() as ok`)); if (!adm.rows[0]?.ok) throw new Fallo('Solo la administración puede gestionar las actualizaciones', 403);
+    if (ruta === '/api/sistema/buscar') await buscarActualizacion();
+    else if (ruta === '/api/sistema/actualizar') await actualizarAhora();
+    else if (ruta !== '/api/sistema/estado') throw new Fallo('No encontrado', 404);
+    return responder(res, 200, { data: await estadoSistema() });
+  }
   if (ruta.startsWith('/api/tunel/')) {   // solo administración
     const adm = await como(uid, tx => tx.query(`select public.es_admin() as ok`)); if (!adm.rows[0]?.ok) throw new Fallo('Solo la administración puede gestionar el acceso desde internet', 403);
     if (ruta === '/api/tunel/configurar') configurarTunel(cuerpo);
@@ -519,7 +658,7 @@ const servidor = http.createServer(async (req, res) => {
 });
 servidor.listen(PUERTO, () => {
   const ips = Object.values(os.networkInterfaces()).flat().filter(i => i && i.family === 'IPv4' && !i.internal).map(i => i.address);
-  log(`Mi Edificio está funcionando.`);
+  log(`Mi Edificio ${VERSION_APP} está funcionando.`);
   console.log(`  En este computador:   http://localhost:${PUERTO}`);
   ips.forEach(ip => console.log(`  En la red del edificio: http://${ip}:${PUERTO}`));
   console.log(`  Datos y respaldos en:  ${DATOS}`);

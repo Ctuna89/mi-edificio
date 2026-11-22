@@ -44,7 +44,7 @@ jobs:
           # notas = la sección "## <versión>" del CHANGELOG.md, sin el título
           awk -v v="$VERSION" '/^## /{ on = (index($0, "## " v) == 1); next } on' CHANGELOG.md > notes.md 2>/dev/null || true
           if [ -s notes.md ]; then
-            gh release create "$TAG" dist/*.exe --target "$GITHUB_SHA" --title "$TAG" --notes-file notes.md
+            gh release create "$TAG" dist/*.exe dist/*.sha256 --target "$GITHUB_SHA" --title "$TAG" --notes-file notes.md
           else
-            gh release create "$TAG" dist/*.exe --target "$GITHUB_SHA" --title "$TAG" --generate-notes
+            gh release create "$TAG" dist/*.exe dist/*.sha256 --target "$GITHUB_SHA" --title "$TAG" --generate-notes
           fi

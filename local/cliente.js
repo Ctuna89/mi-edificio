@@ -62,6 +62,8 @@ function createClient(){
     // Solo modo local: lo que no existe en Supabase
     local:{ restablecer:(uid,clave)=>api('/api/auth/restablecer',{uid, clave}),
       // respaldo cifrado en una carpeta sincronizada con la nube (OneDrive, Google Drive…)
+      // versión instalada, versiones nuevas y actualización con un clic
+      sistema:{ estado:()=>api('/api/sistema/estado'), buscar:()=>api('/api/sistema/buscar'), actualizar:()=>api('/api/sistema/actualizar') },
       // acceso desde internet mediante un túnel de Cloudflare que maneja el servidor
       tunel:{ estado:()=>api('/api/tunel/estado'), configurar:d=>api('/api/tunel/configurar',d) },
       respaldo:{ estado:()=>api('/api/respaldo/estado'), configurar:d=>api('/api/respaldo/configurar',d), ahora:()=>api('/api/respaldo/ahora') } },

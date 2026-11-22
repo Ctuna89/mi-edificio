@@ -18,7 +18,7 @@ const DIRECCION = `http://localhost:${PUERTO}`;
 const BANDERA = path.join(DATOS, 'detener'), REGISTRO = path.join(DATOS, 'servidor.log');
 
 const responde = () => new Promise(ok => {
-  const r = http.get(DIRECCION + '/api/auth/sesion', { timeout: 1500 }, res => { let s = ''; res.on('data', d => s += d); res.on('end', () => ok(res.statusCode === 200 && s.includes('"data"'))); });
+  const r = http.get(DIRECCION + '/api/auth/sesion', { timeout: 1500 }, res => { let s = ''; res.on('data', d => s += d); res.on('end', () => ok(s.includes('"data"'))); });   // también cuenta si responde "en mantención"
   r.on('error', () => ok(false)); r.on('timeout', () => { r.destroy(); ok(false); });
 });
 // ¿Sigue vivo el proceso del servidor? (puede haber dejado de atender y estar aún respaldando y cerrando)
@@ -33,7 +33,7 @@ async function iniciar() {
   try { if (fs.statSync(REGISTRO).size > 5 * 1024 * 1024) fs.renameSync(REGISTRO, REGISTRO + '.anterior'); } catch {}
   const log = fs.openSync(REGISTRO, 'a');
   spawn(process.execPath, [path.join(AQUI, 'server.mjs')], { detached: true, windowsHide: true, stdio: ['ignore', log, log], env: { ...process.env, MI_EDIFICIO_DATOS: DATOS, PUERTO: String(PUERTO) } }).unref();
-  return esperar(responde, 120);
+  return esperar(responde, 300);   // una actualización de la base de datos puede tardar
 }
 async function detener() {
   if (await responde()) fs.writeFileSync(BANDERA, '1');   // el servidor la ve, hace su respaldo y se cierra ordenadamente

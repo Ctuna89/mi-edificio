@@ -91,6 +91,9 @@ Section "${NOMBRE} (requerido)" SecPrincipal
   CreateShortcut "$SMPROGRAMS\${NOMBRE}\Abrir ${NOMBRE}.lnk" "$SYSDIR\wscript.exe" '"$INSTDIR\abrir.vbs"' "$INSTDIR\icono.ico"
   CreateShortcut "$SMPROGRAMS\${NOMBRE}\Detener ${NOMBRE}.lnk" "$SYSDIR\wscript.exe" '"$INSTDIR\detener.vbs"' "$INSTDIR\icono.ico"
   CreateShortcut "$SMPROGRAMS\${NOMBRE}\Desinstalar ${NOMBRE}.lnk" "$INSTDIR\desinstalar.exe"
+  ; instalación silenciosa (actualización con un clic): no hay página final, así que se inicia aquí
+  IfSilent 0 +2
+  Exec '"$SYSDIR\wscript.exe" "$INSTDIR\iniciar.vbs"'
 SectionEnd
 
 Section "Iniciar junto con Windows" SecInicio

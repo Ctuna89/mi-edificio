@@ -6,7 +6,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-VERSION="$(tr -d '[:space:]' < VERSION)"
+VERSION="${1:-$(tr -d '[:space:]' < VERSION)}"   # se puede indicar otra versión como argumento (para pruebas)
 # Node.js para Windows que se incluye. Al cambiar la versión, actualiza también la suma
 # (está en https://nodejs.org/dist/<versión>/SHASUMS256.txt, línea win-x64/node.exe).
 NODE_VERSION="v22.12.0"
@@ -54,4 +54,5 @@ node instalador/icono.mjs "$ETAPA/icono.ico"
 makensis -V2 -DVERSION="$VERSION" -DETAPA="$(pwd)/$ETAPA" -DSALIDA="$(pwd)/dist/MiEdificio-Instalar-$VERSION.exe" instalador/mi-edificio.nsi
 rm -rf "$OBRA"
 ls -la "dist/MiEdificio-Instalar-$VERSION.exe"
-sha256sum "dist/MiEdificio-Instalar-$VERSION.exe"
+# suma de verificación: la usa la actualización con un clic para comprobar la descarga
+(cd dist && sha256sum "MiEdificio-Instalar-$VERSION.exe" > "MiEdificio-Instalar-$VERSION.exe.sha256" && cat "MiEdificio-Instalar-$VERSION.exe.sha256")

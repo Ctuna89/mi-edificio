@@ -23,13 +23,16 @@ else { e('ERR Unauthorized: Invalid tunnel secret event=0'); process.exit(1); }
 const hasta = async (fn, seg = 15) => { for (let i = 0; i < seg * 5; i++) { const x = await fn(); if (x) return x; await new Promise(r => setTimeout(r, 200)); } return null; };
 const vive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
 let proc;
-const levantar = () => new Promise((ok, mal) => {
-  proc = spawn(process.execPath, [path.join(AQUI, 'server.mjs')], { env: { ...process.env, MI_EDIFICIO_DATOS: DATOS, PUERTO: String(PUERTO), MI_EDIFICIO_CLOUDFLARED: FALSO }, stdio: ['ignore', 'pipe', 'pipe'] });
+// "GitHub" de mentira: anuncia la última versión publicada
+const PUERTO_GH = PUERTO + 200; let ultimaPublicada = { tag_name: 'v0.0.1', html_url: 'https://example.test/v0.0.1', body: 'Notas', assets: [] };
+const gh = (await import('node:http')).createServer((req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(ultimaPublicada)); }).listen(PUERTO_GH);
+const levantar = (extra = {}) => new Promise((ok, mal) => {
+  proc = spawn(process.execPath, [path.join(AQUI, 'server.mjs')], { env: { ...process.env, MI_EDIFICIO_DATOS: DATOS, PUERTO: String(PUERTO), MI_EDIFICIO_CLOUDFLARED: FALSO, MI_EDIFICIO_ACTUALIZACIONES_URL: `http://localhost:${PUERTO_GH}/latest`, ...extra }, stdio: ['ignore', 'pipe', 'pipe'] });
   let salida = ''; const ver = d => { salida += d; if (salida.includes('está funcionando')) ok(); };
   proc.stdout.on('data', ver); proc.stderr.on('data', ver); proc.on('exit', c => mal(new Error('el servidor terminó (' + c + '): ' + salida.slice(-500))));
 });
 const bajar = () => new Promise(ok => { proc.removeAllListeners('exit'); proc.on('exit', ok); proc.kill('SIGTERM'); });
-before(levantar); after(async () => { await bajar(); fs.rmSync(DATOS, { recursive: true, force: true }); });
+before(() => levantar()); after(async () => { await bajar(); gh.close(); fs.rmSync(DATOS, { recursive: true, force: true }); });
 
 // Un "navegador": guarda su cookie de sesión
 function persona() {
@@ -196,4 +199,40 @@ test('contraseñas: la restablece la administración, y los datos persisten tras
   assert.equal((await rita.db({ t: 'gasto_unidades', op: 'select' })).data[0].monto, 600, 'sesión y datos siguen ahí');
   assert.equal((await ana.db({ t: 'comunicados', op: 'select' })).data[0].titulo, 'Corte de agua');
   assert.ok(await hasta(async () => (await ana.pedir('/api/tunel/estado')).data.estado === 'conectado'), 'el acceso desde internet vuelve solo al reiniciar');
+});
+
+test('versiones: aviso de versión nueva', async () => {
+  const VERSION = fs.readFileSync(path.join(AQUI, '..', 'VERSION'), 'utf8').trim();
+  assert.equal((await rita.pedir('/api/sistema/estado')).estado, 403, 'solo administración');
+  let e = (await ana.pedir('/api/sistema/buscar')).data; assert.equal(e.version, VERSION); assert.equal(e.hayNueva, false, 'una versión publicada más antigua no se ofrece');
+  ultimaPublicada = { tag_name: 'v99.0.0', html_url: 'https://example.test/v99', body: 'Mejoras', assets: [{ name: 'MiEdificio-Instalar-99.0.0.exe', browser_download_url: `http://localhost:${PUERTO_GH}/x.exe` }, { name: 'MiEdificio-Instalar-99.0.0.exe.sha256', browser_download_url: `http://localhost:${PUERTO_GH}/x.sha256` }] };
+  e = (await ana.pedir('/api/sistema/buscar')).data; assert.equal(e.hayNueva, true); assert.equal(e.ultima.version, '99.0.0'); assert.equal(e.autoinstalable, false, 'fuera de Windows no hay actualización con un clic');
+  assert.equal((await ana.pedir('/api/sistema/actualizar')).estado, 400);
+  assert.ok(e.historial.at(-1).a === VERSION, 'la base recuerda qué versión la dejó como está');
+});
+
+test('una actualización que falla no toca los datos, y un programa más antiguo no puede abrir una base más nueva', async () => {
+  const VERSION = fs.readFileSync(path.join(AQUI, '..', 'VERSION'), 'utf8').trim(), pagina = async (cab = {}) => { const r = await fetch(B + '/', { headers: cab }); return { e: r.status, t: await r.text() }; };
+  // "versión 50": su esquema borra una columna y las unidades… y después falla
+  const malo = path.join(DATOS, 'esquema-malo.sql');
+  fs.writeFileSync(malo, fs.readFileSync(path.join(AQUI, '..', 'supabase', 'schema.sql'), 'utf8') + '\nalter table public.usuarios drop column telefono;\ndelete from public.unidades;\nselect 1/0;\n');
+  await bajar(); await levantar({ MI_EDIFICIO_VERSION: '50.0.0', MI_EDIFICIO_ESQUEMA: malo });
+  let p = await pagina(); assert.equal(p.e, 503); assert.match(p.t, /Los datos del edificio no se modificaron/); assert.match(p.t, /division by zero/, 'en el computador del edificio se ve el detalle');
+  assert.ok(p.t.includes(`releases/tag/v${VERSION}`), 'indica a qué versión volver');
+  p = await pagina({ 'x-forwarded-for': '203.0.113.9' }); assert.ok(p.e === 503 && !p.t.includes('division by zero') && p.t.includes('Tus datos están a salvo'), 'desde fuera solo se ve un aviso general');
+  const api = await fetch(B + '/api/auth/sesion'); assert.equal(api.status, 503); assert.equal((await api.json()).mantencion, 'fallo');
+  assert.ok(fs.readdirSync(path.join(DATOS, 'respaldos')).some(x => x.startsWith(`antes-de-actualizar-${VERSION}-a-50.0.0-`)), 'antes de intentar, guardó una copia');
+  // se vuelve a la versión anterior: todo sigue como estaba
+  await bajar(); await levantar();
+  const yo = (await ana.db({ t: 'usuarios', op: 'select' })).data; assert.ok('telefono' in yo[0], 'la columna que el esquema fallido borraba sigue ahí');
+  assert.equal((await ana.db({ t: 'unidades', op: 'select' })).data.length, 2, 'y las unidades también');
+  assert.equal((await ana.pedir('/api/sistema/estado')).data.historial.at(-1).a, VERSION, 'la base sigue marcada con la versión anterior');
+  // una versión nueva que sí funciona
+  await bajar(); await levantar({ MI_EDIFICIO_VERSION: '50.0.1' });
+  const e = (await ana.pedir('/api/sistema/estado')).data; assert.equal(e.version, '50.0.1'); assert.deepEqual([e.historial.at(-1).de, e.historial.at(-1).a], [VERSION, '50.0.1']);
+  assert.equal((await ana.db({ t: 'unidades', op: 'select' })).data.length, 2, 'los datos pasan a la versión nueva');
+  // y ahora alguien instala encima un programa más antiguo
+  await bajar(); await levantar();
+  p = await pagina(); assert.equal(p.e, 503); assert.match(p.t, /actualizados por la versión <b>50\.0\.1<\/b>/); assert.equal((await (await fetch(B + '/api/auth/sesion')).json()).mantencion, 'retroceso');
+  await bajar(); await levantar({ MI_EDIFICIO_VERSION: '50.0.1' }); assert.equal((await ana.db({ t: 'unidades', op: 'select' })).data.length, 2, 'con la versión correcta vuelve a funcionar');
 });
