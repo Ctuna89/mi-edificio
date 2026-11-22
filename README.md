@@ -141,7 +141,7 @@ Limitaciones: en iPhone/iPad las notificaciones web solo funcionan con la app ag
 
 ## Seguridad
 
-El modelo de seguridad, las limitaciones conocidas y una lista de verificación para configurar Supabase están en [`SECURITY.md`](SECURITY.md). Lo esencial: activa la confirmación de correo y el CAPTCHA en Supabase Auth, protege con MFA tu cuenta de Supabase, y ten presente que los archivos subidos son públicos para quien tenga su URL.
+El modelo de seguridad, las limitaciones conocidas y una lista de verificación para configurar Supabase están en [`SECURITY.md`](SECURITY.md). Lo esencial: activa la confirmación de correo y el CAPTCHA en Supabase Auth, protege con MFA tu cuenta de Supabase, y limita quién tiene acceso al proyecto.
 
 ## Datos personales (Chile)
 
@@ -169,7 +169,7 @@ Lo que debe resolver cada comunidad (no lo hace el software):
 2. Definir sus **plazos de conservación** en Administración → Edificio. Mientras no se definan, nada se borra: visitas (con RUT y patente de terceros), rondas, encomiendas y mensajes se acumulan indefinidamente. Gastos comunes, comunicados, documentos, encuestas y órdenes de trabajo no tienen borrado automático.
 3. Pedir a las visitas solo los datos necesarios; RUT y patente son opcionales en el formulario.
 4. Tener un procedimiento para responder solicitudes de los titulares y para avisar a la Agencia y a los afectados si hay una filtración.
-5. No subir a Documentos archivos con datos personales de terceros (listados de morosidad, contratos con RUT): son públicos por URL.
+5. Decidir qué se sube a Documentos: todo residente del edificio puede leer lo que se publique ahí (listados de morosidad o contratos con RUT no deberían ir).
 
 ### Cómo funciona el borrado por plazo
 
@@ -177,7 +177,7 @@ Una tarea diaria (`pg_cron`, 07:23 UTC) borra en cada edificio lo que supera sus
 
 ## Fotos y archivos
 
-Se guardan en el bucket `fotos` de Supabase Storage (lectura pública por URL con nombre aleatorio, sin listado; escritura solo de usuarios activos en la carpeta de su edificio). Las imágenes se comprimen en el navegador a 1280 px antes de subir. El plan gratuito incluye 1 GB.
+Se guardan en el bucket privado `fotos` de Supabase Storage. Nadie puede abrirlos sin sesión: la app pide a Supabase una URL firmada que dura 1 hora, y Supabase solo la entrega a quien puede leer ese archivo según su rol (por ejemplo, la foto de una encomienda la ven conserjería, administración y la unidad destinataria; las fotos de una orden de trabajo, la administración y la empresa asignada). Solo se puede subir a la carpeta del propio edificio. Las imágenes se comprimen en el navegador a 1280 px antes de subir. El plan gratuito incluye 1 GB.
 
 ## Visitas con QR
 
@@ -209,7 +209,7 @@ No incluidos por decisión de alcance. Si más adelante se agrega (Webpay, Khipu
 
 Vuelve a ejecutar `supabase/schema.sql` completo en el SQL Editor y publica de nuevo la carpeta `web/`. El script migra solo: la fila de `config` pasa a ser el primer edificio (tabla `edificios`) y todos los datos existentes quedan asociados a él. Haz un respaldo antes (*Database → Backups*).
 
-Los archivos subidos antes de la actualización siguen visibles, pero quedan fuera de la carpeta del edificio: desde la app ya no se pueden borrar del bucket (sí desde el panel de Supabase).
+Los archivos subidos antes de la actualización quedan fuera de la carpeta del edificio: se siguen viendo con las mismas reglas por rol, pero desde la app ya no se pueden borrar del bucket (sí desde el panel de Supabase). Si tu bucket `fotos` era público, el script lo deja privado: cualquier enlace directo a un archivo que se haya compartido antes deja de funcionar.
 
 ## Pruebas
 
@@ -232,7 +232,10 @@ La CI lo ejecuta en cada push junto con la verificación de sintaxis del fronten
 2. Administradoras con varios edificios: que una misma cuenta pueda pertenecer a más de un edificio y cambiar entre ellos.
 3. Pagos en línea mediante Edge Function.
 4. Avisos push para comunicados y encuestas nuevas.
-5. Bucket privado con URLs firmadas para fotos y documentos.
+
+## Versiones
+
+La versión vigente está en el archivo [`VERSION`](VERSION) y los cambios de cada una en [`CHANGELOG.md`](CHANGELOG.md). Al fusionar una versión nueva en `main`, el workflow `Release` crea la etiqueta y el release en GitHub.
 
 ## Contribuir
 

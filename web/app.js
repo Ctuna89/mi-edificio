@@ -46,8 +46,27 @@ if(!CFG.SUPABASE_URL || CFG.SUPABASE_URL.includes('TU-PROYECTO')){ document.getE
 const sb = window.supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON_KEY);
 async function q(p){ const {data,error}=await p; if(error) throw error; return data; }
 const T = t => sb.from(t);
-// Devuelve la URL ya escapada para usarla dentro de atributos HTML (src/href)
-const fotoUrl = path => path ? esc(sb.storage.from('fotos').getPublicUrl(path).data.publicUrl) : '';
+// El bucket es privado: los archivos se abren con URLs firmadas que duran 1 hora y que Supabase
+// solo entrega a quien puede leer el archivo. En las plantillas se escribe
+//   <img data-f="ruta">  o  <a data-f="ruta">
+// y firmarPendientes() completa src/href en cuanto el elemento aparece en la página.
+const FIRMA_SEG=3600, URLS=new Map();
+async function firmar(paths){
+  const falta=[...new Set(paths)].filter(p=>p && !(URLS.get(p)?.hasta>Date.now()));
+  if(falta.length){ const {data,error}=await sb.storage.from('fotos').createSignedUrls(falta, FIRMA_SEG); if(error) console.warn('firmar',error);
+    (data||[]).forEach(d=>{ if(d.signedUrl) URLS.set(d.path, {url:d.signedUrl, hasta:Date.now()+(FIRMA_SEG-600)*1000}); }); }
+  return paths.map(p=>URLS.get(p)?.url||'');
+}
+const urlFirmada = async path => path ? (await firmar([path]))[0] : '';
+let firmaT=null;
+async function firmarPendientes(){
+  const els=$$('[data-f]:not([data-fok])'); if(!els.length) return; els.forEach(e=>e.setAttribute('data-fok','1'));
+  const urls=await firmar(els.map(e=>e.dataset.f)).catch(()=>[]);
+  els.forEach((e,i)=>{ const u=urls[i]; if(u) e.setAttribute(e.tagName==='A'?'href':'src', u); else if(e.tagName==='IMG') e.style.visibility='hidden'; });
+}
+new MutationObserver(()=>{ clearTimeout(firmaT); firmaT=setTimeout(firmarPendientes,0); }).observe(document.body,{childList:true,subtree:true});
+// antes de que venzan, se vuelven a firmar las URLs de lo que sigue en pantalla
+setInterval(()=>{ URLS.clear(); $$('[data-fok]').forEach(e=>e.removeAttribute('data-fok')); firmarPendientes(); }, (FIRMA_SEG-900)*1000);
 
 // Suscripción: carga inicial + refetch al recibir cambios realtime en las tablas indicadas
 let chanN=0;
@@ -76,7 +95,7 @@ async function uploadImage(file, folder='img'){
 async function uploadFile(file, folder='docs'){ const ext=(file.name.split('.').pop()||'bin').toLowerCase().replace(/[^a-z0-9]/g,''); const path=`${dirEdif()}${folder}/${todayStr()}/${rndSeguro()}.${ext}`; await q(sb.storage.from('fotos').upload(path, file, {contentType:file.type||undefined})); return path; }
 async function subirFotos(input, folder){ const ids=[]; for(const f of Array.from(input?.files||[])){ try{ ids.push(await uploadImage(f, folder)); }catch(e){ toast('Foto no subida: '+errMsg(e)); } } return ids; }
 const fotoInput=(name='fotos')=>`<label class="f"><span>Fotos (puedes tomar varias)</span><input type="file" name="${name}" accept="image/*" capture="environment" multiple></label>`;
-function viewImg(path){ modal(`<img src="${fotoUrl(path)}" style="width:100%;border-radius:10px"><div class="center" style="margin-top:10px"><button class="btn sec" data-close>Cerrar</button></div>`); }
+function viewImg(path){ modal(`<img data-f="${esc(path)}" style="width:100%;border-radius:10px"><div class="center" style="margin-top:10px"><button class="btn sec" data-close>Cerrar</button></div>`); }
 
 // ---------- estado ----------
 const S = { session:null, uid:null, cfg:null, me:null, users:{}, unidades:{}, empresas:{}, activos:{}, estac:{}, viewSubs:[], globalSubs:[], ready:false };
@@ -161,7 +180,7 @@ async function boot(){
   S.uid? start() : viewAuth();
 }
 async function salir(){ try{ await pushDesactivar(); }catch(e){} lsSet('verComo',null); return sb.auth.signOut(); }
-function teardown(){ clearViewSubs(); S.globalSubs.forEach(u=>{try{u();}catch(e){}}); S.globalSubs=[]; S.ready=false; S.cfgLoaded=false; S.meLoaded=false; S.cfg=null; S.me=null; S.users={}; S.unidades={}; S.empresas={}; S.activos={}; S.estac={}; }
+function teardown(){ URLS.clear(); clearViewSubs(); S.globalSubs.forEach(u=>{try{u();}catch(e){}}); S.globalSubs=[]; S.ready=false; S.cfgLoaded=false; S.meLoaded=false; S.cfg=null; S.me=null; S.users={}; S.unidades={}; S.empresas={}; S.activos={}; S.estac={}; }
 function clearViewSubs(){ S.viewSubs.forEach(u=>{ try{u();}catch(e){} }); S.viewSubs=[]; }
 
 function viewAuth(mode='login', msg=''){
@@ -209,9 +228,21 @@ function routeNow(){
   renderShell();
   VIEWS[currentView](currentParam);
 }
-function refreshView(){ if(S.ready && typeof REFRESH[currentView]==='function' && !$('.modal')) REFRESH[currentView](); }
-function shellLess(inner){ return `<div style="max-width:560px;margin:40px auto;padding:14px"><div class="center" style="margin-bottom:16px"><div class="logo-prev" style="margin:0 auto 10px">${S.cfg?.logo?`<img src="${fotoUrl(S.cfg.logo)}">`:'🏢'}</div><h1 style="margin:0">${esc(S.cfg?.nombre||'Mi Edificio')}</h1></div>${inner}</div>`; }
-function logoHtml(){ return S.cfg?.logo? `<img src="${fotoUrl(S.cfg.logo)}" alt="">` : esc((S.cfg?.nombre||'E').trim()[0]||'E').toUpperCase(); }
+// Redibuja la vista actual cuando cambian los catálogos, pero nunca mientras alguien escribe en
+// ella o hay una ventana abierta (se perdería lo que está a medio llenar): se reintenta después.
+let editT=0, refreshT=null;
+document.addEventListener('input',e=>{ if($('#main')?.contains(e.target)) editT=Date.now(); },true);
+document.addEventListener('submit',()=>{ editT=0; },true);
+document.addEventListener('change',e=>{ if(!e.target.closest?.('form')) editT=0; },true);   // campos que guardan al cambiar
+function refreshView(){
+  if(!S.ready || typeof REFRESH[currentView]!=='function') return;
+  const ae=document.activeElement; const escribiendo=($('#main')?.contains(ae) && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName)) || Date.now()-editT<15000;
+  clearTimeout(refreshT);
+  if($('.modal') || escribiendo){ refreshT=setTimeout(refreshView,2000); return; }
+  REFRESH[currentView]();
+}
+function shellLess(inner){ return `<div style="max-width:560px;margin:40px auto;padding:14px"><div class="center" style="margin-bottom:16px"><div class="logo-prev" style="margin:0 auto 10px">${S.cfg?.logo?`<img data-f="${esc(S.cfg.logo)}">`:'🏢'}</div><h1 style="margin:0">${esc(S.cfg?.nombre||'Mi Edificio')}</h1></div>${inner}</div>`; }
+function logoHtml(){ return S.cfg?.logo? `<img data-f="${esc(S.cfg.logo)}" alt="">` : esc((S.cfg?.nombre||'E').trim()[0]||'E').toUpperCase(); }
 function updateBrand(){ $$('.brand b, header.top .t b').forEach(b=>b.textContent=S.cfg?.nombre||''); $$('.brand small').forEach(s=>s.textContent=S.cfg?.direccion||''); $$('.brand .logo, header.top .logo').forEach(l=>l.innerHTML=logoHtml()); }
 function renderShell(){
   const r=role(); const mods=MODULES.filter(m=>m.roles.includes(r));
@@ -369,7 +400,7 @@ function detalleGastoAdmin(g, pr){
 
 // Exportar un período a Excel (.xlsx) o PDF (diálogo de impresión → "Guardar como PDF").
 // Con `mio` (fila de gasto_unidades del residente) genera su aviso de cobro; sin él, el informe completo.
-function exportGasto(tipo, g, pr, mio){
+async function exportGasto(tipo, g, pr, mio){
   const c=S.cfg||{}; const items=g.items||[]; const mes=fmtMonth(g.periodo);
   const dmy=d=>d?String(d).slice(8,10)+'-'+String(d).slice(5,7)+'-'+String(d).slice(0,4):'—';
   const us=Object.values(pr||{}).sort((a,b)=>a.depto.localeCompare(b.depto,undefined,{numeric:true}));
@@ -386,7 +417,8 @@ function exportGasto(tipo, g, pr, mio){
         [B('Total'),'',B(us.reduce((a,u)=>a+Number(u.alicuota),0)),B(us.reduce((a,u)=>a+Number(u.monto),0))]]}];
     descargar(new Blob([window.MiniXlsx.build(hojas)],{type:window.MiniXlsx.MIME}), archivo+'.xlsx'); return;
   }
-  const cab=`<div class="ph">${c.logo?`<img src="${fotoUrl(c.logo)}" alt="">`:''}<div><b>${esc(c.nombre||'')}</b><br>${esc([c.direccion,c.comuna].filter(Boolean).join(', '))}</div></div>`;
+  const logo=await urlFirmada(c.logo).catch(()=>'');
+  const cab=`<div class="ph">${logo?`<img src="${esc(logo)}" alt="">`:''}<div><b>${esc(c.nombre||'')}</b><br>${esc([c.direccion,c.comuna].filter(Boolean).join(', '))}</div></div>`;
   const banco=c.datos_bancarios?`<h2>Datos para transferir</h2><div class="pie">${esc(c.datos_bancarios)}</div>`:'';
   imprimir(archivo, mio?
     `${cab}<h1>Aviso de cobro · Gastos comunes ${esc(mes)}</h1><p class="sub">Depto ${esc(mio.depto)} · Alícuota ${Number(mio.alicuota)}% · Vence ${dmy(g.vence)} · ${mio.pagado?'Pagado':'Pendiente de pago'}</p>
@@ -461,7 +493,7 @@ function detalleIncidencia(x){
   const staff=isStaff(); const conserjes=Object.values(S.users).filter(u=>u.rol==='conserje'&&u.estado==='activo');
   const m=modal(`<h3>${esc(x.titulo)}</h3><div class="row wrap" style="gap:6px;margin-bottom:8px">${pillOf(EST_INC,x.estado)}${pillOf(PRIO,x.prioridad)}<span class="muted small">Depto ${esc(x.depto)} · ${fmtDate(x.ts)}</span></div>
   <p>${esc(x.descripcion)}</p><div class="small muted">📍 ${esc(x.ubicacion||'Sin ubicación')}${x.asignado_a?' · Asignada a '+esc(userName(x.asignado_a)):''}${x.ot_id&&role()!=='residente'&&role()!=='propietario'?' · <a href="#mantencion--'+esc(x.ot_id)+'">Ver OT</a>':''}</div>
-  <div class="photos">${(x.fotos||[]).map(f=>`<img src="${fotoUrl(f)}" data-img="${esc(f)}">`).join('')}</div>
+  <div class="photos">${(x.fotos||[]).map(f=>`<img data-f="${esc(f)}" data-img="${esc(f)}">`).join('')}</div>
   ${staff?`<h2>Gestión</h2><div class="row wrap" style="gap:6px">
     ${x.estado==='abierta'?`<button class="btn sm" data-st="en_curso">Tomar / En curso</button>`:''}
     ${x.estado==='en_curso'?`<button class="btn ok sm" data-st="resuelta">Marcar resuelta</button>`:''}
@@ -472,7 +504,7 @@ function detalleIncidencia(x){
   ${conserjes.length?`<label class="f" style="margin-top:10px"><span>Asignar a</span><select id="asig"><option value="">— Sin asignar —</option>${conserjes.map(u=>`<option value="${u.id}" ${x.asignado_a===u.id?'selected':''}>${esc(u.nombre)}</option>`).join('')}</select></label>`:''}
   <label class="f"><span>Agregar nota (y fotos)</span><textarea id="nota" placeholder="Comentario para el historial"></textarea><input type="file" id="notaFotos" accept="image/*" capture="environment" multiple style="margin-top:6px"></label><button class="btn sec sm" id="addNota">Agregar nota</button>`
   : (x.estado==='resuelta'&&x.uid===S.uid?`<div class="info" style="margin-top:10px">¿Quedó resuelto? <button class="btn ok sm" data-st="cerrada">Sí, cerrar</button> <button class="btn sec sm" data-st="abierta">No, reabrir</button></div>`:'')}
-  <h2>Historial</h2><div class="timeline">${(x.historial||[]).slice().reverse().map(h=>`<div><b>${esc(h.accion)}</b> <span class="muted">· ${esc(userName(h.uid))} · ${fmtDate(h.ts)}</span>${h.nota?'<br>'+esc(h.nota):''}${h.fotos?.length?'<div class="photos">'+h.fotos.map(f=>`<img src="${fotoUrl(f)}" data-img="${esc(f)}">`).join('')+'</div>':''}</div>`).join('')}</div>`);
+  <h2>Historial</h2><div class="timeline">${(x.historial||[]).slice().reverse().map(h=>`<div><b>${esc(h.accion)}</b> <span class="muted">· ${esc(userName(h.uid))} · ${fmtDate(h.ts)}</span>${h.nota?'<br>'+esc(h.nota):''}${h.fotos?.length?'<div class="photos">'+h.fotos.map(f=>`<img data-f="${esc(f)}" data-img="${esc(f)}">`).join('')+'</div>':''}</div>`).join('')}</div>`);
   const upd=p=>q(T('incidencias').update(p).eq('id',x.id));
   const hist=(accion,extra={})=>[...(x.historial||[]),{ts:now(),uid:S.uid,accion,...extra}];
   m.addEventListener('click', async e=>{ const st=e.target.closest('[data-st]'); const img=e.target.closest('[data-img]'); if(img){ viewImg(img.dataset.img); return; }
@@ -523,7 +555,7 @@ VIEWS.comunicados = function(){
   const puede=['comite','admin'].includes(role());
   setMain(`<h1>Comunicados</h1>${puede?'<div style="margin-bottom:10px"><button class="btn" id="bNewC">+ Nuevo comunicado</button></div>':''}<div id="cList" class="list"></div>`);
   $('#bNewC')?.addEventListener('click',()=>formComunicado());
-  let docs=[]; watch('comunicados', ()=>q(T('comunicados').select('*').order('ts',{ascending:false}).limit(100)), rows=>{ docs=rows; const el=$('#cList'); if(!el) return; el.innerHTML=docs.map(c=>`<div class="item static"><div class="hd"><b>${esc(c.titulo)}</b><span class="muted small">${fmtDate(c.ts)}</span></div><div style="margin-top:6px;white-space:pre-wrap">${esc(c.cuerpo)}</div><div class="meta">${esc(ROLES[c.rol]||'')} · ${esc(userName(c.uid))}${c.adjunto?` · <a href="${fotoUrl(c.adjunto)}" target="_blank">Adjunto</a>`:''}${puede?` · <a href="#" data-ed="${c.id}">Editar</a> · <a href="#" data-del="${c.id}">Eliminar</a>`:''}</div></div>`).join('')||'<div class="empty">Sin comunicados</div>'; });
+  let docs=[]; watch('comunicados', ()=>q(T('comunicados').select('*').order('ts',{ascending:false}).limit(100)), rows=>{ docs=rows; const el=$('#cList'); if(!el) return; el.innerHTML=docs.map(c=>`<div class="item static"><div class="hd"><b>${esc(c.titulo)}</b><span class="muted small">${fmtDate(c.ts)}</span></div><div style="margin-top:6px;white-space:pre-wrap">${esc(c.cuerpo)}</div><div class="meta">${esc(ROLES[c.rol]||'')} · ${esc(userName(c.uid))}${c.adjunto?` · <a data-f="${esc(c.adjunto)}" target="_blank">Adjunto</a>`:''}${puede?` · <a href="#" data-ed="${c.id}">Editar</a> · <a href="#" data-del="${c.id}">Eliminar</a>`:''}</div></div>`).join('')||'<div class="empty">Sin comunicados</div>'; });
   $('#cList').addEventListener('click', async e=>{ const ed=e.target.closest('[data-ed]'), del=e.target.closest('[data-del]'); if(ed){ e.preventDefault(); formComunicado(docs.find(x=>x.id===ed.dataset.ed)); } if(del){ e.preventDefault(); if(await confirmBox('¿Eliminar comunicado?')) await q(T('comunicados').delete().eq('id',del.dataset.del)); } });
 };
 function formComunicado(c={}){
@@ -577,7 +609,7 @@ VIEWS.encomiendas = function(){
   $('#bNewE')?.addEventListener('click',()=>{ const m=modal(`<h3>Registrar encomienda</h3><form id="fE"><label class="f"><span>Departamento</span><input type="text" name="depto" list="dl" required><datalist id="dl">${Object.keys(S.unidades).map(d=>`<option value="${esc(d)}">`).join('')}</datalist></label><label class="f"><span>Descripción</span><input type="text" name="desc" placeholder="Caja mediana, sobre, etc." required></label><label class="f"><span>Empresa / remitente</span><input type="text" name="courier" placeholder="Chilexpress, Mercado Libre…"></label><label class="f"><span>Foto (opcional)</span><input type="file" name="foto" accept="image/*" capture="environment"></label><button class="btn full">Registrar</button></form>`);
     $('#fE',m).addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); const b=$('button',e.target); busy(b,true); try{ const f=$('[name=foto]',m).files[0]; const foto=f?await uploadImage(f,'encomiendas'):''; await q(T('encomiendas').insert({depto:d.depto.trim(), descripcion:d.desc.trim(), courier:d.courier.trim(), foto, recibido_por:S.uid, entregado:false})); closeModal(); toast('Encomienda registrada'); }catch(err){ toast('Error: '+errMsg(err)); busy(b,false); } }); });
   let tab='pend', docs=[]; $('#eTabs').addEventListener('click',e=>{ const b=e.target.closest('button'); if(!b) return; $$('#eTabs button').forEach(x=>x.classList.remove('on')); b.classList.add('on'); tab=b.dataset.t; draw(); });
-  const draw=()=>{ const el=$('#eList'); if(!el) return; let d=docs; if(resid) d=d.filter(x=>x.depto===myDepto()); d=d.filter(x=>tab==='pend'?!x.entregado:x.entregado); el.innerHTML=d.map(x=>`<div class="item static"><div class="hd"><b>${resid?'':'Depto '+esc(x.depto)+' · '}${esc(x.descripcion)}</b><span class="pill ${x.entregado?'ok':'wa'}">${x.entregado?'Entregada':'Por retirar'}</span></div><div class="meta">${esc(x.courier||'')} · recibida ${fmtDate(x.ts)}${x.entregado?' · entregada '+fmtDate(x.entregado_at)+(x.retirado_por?' a '+esc(x.retirado_por):''):''}</div>${x.foto?`<div class="photos"><img src="${fotoUrl(x.foto)}" data-img="${esc(x.foto)}"></div>`:''}${!resid&&!x.entregado?`<div style="margin-top:8px"><button class="btn ok sm" data-ent="${x.id}">Marcar entregada</button></div>`:''}</div>`).join('')||'<div class="empty">Nada por aquí</div>'; };
+  const draw=()=>{ const el=$('#eList'); if(!el) return; let d=docs; if(resid) d=d.filter(x=>x.depto===myDepto()); d=d.filter(x=>tab==='pend'?!x.entregado:x.entregado); el.innerHTML=d.map(x=>`<div class="item static"><div class="hd"><b>${resid?'':'Depto '+esc(x.depto)+' · '}${esc(x.descripcion)}</b><span class="pill ${x.entregado?'ok':'wa'}">${x.entregado?'Entregada':'Por retirar'}</span></div><div class="meta">${esc(x.courier||'')} · recibida ${fmtDate(x.ts)}${x.entregado?' · entregada '+fmtDate(x.entregado_at)+(x.retirado_por?' a '+esc(x.retirado_por):''):''}</div>${x.foto?`<div class="photos"><img data-f="${esc(x.foto)}" data-img="${esc(x.foto)}"></div>`:''}${!resid&&!x.entregado?`<div style="margin-top:8px"><button class="btn ok sm" data-ent="${x.id}">Marcar entregada</button></div>`:''}</div>`).join('')||'<div class="empty">Nada por aquí</div>'; };
   $('#eList').addEventListener('click', async e=>{ const img=e.target.closest('[data-img]'); if(img) return viewImg(img.dataset.img); const b=e.target.closest('[data-ent]'); if(b){ const quien=await askText('¿Quién retira? (nombre, opcional)'); if(quien===null) return; try{ await q(T('encomiendas').update({entregado:true, entregado_at:now(), entregado_por:S.uid, retirado_por:quien}).eq('id',b.dataset.ent)); toast('Entregada'); }catch(err){ toast(errMsg(err)); } } });
   watch('encomiendas', ()=>q(T('encomiendas').select('*').order('ts',{ascending:false}).limit(500)), rows=>{ docs=rows; draw(); });
 };
@@ -708,7 +740,7 @@ VIEWS.documentos = function(){
   $('#bNewD')?.addEventListener('click',()=>{ const m=modal(`<h3>Subir documento</h3><form id="fD"><label class="f"><span>Nombre</span><input type="text" name="nombre" required></label><label class="f"><span>Categoría</span><select name="cat">${CATS.map(c=>`<option>${c}</option>`).join('')}</select></label><label class="f"><span>Archivo (PDF, imagen, texto)</span><input type="file" name="f" required accept="application/pdf,image/*,.txt,.csv,.md,.xlsx,.docx"></label><button class="btn full">Subir</button></form>`);
     $('#fD',m).addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); const b=$('button',e.target); busy(b,true,'Subiendo…'); try{ const f=$('[name=f]',m).files[0]; const path=await uploadFile(f,'documentos'); await q(T('documentos').insert({nombre:d.nombre.trim(), cat:d.cat, path, tipo:f.type, uid:S.uid})); closeModal(); toast('Documento subido'); }catch(err){ toast('Error: '+errMsg(err)); busy(b,false); } }); });
   watch('documentos', ()=>q(T('documentos').select('*').order('ts',{ascending:false}).limit(300)), docs=>{ const el=$('#dList'); if(!el) return; const byCat={}; docs.forEach(d=>(byCat[d.cat]=byCat[d.cat]||[]).push(d));
-    el.innerHTML = docs.length? Object.entries(byCat).map(([c,arr])=>`<h2>${esc(c)}</h2><div class="list">${arr.map(d=>`<div class="item static"><div class="hd"><b><a href="${fotoUrl(d.path)}" target="_blank">${esc(d.nombre)}</a></b><span class="muted small">${fmtDate(d.ts)}</span></div>${puede?`<div class="meta"><a href="#" data-del="${d.id}" data-p="${esc(d.path)}">Eliminar</a></div>`:''}</div>`).join('')}</div>`).join('') : '<div class="empty">Sin documentos</div>'; });
+    el.innerHTML = docs.length? Object.entries(byCat).map(([c,arr])=>`<h2>${esc(c)}</h2><div class="list">${arr.map(d=>`<div class="item static"><div class="hd"><b><a data-f="${esc(d.path)}" target="_blank">${esc(d.nombre)}</a></b><span class="muted small">${fmtDate(d.ts)}</span></div>${puede?`<div class="meta"><a href="#" data-del="${d.id}" data-p="${esc(d.path)}">Eliminar</a></div>`:''}</div>`).join('')}</div>`).join('') : '<div class="empty">Sin documentos</div>'; });
   $('#dList').addEventListener('click', async e=>{ const d=e.target.closest('[data-del]'); if(!d) return; e.preventDefault(); if(await confirmBox('¿Eliminar el documento?')){ try{ await q(T('documentos').delete().eq('id',d.dataset.del)); await sb.storage.from('fotos').remove([d.dataset.p]); }catch(err){ toast(errMsg(err)); } } });
 };
 
@@ -729,7 +761,7 @@ VIEWS.rondas = function(){
       return req.map((qq,i)=>{ const hrs=Number(qq.frecuenciaHoras)||24; const esHoy=d===todayStr(); const horas= esHoy? (new Date().getHours()+1) : 24; const esperado=Math.max(1,Math.floor(horas/hrs)); const hechos=mine.filter(x=>x.tipo===qq.tipo); const buckets=new Set(hechos.map(x=>Math.floor(new Date(x.ts).getHours()/hrs))); const ok=Math.min(buckets.size,esperado); const pct=Math.round(ok/esperado*100);
         return `<tr>${i===0?`<td rowspan="${req.length}">${esc(a.nombre)}</td>`:''}<td>${esc(qq.descripcion||TIPOS[qq.tipo])}<br><span class="muted small">cada ${hrs} h</span></td><td class="num">${ok}/${esperado}</td><td style="min-width:90px"><div class="bar"><i style="width:${pct}%;background:${pct>=100?'var(--ok)':pct>=50?'var(--wa)':'var(--er)'}"></i></div></td></tr>`; }).join(''); }).join('');
     el.innerHTML = acts.length? `<table><thead><tr><th>Activo</th><th>Requisito</th><th class="num">Hecho</th><th>Cumpl.</th></tr></thead><tbody>${rows}</tbody></table>`:'<div class="muted">Sin activos.</div>'; }
-  function drawBit(){ const el=$('#bit'); if(!el) return; const rs=sortBy(porDia(),x=>x.ts,true); el.innerHTML=rs.map(x=>{const a=S.activos[x.activo_id]; return `<div class="item static"><div class="hd"><b>${esc(a?.nombre||'Activo eliminado')} · ${esc(TIPOS[x.tipo]||x.tipo)}</b><span class="muted small">${fmtDate(x.ts)}</span></div><div class="meta">${esc(userName(x.uid))}${x.valor?' · valor: <b>'+esc(x.valor)+'</b>':''}${x.nota?' · '+esc(x.nota):''}${x.via_nfc?' · 📡 NFC':''}</div>${x.foto?`<div class="photos"><img src="${fotoUrl(x.foto)}" data-img="${esc(x.foto)}"></div>`:''}</div>`;}).join('')||'<div class="empty">Sin registros ese día</div>'; }
+  function drawBit(){ const el=$('#bit'); if(!el) return; const rs=sortBy(porDia(),x=>x.ts,true); el.innerHTML=rs.map(x=>{const a=S.activos[x.activo_id]; return `<div class="item static"><div class="hd"><b>${esc(a?.nombre||'Activo eliminado')} · ${esc(TIPOS[x.tipo]||x.tipo)}</b><span class="muted small">${fmtDate(x.ts)}</span></div><div class="meta">${esc(userName(x.uid))}${x.valor?' · valor: <b>'+esc(x.valor)+'</b>':''}${x.nota?' · '+esc(x.nota):''}${x.via_nfc?' · 📡 NFC':''}</div>${x.foto?`<div class="photos"><img data-f="${esc(x.foto)}" data-img="${esc(x.foto)}"></div>`:''}</div>`;}).join('')||'<div class="empty">Sin registros ese día</div>'; }
   const all=()=>{ drawActs(); drawRep(); drawBit(); };
   $('#repDia').addEventListener('change',()=>{drawRep();drawBit();});
   $('#bit').addEventListener('click',e=>{ const img=e.target.closest('[data-img]'); if(img) viewImg(img.dataset.img); });
@@ -788,9 +820,9 @@ function detalleOT(o){
   const m=modal(`<h3>${esc(o.titulo)}</h3><div class="row wrap" style="gap:6px;margin-bottom:8px">${pillOf(EST_OT,o.estado)}${pillOf(PRIO,o.prioridad)}${o.preventiva?'<span class="pill mu">Preventiva</span>':''}</div>
   <p style="white-space:pre-wrap">${esc(o.descripcion)}</p>
   <div class="small muted">🏢 ${esc(S.empresas[o.empresa_id]?.nombre||'—')}${o.activo_id?' · 🔩 '+esc(S.activos[o.activo_id]?.nombre||''):''}${o.limite?' · límite '+fmtDay(o.limite):''}${o.fecha_agendada?' · agendada '+fmtDay(o.fecha_agendada)+' '+esc(o.hora_agendada||''):''}${o.incidencia_id&&!emp?` · <a href="#incidencias--${esc(o.incidencia_id)}">Ver incidencia</a>`:''}</div>
-  ${o.fotos_antes?.length?`<div class="small" style="margin-top:8px"><b>Antes</b></div><div class="photos">${o.fotos_antes.map(f=>`<img src="${fotoUrl(f)}" data-img="${esc(f)}">`).join('')}</div>`:''}
-  ${o.fotos_despues?.length?`<div class="small" style="margin-top:8px"><b>Después</b></div><div class="photos">${o.fotos_despues.map(f=>`<img src="${fotoUrl(f)}" data-img="${esc(f)}">`).join('')}</div>`:''}
-  ${o.informe?`<div class="card" style="margin-top:10px"><b>Informe técnico</b><div style="white-space:pre-wrap">${esc(o.informe)}</div>${Number(o.costo)?`<div class="small muted">Costo informado: ${clp(o.costo)}</div>`:''}${o.factura?`<a href="${fotoUrl(o.factura)}" target="_blank">Ver documento adjunto</a>`:''}</div>`:''}
+  ${o.fotos_antes?.length?`<div class="small" style="margin-top:8px"><b>Antes</b></div><div class="photos">${o.fotos_antes.map(f=>`<img data-f="${esc(f)}" data-img="${esc(f)}">`).join('')}</div>`:''}
+  ${o.fotos_despues?.length?`<div class="small" style="margin-top:8px"><b>Después</b></div><div class="photos">${o.fotos_despues.map(f=>`<img data-f="${esc(f)}" data-img="${esc(f)}">`).join('')}</div>`:''}
+  ${o.informe?`<div class="card" style="margin-top:10px"><b>Informe técnico</b><div style="white-space:pre-wrap">${esc(o.informe)}</div>${Number(o.costo)?`<div class="small muted">Costo informado: ${clp(o.costo)}</div>`:''}${o.factura?`<a data-f="${esc(o.factura)}" target="_blank">Ver documento adjunto</a>`:''}</div>`:''}
   ${emp?`<h2>Acciones de la empresa</h2><div class="row wrap" style="gap:6px">
     ${o.estado==='asignada'?`<button class="btn ok sm" data-a="aceptar">Aceptar</button><button class="btn dan sm" data-a="rechazar">Rechazar</button>`:''}
     ${['aceptada','agendada'].includes(o.estado)?`<button class="btn sec sm" data-a="agendar">Agendar visita</button><button class="btn sm" data-a="llegada">Registrar llegada</button>`:''}
@@ -885,7 +917,7 @@ const ADMIN={};
 const RETENCION=[['visitas','Visitas','Nombre, RUT y patente de quienes visitan'],['registros','Rondas y bitácora','Registros y fotos de las rondas'],['encomiendas','Encomiendas entregadas','Desde la fecha de entrega'],['mensajes','Mensajes','Conversaciones con conserjería, comité y administración'],['reservas','Reservas','Desde la fecha reservada'],['incidencias','Incidencias cerradas','Con sus fotos e historial'],['estacionamientos','Uso de estacionamientos','Patentes y horarios, desde que se libera']];
 ADMIN.edificio = function(el){
   const c=S.cfg||{};
-  el.innerHTML=`<div class="card"><div class="row" style="margin-bottom:8px"><h3 class="grow" style="margin:0">Datos del edificio</h3><button type="button" class="btn sec sm" id="bWiz">Asistente de configuración</button></div><form id="fEd"><div class="row" style="align-items:flex-start"><div><div class="logo-prev" id="logoPrev">${c.logo?`<img src="${fotoUrl(c.logo)}">`:'🏢'}</div><input type="file" id="logoIn" accept="image/*" style="display:none"><div class="row" style="margin-top:6px;gap:4px"><button type="button" class="btn sec sm" id="bLogo">Cambiar logo</button>${c.logo?'<button type="button" class="btn sec sm" id="bLogoDel">Quitar</button>':''}</div></div><div class="grow"><label class="f"><span>Nombre</span><input type="text" name="nombre" value="${esc(c.nombre||'')}" required></label><label class="f"><span>Dirección</span><input type="text" name="direccion" value="${esc(c.direccion||'')}"></label></div></div>
+  el.innerHTML=`<div class="card"><div class="row" style="margin-bottom:8px"><h3 class="grow" style="margin:0">Datos del edificio</h3><button type="button" class="btn sec sm" id="bWiz">Asistente de configuración</button></div><form id="fEd"><div class="row" style="align-items:flex-start"><div><div class="logo-prev" id="logoPrev">${c.logo?`<img data-f="${esc(c.logo)}">`:'🏢'}</div><input type="file" id="logoIn" accept="image/*" style="display:none"><div class="row" style="margin-top:6px;gap:4px"><button type="button" class="btn sec sm" id="bLogo">Cambiar logo</button>${c.logo?'<button type="button" class="btn sec sm" id="bLogoDel">Quitar</button>':''}</div></div><div class="grow"><label class="f"><span>Nombre</span><input type="text" name="nombre" value="${esc(c.nombre||'')}" required></label><label class="f"><span>Dirección</span><input type="text" name="direccion" value="${esc(c.direccion||'')}"></label></div></div>
   <div class="row"><label class="f grow"><span>Comuna / ciudad</span><input type="text" name="comuna" value="${esc(c.comuna||'')}"></label><label class="f grow"><span>Teléfono conserjería</span><input type="tel" name="telefono" value="${esc(c.telefono||'')}"></label></div>
   <label class="f"><span>Email administración</span><input type="email" name="email" value="${esc(c.email||'')}"></label>
   <label class="f"><span>Datos bancarios para transferir gastos comunes (visibles a residentes)</span><textarea name="datos_bancarios" placeholder="Banco, tipo de cuenta, número, RUT, correo">${esc(c.datos_bancarios||'')}</textarea></label>
@@ -903,7 +935,7 @@ ADMIN.edificio = function(el){
   $('#bWiz',el).addEventListener('click',()=>asistente());
   let newLogo=null;
   $('#bLogo',el).addEventListener('click',()=>$('#logoIn',el).click());
-  $('#logoIn',el).addEventListener('change', async e=>{ const f=e.target.files[0]; if(!f) return; try{ toast('Subiendo logo…'); newLogo=await uploadImage(f,'logo'); $('#logoPrev',el).innerHTML=`<img src="${fotoUrl(newLogo)}">`; toast('Logo listo, guarda los cambios'); }catch(err){ toast('Error: '+errMsg(err)); } });
+  $('#logoIn',el).addEventListener('change', async e=>{ const f=e.target.files[0]; if(!f) return; try{ toast('Subiendo logo…'); newLogo=await uploadImage(f,'logo'); $('#logoPrev',el).innerHTML=`<img data-f="${esc(newLogo)}">`; toast('Logo listo, guarda los cambios'); }catch(err){ toast('Error: '+errMsg(err)); } });
   $('#bLogoDel',el)?.addEventListener('click',()=>{ newLogo=''; $('#logoPrev',el).innerHTML='🏢'; });
   $('#fEd',el).addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); try{ await q(T('edificios').update({nombre:d.nombre.trim(), direccion:d.direccion.trim(), comuna:d.comuna.trim(), telefono:d.telefono.trim(), email:d.email.trim(), datos_bancarios:d.datos_bancarios.trim(), privacidad:d.privacidad.trim(), visita_patente:!!d.visita_patente, color:d.color, ...(newLogo!==null?{logo:newLogo}:{}), actualizado:now()}).eq('id',S.cfg.id)); toast('Guardado'); }catch(err){ toast('Error: '+errMsg(err)); } });
 };

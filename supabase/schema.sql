@@ -1242,17 +1242,54 @@ select public._pol('archivos_por_borrar','apb_del','delete','public.es_admin()')
 drop function public._pol(text, text, text, text, text, boolean);
 
 -- ---------------------------------------------------------------------
--- Storage: bucket "fotos", de lectura pública por URL (logo, incidencias, rondas, documentos)
+-- Storage: bucket privado "fotos". Los archivos se abren con URLs firmadas de corta duración,
+-- que solo puede pedir quien tiene permiso de lectura sobre el archivo (logo, incidencias, rondas, documentos)
 -- ---------------------------------------------------------------------
-insert into storage.buckets (id, name, public) values ('fotos','fotos', true)
-on conflict (id) do update set public = true;
+insert into storage.buckets (id, name, public) values ('fotos','fotos', false)
+on conflict (id) do update set public = false;
+
+-- ¿Puede quien llama leer este archivo? Rutas: <edificio_id>/<carpeta>/<fecha>/<archivo>.
+-- Cada carpeta sigue la misma regla que la tabla que referencia sus archivos: p. ej. la foto de
+-- una encomienda la ven conserjería, administración y la unidad destinataria.
+-- (Los archivos de la versión de un solo edificio no llevan <edificio_id>: pertenecen al primer edificio.)
+create or replace function public.puede_ver_archivo(p_name text) returns boolean
+language plpgsql stable security definer set search_path = public as $$
+declare seg text[] := storage.foldername(p_name); e uuid := public.mi_edificio(); r rol_t := public.mi_rol(); c text;
+begin
+  if e is null or r is null or seg is null or cardinality(seg) < 1 then return false; end if;
+  if seg[1] = e::text then c := seg[2];
+  elsif seg[1] in ('logo','comunicados','documentos','encomiendas','rondas','incidencias','ot','img')
+        and e = (select id from public.edificios order by creado, id limit 1) then c := seg[1];
+  else return false;
+  end if;
+  if c in ('logo','comunicados') then return true; end if;
+  if c = 'documentos' then return r <> 'mantencion'; end if;
+  if c = 'rondas' then return r in ('conserje','comite','admin'); end if;
+  if c = 'encomiendas' then
+    return r in ('conserje','admin') or exists (
+      select 1 from public.encomiendas x where x.edificio_id = e and x.foto = p_name and r in ('residente','propietario') and x.depto = public.mi_depto());
+  end if;
+  if c = 'incidencias' then
+    return r in ('conserje','comite','admin')
+      or exists (select 1 from public.incidencias i
+                 where i.edificio_id = e and r in ('residente','propietario') and i.depto = public.mi_depto()
+                   and (p_name = any(i.fotos) or exists (
+                         select 1 from jsonb_array_elements(i.historial) h where jsonb_typeof(h->'fotos') = 'array' and h->'fotos' ? p_name)))
+      or (r = 'mantencion' and exists (select 1 from public.ot o where o.edificio_id = e and o.empresa_id = public.mi_empresa() and p_name = any(o.fotos_antes)));
+  end if;
+  if c = 'ot' then
+    return r in ('comite','admin') or (r = 'mantencion' and exists (
+      select 1 from public.ot o where o.edificio_id = e and o.empresa_id = public.mi_empresa()
+        and (p_name = any(o.fotos_antes) or p_name = any(o.fotos_despues) or o.factura = p_name)));
+  end if;
+  return r in ('conserje','comite','admin');
+end $$;
 
 drop policy if exists "fotos_read"   on storage.objects;
 drop policy if exists "fotos_insert" on storage.objects;
 drop policy if exists "fotos_delete" on storage.objects;
--- Los archivos se abren por su URL pública (bucket público). Esta política solo controla el
--- LISTADO vía API: cada edificio lista su carpeta; nadie puede enumerar el bucket completo.
-create policy "fotos_read"   on storage.objects for select to authenticated using (bucket_id = 'fotos' and (storage.foldername(name))[1] = public.mi_edificio()::text);
+-- Leer (firmar una URL, listar) exige permiso sobre el archivo concreto
+create policy "fotos_read"   on storage.objects for select to authenticated using (bucket_id = 'fotos' and public.puede_ver_archivo(name));
 -- Los archivos de cada edificio viven bajo la carpeta <edificio_id>/
 create policy "fotos_insert" on storage.objects for insert to authenticated with check (bucket_id = 'fotos' and (storage.foldername(name))[1] = public.mi_edificio()::text);
 create policy "fotos_delete" on storage.objects for delete to authenticated using (bucket_id = 'fotos' and (storage.foldername(name))[1] = public.mi_edificio()::text and public.mi_rol() in ('admin','comite'));

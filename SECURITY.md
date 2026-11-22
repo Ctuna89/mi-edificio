@@ -9,12 +9,14 @@ No abras un issue público. Usa **Security → Report a vulnerability** en GitHu
 - La clave `anon` de Supabase es pública por diseño. Todo control de acceso está en las políticas RLS y triggers de `supabase/schema.sql`; el frontend solo decide qué mostrar.
 - Cada fila pertenece a un edificio y toda política exige que coincida con el edificio del usuario activo.
 - Las reglas de negocio sensibles no dependen del navegador: quién aprueba reservas y órdenes de trabajo, el rol con que se firma un mensaje, el estado inicial de reservas e incidencias.
+- Fotos y documentos están en un bucket privado. La función `puede_ver_archivo()` decide por carpeta y por la fila que referencia al archivo quién puede leerlo; la app solo muestra URLs firmadas.
 - El frontend escapa todo dato antes de insertarlo en el HTML y aplica una política CSP sin scripts en línea. `supabase-js` se carga con versión fija y verificación de integridad (SRI).
 - La clave `service_role`, la clave privada VAPID y `PUSH_SECRET` nunca van en el repositorio ni en `web/config.js`.
 
 ## Limitaciones conocidas
 
-- **Los archivos son públicos por URL.** El bucket `fotos` es de lectura pública: quien conozca la URL de una foto o documento puede abrirlo sin iniciar sesión. Las rutas son aleatorias (128 bits) y el bucket no se puede listar, pero una URL compartida o filtrada sigue funcionando. No subas ahí documentos que requieran confidencialidad estricta.
+- **Una URL firmada funciona durante 1 hora para quien la tenga.** Los archivos están en un bucket privado y solo quien puede leerlos obtiene la URL, pero si esa persona la comparte, sirve sin sesión hasta que vence.
+- **Los Documentos los lee todo residente del edificio** (no las empresas de mantención).
 - **El historial de incidencias y órdenes lo escribe el navegador** de quien tiene permiso de edición; no es un registro de auditoría inalterable.
 - **Comité y conserjería ven nombre, unidad y teléfono de todos los usuarios** del edificio.
 
