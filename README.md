@@ -233,6 +233,10 @@ La CI lo ejecuta en cada push junto con la verificación de sintaxis del fronten
 3. Pagos en línea mediante Edge Function.
 4. Avisos push para comunicados y encuestas nuevas.
 
+## Versiones
+
+La versión vigente está en el archivo [`VERSION`](VERSION) y los cambios de cada una en [`CHANGELOG.md`](CHANGELOG.md). Al fusionar una versión nueva en `main`, el workflow `Release` crea la etiqueta y el release en GitHub.
+
 ## Contribuir
 
 Mi Edificio es software libre: úsalo, adáptalo a tu comunidad y envía mejoras. Lee [`CONTRIBUTING.md`](CONTRIBUTING.md) para preparar el entorno y conocer las reglas del proyecto (sin frameworks, seguridad en RLS, `schema.sql` idempotente). Las vulnerabilidades se reportan en privado desde *Security → Report a vulnerability*.
