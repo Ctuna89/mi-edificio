@@ -13,6 +13,7 @@ mi-edificio/
 │   ├── app.js           ← todas las vistas
 │   ├── xlsx.js          ← generador de Excel sin dependencias
 │   ├── sw.js            ← service worker (notificaciones push)
+│   ├── vendor/          ← librerías de QR de terceros (ver vendor/README.md)
 │   ├── config.js        ← URL y anon key de tu proyecto Supabase (+ clave VAPID opcional)
 │   ├── manifest.webmanifest
 │   └── icon.svg
@@ -68,7 +69,7 @@ Como administrador tienes el selector **"Ver como"** para revisar la interfaz de
 | Encuestas (un voto por unidad) | vota, ve totales | – | crea, cierra, ve totales | crea, cierra, ve totales | – |
 | Documentos (reglamento, actas, balances) | lee | lee | sube | sube | – |
 | Encomiendas | ve las suyas | registra / entrega | – | registra / entrega | – |
-| Visitas | anuncia | registra ingreso/salida | – | registra | – |
+| Visitas con QR | anuncia y comparte el QR | escanea, registra ingreso/salida | – | escanea, registra | – |
 | Rondas NFC y bitácora (cumplimiento diario) | – | registra | ve | registra, ve | – |
 | Mantención: activos, plan preventivo, OT | – | – | ve | crea, aprueba | acepta, agenda, ejecuta, cierra |
 | Administración (edificio, usuarios, unidades, espacios, activos, empresas) | – | – | – | ✔ | – |
@@ -101,7 +102,7 @@ El Excel es un `.xlsx` real generado en el navegador (`web/xlsx.js`, sin depende
 
 ## Notificaciones push (opcional)
 
-Avisos en el teléfono o computador cuando llega una encomienda, hay un mensaje nuevo o algo queda por aprobar o se resuelve (reservas, solicitudes de acceso, órdenes de trabajo). Sin esta configuración la app funciona igual, solo que sin avisos.
+Avisos en el teléfono o computador cuando llega una encomienda o una visita, hay un mensaje nuevo o algo queda por aprobar o se resuelve (reservas, solicitudes de acceso, órdenes de trabajo). Sin esta configuración la app funciona igual, solo que sin avisos.
 
 1. Genera un par de claves VAPID:
 
@@ -172,6 +173,12 @@ Una tarea diaria (`pg_cron`, 07:23 UTC) borra en cada edificio lo que supera sus
 ## Fotos y archivos
 
 Se guardan en el bucket `fotos` de Supabase Storage (lectura pública por URL con nombre aleatorio, sin listado; escritura solo de usuarios activos en la carpeta de su edificio). Las imágenes se comprimen en el navegador a 1280 px antes de subir. El plan gratuito incluye 1 GB.
+
+## Visitas con QR
+
+Al anunciar una visita, el residente obtiene un QR (con el nombre del edificio, la fecha y un código) que comparte como imagen, por ejemplo por WhatsApp. En conserjería se escanea con **Escanear QR**, o se escribe el código de 8 caracteres, y se abre la ficha de la visita para registrar el ingreso; al salir se escanea de nuevo para registrar la salida. Si las notificaciones push están configuradas, el residente recibe un aviso cuando su visita ingresa.
+
+El QR no contiene datos personales, solo un código aleatorio: para saber a qué visita corresponde hay que tener sesión de conserjería o administración en ese edificio. La lectura usa el lector de códigos del navegador cuando existe (Chrome en Android) y, si no (iPhone, Firefox), una librería incluida en `web/vendor/`. La cámara requiere que la app esté publicada con HTTPS.
 
 ## NFC
 

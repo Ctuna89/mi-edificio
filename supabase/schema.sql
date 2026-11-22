@@ -219,6 +219,7 @@ create table if not exists public.visitas (
   hora       text default '',
   nota       text default '',
   estado     text not null default 'anunciada', -- anunciada|ingreso|salida|no_llego
+  codigo     text not null default upper(substr(replace(gen_random_uuid()::text,'-',''),1,8)), -- va en el QR de acceso
   ingreso_at timestamptz,
   salida_at  timestamptz,
   uid        uuid references public.usuarios(id),
@@ -384,6 +385,10 @@ begin
   end if;
 end $$;
 drop function public._pk_cols(text);
+
+-- Código del QR de acceso de cada visita (las visitas ya existentes reciben uno)
+alter table public.visitas add column if not exists codigo text not null default upper(substr(replace(gen_random_uuid()::text,'-',''),1,8));
+create unique index if not exists visitas_codigo_idx on public.visitas (edificio_id, codigo);
 
 -- ---------------------------------------------------------------------
 -- Funciones auxiliares (SECURITY DEFINER para evitar recursión en RLS)
@@ -602,6 +607,17 @@ drop trigger if exists incidencias_antes on public.incidencias;
 create trigger incidencias_antes before insert or update on public.incidencias
 for each row execute function public.incidencias_antes();
 
+-- Visitas: el código del QR lo genera siempre la base de datos
+create or replace function public.visitas_antes_insert() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if auth.uid() is not null then new.codigo := upper(substr(replace(gen_random_uuid()::text,'-',''),1,8)); end if;
+  return new;
+end $$;
+drop trigger if exists visitas_antes_insert on public.visitas;
+create trigger visitas_antes_insert before insert on public.visitas
+for each row execute function public.visitas_antes_insert();
+
 -- Órdenes de trabajo: la empresa avanza su flujo, pero no aprueba su propio trabajo,
 -- no se reasigna la orden ni la modifica una vez cerrada
 create or replace function public.ot_antes_update() returns trigger
@@ -776,6 +792,18 @@ begin
   return null;
 end $$;
 
+create or replace function privado.tg_push_visita() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if new.estado = 'ingreso' and (tg_op = 'INSERT' or old.estado is distinct from 'ingreso') then
+    perform privado.push(new.edificio_id, privado.usuarios_de(new.edificio_id, '{residente,propietario}', new.depto),
+      '🚪 Llegó tu visita', new.nombre, '#visitas');
+  end if;
+  return null;
+end $$;
+
+drop trigger if exists push_visita on public.visitas;
+create trigger push_visita after insert or update on public.visitas for each row execute function privado.tg_push_visita();
 drop trigger if exists push_encomienda on public.encomiendas;
 create trigger push_encomienda after insert on public.encomiendas for each row execute function privado.tg_push_encomienda();
 drop trigger if exists push_mensaje on public.mensajes;

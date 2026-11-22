@@ -578,17 +578,72 @@ VIEWS.encomiendas = function(){
 // VISITAS
 VIEWS.visitas = function(){
   const r=role(); const resid=['residente','propietario'].includes(r);
-  setMain(`<h1>Visitas</h1><div style="margin-bottom:10px"><button class="btn" id="bNewV">+ ${resid?'Anunciar visita':'Registrar visita'}</button></div><div class="tabs" id="vTabs"><button data-t="hoy" class="on">Hoy</button><button data-t="prox">Próximas</button><button data-t="hist">Historial</button></div><div id="vList" class="list"></div>`);
+  setMain(`<h1>Visitas</h1><div class="row wrap" style="margin-bottom:10px"><button class="btn" id="bNewV">+ ${resid?'Anunciar visita':'Registrar visita'}</button>${resid?'':`<button class="btn sec" id="bScan">📷 Escanear QR</button><input type="text" id="vCode" placeholder="o código de la visita" style="width:190px" autocapitalize="characters" autocomplete="off"><button class="btn sec" id="bVCode">Buscar</button>`}</div>${resid?'<p class="small muted">Al anunciar una visita obtienes un QR para enviarle. En conserjería lo escanean y queda registrado su ingreso.</p>':''}<div class="tabs" id="vTabs"><button data-t="hoy" class="on">Hoy</button><button data-t="prox">Próximas</button><button data-t="hist">Historial</button></div><div id="vList" class="list"></div>`);
   $('#bNewV').addEventListener('click',()=>{ const m=modal(`<h3>${resid?'Anunciar visita':'Registrar visita'}</h3><form id="fV">${resid?'':`<label class="f"><span>Departamento</span><input type="text" name="depto" list="dl" required><datalist id="dl">${Object.keys(S.unidades).map(d=>`<option value="${esc(d)}">`).join('')}</datalist></label>`}<label class="f"><span>Nombre del visitante</span><input type="text" name="nombre" required></label><div class="row"><label class="f grow"><span>RUT / documento</span><input type="text" name="rut"></label><label class="f grow"><span>Patente (opcional)</span><input type="text" name="patente"></label></div><div class="row"><label class="f grow"><span>Fecha</span><input type="date" name="fecha" value="${todayStr()}" required></label><label class="f grow"><span>Hora aprox.</span><input type="time" name="hora"></label></div><label class="f"><span>Nota</span><input type="text" name="nota" placeholder="Ej: delivery, técnico, familiar"></label><button class="btn full">Guardar</button></form>`);
-    $('#fV',m).addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); try{ await q(T('visitas').insert({depto:resid?myDepto():d.depto.trim(), nombre:d.nombre.trim(), rut:d.rut.trim(), patente:d.patente.trim().toUpperCase(), fecha:d.fecha, hora:d.hora, nota:d.nota.trim(), estado:resid?'anunciada':'ingreso', ingreso_at:resid?null:now(), uid:S.uid})); closeModal(); toast('Guardado'); }catch(err){ toast('Error: '+errMsg(err)); } }); });
+    $('#fV',m).addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); try{ const rows=await q(T('visitas').insert({depto:resid?myDepto():d.depto.trim(), nombre:d.nombre.trim(), rut:d.rut.trim(), patente:d.patente.trim().toUpperCase(), fecha:d.fecha, hora:d.hora, nota:d.nota.trim(), estado:resid?'anunciada':'ingreso', ingreso_at:resid?null:now(), uid:S.uid}).select()); closeModal(); toast('Guardado'); if(resid&&rows[0]?.codigo) qrVisita(rows[0]); }catch(err){ toast('Error: '+errMsg(err)); } }); });
   let tab='hoy', docs=[]; $('#vTabs').addEventListener('click',e=>{ const b=e.target.closest('button'); if(!b) return; $$('#vTabs button').forEach(x=>x.classList.remove('on')); b.classList.add('on'); tab=b.dataset.t; draw(); });
   const EV={anunciada:['Anunciada','in'],ingreso:['En el edificio','ok'],salida:['Salió','mu'],no_llego:['No llegó','mu']};
   const draw=()=>{ const el=$('#vList'); if(!el) return; const hoy=todayStr(); let d=docs; if(resid) d=d.filter(x=>x.depto===myDepto()); if(tab==='hoy') d=d.filter(x=>x.fecha===hoy); else if(tab==='prox') d=d.filter(x=>x.fecha>hoy); else d=d.filter(x=>x.fecha<hoy); d=sortBy(d,x=>x.fecha+(x.hora||''),tab==='hist');
     el.innerHTML=d.map(x=>`<div class="item static"><div class="hd"><b>${esc(x.nombre)}${resid?'':' → Depto '+esc(x.depto)}</b>${pillOf(EV,x.estado)}</div><div class="meta">${fmtDay(x.fecha)} ${esc(x.hora||'')}${x.rut?' · '+esc(x.rut):''}${x.patente?' · '+esc(x.patente):''}${x.nota?' · '+esc(x.nota):''}${x.ingreso_at?' · ingreso '+fmtDate(x.ingreso_at):''}${x.salida_at?' · salida '+fmtDate(x.salida_at):''}</div>
-    ${!resid?`<div class="row" style="margin-top:8px;gap:6px">${x.estado==='anunciada'?`<button class="btn ok sm" data-in="${x.id}">Registrar ingreso</button>`:''}${x.estado==='ingreso'?`<button class="btn sec sm" data-out="${x.id}">Registrar salida</button>`:''}</div>`:(x.estado==='anunciada'?`<div style="margin-top:8px"><button class="btn sec sm" data-del="${x.id}">Cancelar</button></div>`:'')}</div>`).join('')||'<div class="empty">Sin visitas</div>'; };
-  $('#vList').addEventListener('click', async e=>{ const i=e.target.closest('[data-in]'), o=e.target.closest('[data-out]'), d=e.target.closest('[data-del]'); try{ if(i) await q(T('visitas').update({estado:'ingreso', ingreso_at:now()}).eq('id',i.dataset.in)); if(o) await q(T('visitas').update({estado:'salida', salida_at:now()}).eq('id',o.dataset.out)); if(d&&await confirmBox('¿Cancelar la visita anunciada?')) await q(T('visitas').delete().eq('id',d.dataset.del)); }catch(err){ toast('Error: '+errMsg(err)); } });
+    ${!resid?`<div class="row" style="margin-top:8px;gap:6px">${x.estado==='anunciada'?`<button class="btn ok sm" data-in="${x.id}">Registrar ingreso</button>`:''}${x.estado==='ingreso'?`<button class="btn sec sm" data-out="${x.id}">Registrar salida</button>`:''}</div>`:(x.estado==='anunciada'?`<div class="row" style="margin-top:8px;gap:6px">${x.codigo?`<button class="btn sm" data-qr="${x.id}">Ver QR</button>`:''}<button class="btn sec sm" data-del="${x.id}">Cancelar</button></div>`:'')}</div>`).join('')||'<div class="empty">Sin visitas</div>'; };
+  // Conserjería: abrir la ficha de una visita desde el QR escaneado o el código escrito
+  const fichaVisita=v=>{ const m=modal(`<h3>${esc(v.nombre)}</h3><div class="row wrap" style="gap:6px;margin-bottom:8px">${pillOf(EV,v.estado)}<b>Depto ${esc(v.depto)}</b></div>
+    ${v.fecha!==todayStr()?`<div class="note">Esta visita está anunciada para el ${esc(fmtDay(v.fecha))}, no para hoy.</div>`:''}
+    <div class="small muted">${fmtDay(v.fecha)} ${esc(v.hora||'')}${v.rut?' · '+esc(v.rut):''}${v.patente?' · '+esc(v.patente):''}${v.nota?' · '+esc(v.nota):''}${v.ingreso_at?' · ingreso '+fmtDate(v.ingreso_at):''}${v.salida_at?' · salida '+fmtDate(v.salida_at):''}</div>
+    <div class="row" style="margin-top:14px;justify-content:flex-end">${v.estado==='anunciada'?'<button class="btn ok" id="fvIn">Registrar ingreso</button>':v.estado==='ingreso'?'<button class="btn" id="fvOut">Registrar salida</button>':''}<button class="btn sec" data-close>Cerrar</button></div>`);
+    const act=async p=>{ try{ await q(T('visitas').update(p).eq('id',v.id)); closeModal(); toast(p.estado==='ingreso'?'Ingreso registrado':'Salida registrada'); }catch(err){ toast('Error: '+errMsg(err)); } };
+    $('#fvIn',m)?.addEventListener('click',()=>act({estado:'ingreso', ingreso_at:now()})); $('#fvOut',m)?.addEventListener('click',()=>act({estado:'salida', salida_at:now()})); };
+  const abrirCodigo=async txt=>{ const cod=codigoQR(txt); try{ const v=cod&&await q(T('visitas').select('*').eq('codigo',cod).maybeSingle()); if(v) fichaVisita(v); else toast('No hay una visita con ese código'); }catch(err){ toast('Error: '+errMsg(err)); } };
+  $('#bVCode')?.addEventListener('click',()=>abrirCodigo($('#vCode').value));
+  $('#vCode')?.addEventListener('keydown',e=>{ if(e.key==='Enter') abrirCodigo(e.target.value); });
+  $('#bScan')?.addEventListener('click', async()=>{ try{ const txt=await escanearQR(); if(txt) abrirCodigo(txt); }catch(err){ toast(err.name==='NotAllowedError'?'Debes permitir el uso de la cámara.':errMsg(err)); } });
+  $('#vList').addEventListener('click', async e=>{ const i=e.target.closest('[data-in]'), o=e.target.closest('[data-out]'), d=e.target.closest('[data-del]'), k=e.target.closest('[data-qr]'); if(k){ const v=docs.find(x=>x.id===k.dataset.qr); if(v) qrVisita(v); return; } try{ if(i) await q(T('visitas').update({estado:'ingreso', ingreso_at:now()}).eq('id',i.dataset.in)); if(o) await q(T('visitas').update({estado:'salida', salida_at:now()}).eq('id',o.dataset.out)); if(d&&await confirmBox('¿Cancelar la visita anunciada?')) await q(T('visitas').delete().eq('id',d.dataset.del)); }catch(err){ toast('Error: '+errMsg(err)); } });
   watch('visitas', ()=>q(T('visitas').select('*').order('fecha',{ascending:false}).limit(600)), rows=>{ docs=rows; draw(); });
 };
+
+// QR de acceso de visitas. El QR solo lleva un código aleatorio (ningún dato personal);
+// quien lo lee necesita sesión de conserjería para ver a qué visita corresponde.
+const QR_PRE='MIEDIFICIO-VISITA:';
+const codigoQR=txt=>(String(txt||'').trim().toUpperCase().match(/([0-9A-F]{8})$/)||[])[1]||'';
+function qrCanvas(texto, titulo, lineas){
+  const qr=window.qrcode(0,'M'); qr.addData(texto); qr.make();
+  const n=qr.getModuleCount(), px=10, mar=4*px, W=n*px+2*mar, top=48, H=top+W+lineas.length*24+10;
+  const c=document.createElement('canvas'); c.width=W; c.height=H; const g=c.getContext('2d');
+  g.fillStyle='#fff'; g.fillRect(0,0,W,H); g.fillStyle='#000';
+  for(let r=0;r<n;r++) for(let k=0;k<n;k++) if(qr.isDark(r,k)) g.fillRect(mar+k*px, top+mar+r*px, px, px);
+  g.textAlign='center'; g.fillStyle='#141a26'; g.font='600 19px system-ui,sans-serif'; g.fillText(titulo, W/2, 36, W-24);
+  g.font='15px system-ui,sans-serif'; lineas.forEach((l,i)=>g.fillText(l, W/2, top+W+8+i*24, W-24));
+  return c;
+}
+function qrVisita(v){
+  const c=qrCanvas(QR_PRE+v.codigo, S.cfg?.nombre||'Mi Edificio', ['Visita: '+v.nombre, fmtDay(v.fecha)+(v.hora?' '+v.hora:'')+' · Depto '+v.depto, 'Código '+v.codigo]);
+  const m=modal(`<h3>QR de acceso</h3><p class="small muted">Envía esta imagen a tu visita. En conserjería la escanean para registrar su ingreso; si no se puede leer, sirve el código.</p><div class="center" id="qrBox"></div><div class="row" style="justify-content:center;margin-top:12px"><button class="btn" id="qrShare">Compartir</button><button class="btn sec" data-close>Cerrar</button></div>`);
+  c.id='qrImg'; c.style.cssText='max-width:100%;height:auto;border:1px solid var(--bd);border-radius:10px'; $('#qrBox',m).appendChild(c);
+  $('#qrShare',m).addEventListener('click',()=>c.toBlob(async b=>{ const f=new File([b],'visita-'+v.codigo+'.png',{type:'image/png'});
+    try{ if(navigator.canShare?.({files:[f]})){ await navigator.share({files:[f], title:'Acceso de visita'}); return; } }catch(e){ if(e.name==='AbortError') return; }
+    descargar(b, f.name); },'image/png'));
+}
+function cargarScript(src){ return new Promise((res,rej)=>{ if($(`script[src="${src}"]`)) return res(); const s=document.createElement('script'); s.src=src; s.onload=()=>res(); s.onerror=()=>rej(new Error('No se pudo cargar el lector de QR')); document.head.appendChild(s); }); }
+// Abre la cámara y devuelve el texto del primer QR leído (null si se cancela).
+// Usa el lector del navegador si existe; si no (iPhone, Firefox), la librería jsQR.
+async function escanearQR(){
+  if(!navigator.mediaDevices?.getUserMedia) throw new Error('Este navegador no permite usar la cámara. Escribe el código.');
+  let det=null; try{ if('BarcodeDetector' in window && (await window.BarcodeDetector.getSupportedFormats()).includes('qr_code')) det=new window.BarcodeDetector({formats:['qr_code']}); }catch(e){}
+  if(!det) await cargarScript('vendor/jsQR.js');
+  const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}, audio:false});
+  return new Promise(res=>{
+    const m=modal(`<h3>Escanear QR</h3><video id="qrVid" playsinline muted style="width:100%;border-radius:10px;background:#000"></video><p class="small muted center">Apunta la cámara al QR de la visita.</p><div class="center"><button class="btn sec" data-close>Cancelar</button></div>`);
+    const v=$('#qrVid',m); v.srcObject=stream; v.play().catch(()=>{}); const cv=document.createElement('canvas'); let fin=false;
+    const cerrar=val=>{ if(fin) return; fin=true; stream.getTracks().forEach(t=>t.stop()); if(document.body.contains(m)) closeModal(); res(val); };
+    const tick=async()=>{ if(fin) return; if(!document.body.contains(m)) return cerrar(null);
+      try{ if(v.readyState>=2 && v.videoWidth){ let txt='';
+        if(det){ txt=(await det.detect(v))[0]?.rawValue||''; }
+        else { cv.width=v.videoWidth; cv.height=v.videoHeight; const g=cv.getContext('2d',{willReadFrequently:true}); g.drawImage(v,0,0); const d=g.getImageData(0,0,cv.width,cv.height); txt=window.jsQR(d.data,d.width,d.height)?.data||''; }
+        if(txt) return cerrar(txt); } }catch(e){}
+      setTimeout(tick,200); };
+    tick();
+  });
+}
 
 // DOCUMENTOS
 VIEWS.documentos = function(){

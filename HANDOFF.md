@@ -8,7 +8,7 @@ App web para la comunidad de un edificio: residentes, conserjería, comité, adm
 
 ## Stack y por qué
 
-- **Frontend**: HTML + JS vanilla, sin framework ni build. `web/app.js` contiene todas las vistas; `web/xlsx.js` genera Excel sin dependencias; `web/sw.js` es el service worker de notificaciones. Decisión: simplicidad de despliegue (se sube una carpeta) y cero dependencias que mantener.
+- **Frontend**: HTML + JS vanilla, sin framework ni build (dos librerías de QR copiadas en `web/vendor/`). `web/app.js` contiene todas las vistas; `web/xlsx.js` genera Excel sin dependencias; `web/sw.js` es el service worker de notificaciones. Decisión: simplicidad de despliegue (se sube una carpeta) y cero dependencias que mantener.
 - **Backend**: Supabase. Auth por email/contraseña, Postgres con Row Level Security, Storage (bucket `fotos`), Realtime, y una Edge Function opcional (`supabase/functions/push`).
 - **Seguridad**: toda en RLS (`supabase/schema.sql`). El frontend solo decide qué mostrar; lo que cada rol puede leer/escribir lo decide la base de datos.
 - **Roles** (`usuarios.rol`): residente, propietario, conserje, comite, admin, mantencion. Estado: pendiente / activo / bloqueado. Quien crea un edificio (`crear_edificio()`) queda como su admin; los demás quedan pendientes (trigger `usuarios_antes_insert`).
@@ -22,6 +22,7 @@ App web para la comunidad de un edificio: residentes, conserjería, comité, adm
 - **Push**: triggers en el esquema `privado` (no expuesto por la API) calculan destinatarios y llaman con `pg_net` a la Edge Function, autenticada con `plataforma.push_secret`. Si `push_url` está vacío no hacen nada; un fallo de envío nunca bloquea la operación.
 - **Reglas fuera del navegador**: triggers `reservas_antes`, `incidencias_antes`, `ot_antes_update` y `mensajes_antes_insert` fijan estados iniciales, impiden auto-aprobaciones y la suplantación de rol. El bucket no se puede listar y los archivos llevan nombres aleatorios, pero siguen siendo públicos por URL.
 - **Datos personales**: aviso de privacidad por edificio (`edificios.privacidad`, aceptación en `usuarios.privacidad_at`), descarga de datos propios y `eliminar_mi_cuenta()` (anonimiza el perfil). Plazos de conservación por edificio (`edificios.retencion`, en meses, los fija el admin): `privado.depurar()` corre a diario con `pg_cron` y `depurar_ahora()` desde la app; las fotos de filas borradas pasan por la cola `archivos_por_borrar`, que vacía el navegador del admin.
+- **Visitas con QR**: `visitas.codigo` (8 caracteres, lo genera la base de datos) va en un QR que el residente comparte como imagen; conserjería lo lee con `BarcodeDetector` o, donde no existe, con `web/vendor/jsQR.js` (carga diferida). Generación con `web/vendor/qrcode.js`. Son las únicas librerías de terceros incluidas en el repositorio.
 - **Sin pago en línea** de gastos comunes. Se muestran datos bancarios y el admin marca pagado a mano. Si se agrega, debe ir en una Edge Function, no en el navegador.
 - **Rondas NFC** integradas en la misma app. Web NFC solo funciona en Chrome Android; hay fallback por código o lista.
 - **Perfil empresa de mantención**: externo, solo ve sus OT y los activos; flujo asignada → aceptada → agendada → en terreno → cierre técnico → aprobada por admin.

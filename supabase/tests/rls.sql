@@ -177,6 +177,19 @@ select t.ok((select nombre = 'Cuenta eliminada' and telefono = '' and depto = ''
 select t.ok((select privacidad_at is not null from usuarios where id = :'a2'), 'queda registrada la aceptación del aviso de privacidad');
 select t.soy(:'a3'); select t.ok((select count(*) = 0 from mensajes) and (select count(*) = 0 from unidades), 'la cuenta eliminada ya no accede a nada');
 
+-- ---------- visitas con QR ----------
+select t.soy(:'a2');
+insert into visitas (depto, nombre, fecha, uid, codigo) values ('101', 'Tía Marta', current_date, :'a2', 'AAAAAAAA') returning id as vis \gset
+select t.ok((select codigo ~ '^[0-9A-F]{8}$' and codigo <> 'AAAAAAAA' from visitas where id = :'vis'), 'el código del QR lo genera la base de datos');
+select t.falla(format($$update visitas set estado = 'ingreso' where id = %L returning 1$$, :'vis'), 'el residente registra el ingreso de su visita');
+reset role; truncate net.llamadas;
+select t.soy(:'a4');
+select t.ok((select count(*) = 1 from visitas where codigo = (select codigo from visitas where id = :'vis')), 'conserjería encuentra la visita por su código');
+update visitas set estado = 'ingreso', ingreso_at = now() where id = :'vis';
+reset role;
+select t.ok((select count(*) = 1 and bool_and(body->>'titulo' = '🚪 Llegó tu visita' and body->'uids' = to_jsonb(array[:'a2'::uuid])) from net.llamadas), 'el ingreso avisa al residente');
+select t.soy(:'b1'); select t.ok((select count(*) = 0 from visitas where id = :'vis'), 'otro edificio no ve la visita');
+
 -- ---------- conservación de datos ----------
 reset role;
 insert into visitas (edificio_id, depto, nombre, rut, fecha) values (:'ea', '101', 'Visita antigua', '1-9', current_date - 400), (:'ea', '101', 'Visita reciente', '', current_date - 5), (:'eb', '101', 'Visita antigua de B', '', current_date - 400);
