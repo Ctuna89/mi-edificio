@@ -6,30 +6,36 @@ No abras un issue público. Usa **Security → Report a vulnerability** en GitHu
 
 ## Modelo de seguridad
 
-- La clave `anon` de Supabase es pública por diseño. Todo control de acceso está en las políticas RLS y triggers de `supabase/schema.sql`; el frontend solo decide qué mostrar.
-- Cada fila pertenece a un edificio y toda política exige que coincida con el edificio del usuario activo.
-- Las reglas de negocio sensibles no dependen del navegador: quién aprueba reservas y órdenes de trabajo, el rol con que se firma un mensaje, el estado inicial de reservas e incidencias.
-- Fotos y documentos están en un bucket privado. La función `puede_ver_archivo()` decide por carpeta y por la fila que referencia al archivo quién puede leerlo; la app solo muestra URLs firmadas.
-- El frontend escapa todo dato antes de insertarlo en el HTML y aplica una política CSP sin scripts en línea. `supabase-js` se carga con versión fija y verificación de integridad (SRI).
-- La clave `service_role`, la clave privada VAPID y `PUSH_SECRET` nunca van en el repositorio ni en `web/config.js`.
+- **Los permisos viven en la base de datos.** Políticas por fila y triggers de `supabase/schema.sql` deciden qué lee y escribe cada rol; el navegador solo decide qué mostrar. El servidor local ejecuta cada petición con el usuario de la sesión, así que rigen las mismas reglas que prueba `supabase/tests/rls.sql`.
+- **Reglas de negocio fuera del navegador**: quién aprueba reservas y órdenes de trabajo, el rol con que se firma un mensaje, los estados iniciales, los montos pagados, las horas de estacionamiento.
+- **Servidor local** (`local/server.mjs`):
+  - Contraseñas con scrypt y sal; sesión en una cookie `HttpOnly`, `SameSite=Lax` (y `Secure` detrás de HTTPS), que el JavaScript de la página no puede leer.
+  - Ocho intentos fallidos de inicio de sesión bloquean ese correo desde esa dirección por 5 minutos.
+  - La app solo puede nombrar tablas y funciones del esquema `public`; los nombres se validan y los valores van siempre como parámetros.
+  - Las peticiones que cambian datos deben venir del mismo origen.
+- **Archivos**: se guardan en disco y se entregan solo con un enlace firmado de 1 hora, que el servidor da a quien puede leer ese archivo (`puede_ver_archivo()`). Lo subido nunca se ejecuta: se sirve en modo aislado (`sandbox`) y, salvo imágenes y PDF, como descarga.
+- **Navegador**: todo dato se escapa antes de insertarse en el HTML y la página aplica una política CSP sin scripts en línea. En modo local no carga código de terceros.
 
 ## Limitaciones conocidas
 
-- **Una URL firmada funciona durante 1 hora para quien la tenga.** Los archivos están en un bucket privado y solo quien puede leerlos obtiene la URL, pero si esa persona la comparte, sirve sin sesión hasta que vence.
+- **El computador del edificio es el punto único.** Quien tenga acceso a ese equipo o a la carpeta `local/datos` (o a un respaldo) tiene todos los datos, incluidas las claves de la instalación. La base de datos no está cifrada en disco.
+- **Sin HTTPS, la sesión viaja en claro.** Dentro de la red del edificio la app funciona por HTTP; cualquiera en esa red podría interceptarla. Para uso real, publica con HTTPS (túnel) y entra siempre por esa dirección.
+- **No hay segundo factor ni verificación de correo.** Una cuenta nueva no accede a nada hasta que la administración la aprueba, pero cualquiera que conozca la dirección puede crear cuentas y solicitudes.
+- **Contraseñas olvidadas** las restablece la administración, que por un momento conoce la contraseña nueva. Si el único administrador olvida la suya, no hay recuperación desde la app.
+- **Un enlace firmado sirve 1 hora para quien lo tenga**, aunque no tenga sesión.
 - **Los Documentos los lee todo residente del edificio** (no las empresas de mantención).
 - **El historial de incidencias y órdenes lo escribe el navegador** de quien tiene permiso de edición; no es un registro de auditoría inalterable.
-- **Comité y conserjería ven nombre, unidad y teléfono de todos los usuarios** del edificio.
+- **Comité y conserjería ven nombre, unidad y teléfono de todos los usuarios.**
+- PGlite, la base de datos embebida, es un proyecto joven.
 
 ## Lista de verificación para quien opera una instalación
 
-En el panel de Supabase:
+1. El computador: sistema actualizado, sesión con contraseña, sin uso compartido para navegar o instalar programas.
+2. Publica con HTTPS (ver "Acceso desde internet" en el README) y comparte solo esa dirección.
+3. Ten al menos dos cuentas de administración.
+4. Respalda `local/datos` fuera del computador con regularidad y prueba una restauración. Trata los respaldos como datos personales.
+5. No compartas `local/datos/config.json`.
+6. Aprueba solo a personas que reconozcas y asígnales el rol mínimo necesario.
+7. Actualiza a cada versión nueva.
 
-1. *Authentication → Providers → Email*: **Confirm email** activado en producción.
-2. *Authentication → Policies / Passwords*: largo mínimo de contraseña 8 o más y protección contra contraseñas filtradas, si tu plan la incluye.
-3. *Authentication → Attack Protection*: CAPTCHA en registro e inicio de sesión; revisa los límites de frecuencia.
-4. *Authentication → URL Configuration*: solo la URL real de la app en *Site URL* y *Redirect URLs*.
-5. Activa MFA en tu cuenta de Supabase y en la del hosting; limita quién tiene acceso al proyecto.
-6. Activa la extensión `pg_cron` (*Database → Extensions*) para que el borrado por plazo de conservación corra a diario.
-7. Mantén `plataforma.creacion_abierta = false` salvo mientras das de alta un edificio.
-8. Revisa periódicamente *Database → Backups* y prueba una restauración.
-9. Tras actualizar el código, vuelve a ejecutar `supabase/schema.sql`: las políticas y triggers se recrean.
+Si usas la instalación alternativa en Supabase: activa la confirmación de correo, el CAPTCHA y los límites de frecuencia en Authentication, usa MFA en tu cuenta, activa `pg_cron` y `pg_net`, y nunca pongas la clave `service_role`, la clave privada VAPID ni `PUSH_SECRET` en el repositorio ni en `web/config.js`.

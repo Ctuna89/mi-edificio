@@ -1,5 +1,11 @@
 # Cambios
 
+## Sin publicar
+
+- **Instalación local**: un solo programa (`local/`) sirve la app y guarda la base de datos y los archivos en una carpeta del computador del edificio, sin servicios en la nube. Incluye cuentas, permisos, archivos con enlaces firmados, avisos en vivo, notificaciones, tareas programadas y respaldo diario. Supabase queda como instalación alternativa.
+- **Un solo edificio por instalación**: se elimina el soporte multi-edificio y los códigos de invitación. La primera cuenta crea el edificio; las siguientes piden acceso.
+- En local, la administración restablece las contraseñas olvidadas.
+
 ## 0.1.1 — 2026-11-22
 
 - Finanzas: pagos registrados por la administración (con abonos parciales y anulación), convenios de pago para unidades morosas con aceptación del residente, panel de estado económico y flujo de caja mensual y anual con exportación a Excel.

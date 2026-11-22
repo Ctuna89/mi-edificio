@@ -6,38 +6,33 @@
 
 Antes de proponer un cambio, ten presentes las decisiones de diseño (más detalle en `HANDOFF.md`):
 
-- **Sin frameworks ni build.** El frontend es HTML + JS vanilla en `web/`. No agregues dependencias ni pasos de compilación.
+- **Sin frameworks ni build.** El frontend es HTML + JS vanilla en `web/`. No agregues dependencias ni pasos de compilación. El servidor local (`local/`) tiene dos dependencias; agregar otra necesita una buena razón.
 - **La seguridad vive en la base de datos.** Todo permiso se expresa como política RLS en `supabase/schema.sql`. El frontend solo decide qué mostrar.
 - **`schema.sql` es idempotente** y debe seguir siéndolo: se tiene que poder ejecutar completo varias veces sin error ni pérdida de datos.
-- **Cada fila pertenece a un edificio.** Toda tabla nueva lleva `edificio_id` y sus políticas se crean con el helper `_pol`, que las limita al edificio del usuario.
+- **Una instalación = un edificio.** Las tablas llevan una columna `edificio_id` por razones históricas: toda tabla nueva la incluye y crea sus políticas con el helper `_pol`.
+- **Dos formas de instalar, un solo código.** La app corre sobre el servidor local o sobre Supabase. Lo que agregues debe funcionar en ambos: `web/app.js` usa la interfaz de `supabase-js`, que en local implementa `local/cliente.js`; si usas un método nuevo de esa interfaz, agrégalo ahí y en `local/server.mjs`.
 - **UI en español de Chile.**
 
 ## Entorno de desarrollo
 
-1. Crea un proyecto gratuito en [Supabase](https://supabase.com) y ejecuta `supabase/schema.sql` en el SQL Editor (ver `README.md`).
-2. Pon la URL y la anon key de **tu** proyecto en `web/config.js`.
-3. Sirve la carpeta `web/` con cualquier servidor estático:
+Con Node.js 20 o superior:
 
-   ```bash
-   npx serve web
-   ```
+```bash
+cd local && npm install && npm start
+```
 
-> **No subas tus claves.** La anon key es pública por diseño, pero `web/config.js` debe quedar en el repositorio con los valores de ejemplo. Para evitar subirla por accidente:
->
-> ```bash
-> git update-index --skip-worktree web/config.js
-> ```
->
-> Nunca incluyas la clave `service_role` en ningún archivo.
+Abre `http://localhost:8080`. Los datos quedan en `local/datos` (fuera del repositorio); bórrala para partir de cero. El servidor aplica `supabase/schema.sql` en cada arranque, así que basta reiniciarlo para probar un cambio del esquema.
+
+`web/config.js` solo se usa en la instalación alternativa sobre Supabase y debe quedar en el repositorio con sus valores de ejemplo.
 
 ## Flujo de trabajo
 
 1. Abre un *issue* describiendo el problema o la idea antes de un cambio grande.
 2. Haz un *fork*, crea una rama (`feat/encuestas`, `fix/reserva-solapada`, …) y envía un *pull request*.
 3. En el PR indica qué roles probaste (residente, conserje, comité, admin, mantención) y, si tocaste `schema.sql`, que lo ejecutaste dos veces seguidas sin errores.
-4. La CI verifica la sintaxis de los archivos JS y ejecuta las pruebas del esquema; debe pasar.
+4. La CI verifica la sintaxis de los archivos JS y ejecuta las pruebas del esquema y del servidor local; debe pasar.
 
-## Pruebas del esquema
+## Pruebas
 
 Si tocas `supabase/schema.sql`, ejecuta las pruebas en un Postgres local (16 o superior) y agrega casos a `supabase/tests/rls.sql` para los permisos nuevos:
 
@@ -46,6 +41,12 @@ PGHOST=localhost PGUSER=postgres supabase/tests/run.sh
 ```
 
 Crea y borra las bases `mi_edificio_test` y `mi_edificio_mig`; no lo apuntes a un servidor con datos reales.
+
+Si tocas `local/`, ejecuta sus pruebas (usan una carpeta de datos temporal):
+
+```bash
+cd local && npm test
+```
 
 ## Reglas de seguridad al programar
 
