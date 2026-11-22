@@ -59,8 +59,10 @@ function createClient(){
       createSignedUrls:(rutas,seg)=>api('/api/archivos/firmar',{rutas, seg}),
       remove:rutas=>api('/api/archivos/borrar',{rutas}),
     }) },
-    // Solo modo local: la administración restablece la contraseña de un usuario
-    local:{ restablecer:(uid,clave)=>api('/api/auth/restablecer',{uid, clave}) },
+    // Solo modo local: lo que no existe en Supabase
+    local:{ restablecer:(uid,clave)=>api('/api/auth/restablecer',{uid, clave}),
+      // respaldo cifrado en una carpeta sincronizada con la nube (OneDrive, Google Drive…)
+      respaldo:{ estado:()=>api('/api/respaldo/estado'), configurar:d=>api('/api/respaldo/configurar',d), ahora:()=>api('/api/respaldo/ahora') } },
   };
 }
 window.supabase={createClient};

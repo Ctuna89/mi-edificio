@@ -126,6 +126,35 @@ test('peticiones de otro sitio y avisos de cambios', async () => {
   assert.match(await llego, /data: cambio/); ctl.abort();
 });
 
+test('respaldo cifrado en una carpeta, con aviso si no es de nube, y restauración en un equipo nuevo', async () => {
+  const nube = fs.mkdtempSync(path.join(os.tmpdir(), 'me-nube-')), simple = path.join(nube, 'Documentos', 'Respaldo'), deNube = path.join(nube, 'OneDrive', 'Respaldo Mi Edificio');
+  assert.equal((await rita.pedir('/api/respaldo/estado')).estado, 403, 'solo administración');
+  assert.equal((await ana.pedir('/api/respaldo/ahora')).estado, 400, 'sin configurar no respalda');
+  assert.equal((await ana.pedir('/api/respaldo/configurar', { carpeta: 'relativa', clave: 'clave-del-respaldo' })).estado, 400);
+  assert.equal((await ana.pedir('/api/respaldo/configurar', { carpeta: simple })).estado, 400, 'exige contraseña');
+  assert.equal((await ana.pedir('/api/respaldo/configurar', { carpeta: path.join(DATOS, 'x'), clave: 'clave-del-respaldo' })).estado, 400, 'no dentro de los datos');
+  let e = (await ana.pedir('/api/respaldo/configurar', { carpeta: simple, clave: 'clave-del-respaldo' })).data;
+  assert.equal(e.configurado, true); assert.equal(e.pareceNube, false, 'una carpeta cualquiera se marca como "no parece de nube"');
+  e = (await ana.pedir('/api/respaldo/configurar', { carpeta: deNube })).data; assert.equal(e.pareceNube, true, 'una carpeta dentro de OneDrive sí');
+  const ruta = `${eid}/documentos/2026-11-22/acta.pdf`; await ana.subir(ruta, 'TEXTO-SECRETO-DEL-ACTA');
+  e = (await ana.pedir('/api/respaldo/ahora')).data; assert.equal(e.ultimo.ok, true, e.ultimo.error); assert.equal(e.ultimo.archivos, 1);
+  const base = fs.readdirSync(path.join(deNube, 'base')); assert.equal(base.length, 1);
+  const enc = fs.readFileSync(path.join(deNube, 'archivos', ...ruta.split('/')) + '.enc');
+  assert.ok(!enc.includes('TEXTO-SECRETO') && !fs.readFileSync(path.join(deNube, 'base', base[0])).includes('Torre Local'), 'lo que va a la nube está cifrado');
+  await ana.pedir('/api/archivos/borrar', { rutas: [ruta] }); await ana.subir(ruta.replace('acta', 'acta2'), 'OTRO');
+  e = (await ana.pedir('/api/respaldo/ahora')).data; assert.deepEqual(fs.readdirSync(path.join(deNube, 'archivos', eid, 'documentos', '2026-11-22')), ['acta2.pdf.enc'], 'la copia sigue a los archivos: agrega y quita');
+  // restaurar en un "computador nuevo": otra carpeta de datos, solo con la carpeta de nube y la contraseña
+  const nuevo = fs.mkdtempSync(path.join(os.tmpdir(), 'me-nuevo-')), puerto2 = PUERTO + 100;
+  const correr = (clave) => new Promise(ok => { const p = spawn(process.execPath, [path.join(AQUI, 'server.mjs'), '--restaurar-nube', deNube], { env: { ...process.env, MI_EDIFICIO_DATOS: nuevo, PUERTO: String(puerto2), MI_EDIFICIO_CLAVE_RESPALDO: clave } }); let s = ''; const v = d => { s += d; if (s.includes('está funcionando')) ok({ p, s }); }; p.stdout.on('data', v); p.stderr.on('data', v); p.on('exit', () => ok({ p: null, s })); });
+  const mal = await correr('clave-equivocada'); assert.equal(mal.p, null); assert.match(mal.s, /contraseña del respaldo no es correcta/);
+  const bien = await correr('clave-del-respaldo'); assert.ok(bien.p, bien.s.slice(-300));
+  const r = await fetch(`http://localhost:${puerto2}/api/auth/entrar`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'ana@test.cl', clave: 'clave-segura-1' }) });
+  assert.equal(r.status, 200, 'la cuenta existe en el equipo restaurado');
+  assert.equal(fs.readFileSync(path.join(nuevo, 'archivos', eid, 'documentos', '2026-11-22', 'acta2.pdf'), 'utf8'), 'OTRO', 'y sus archivos también');
+  await new Promise(ok => { bien.p.on('exit', ok); bien.p.kill('SIGTERM'); });
+  fs.rmSync(nube, { recursive: true, force: true }); fs.rmSync(nuevo, { recursive: true, force: true });
+});
+
 test('contraseñas: la restablece la administración, y los datos persisten tras reiniciar', async () => {
   assert.equal((await rita.pedir('/api/auth/restablecer', { uid: ritaId, clave: 'otra-clave-99' })).estado, 403);
   assert.equal((await ana.pedir('/api/auth/restablecer', { uid: ritaId, clave: 'nueva-clave-22' })).estado, 200);

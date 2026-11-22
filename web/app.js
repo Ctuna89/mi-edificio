@@ -315,9 +315,12 @@ VIEWS.inicio = function(){
   setMain(`<h1>Hola, ${esc(S.me.nombre.split(' ')[0])}</h1>
   ${setupPend?`<div class="note">Falta terminar la configuración inicial del edificio. <a href="#" id="bWizHome">Continuar con el asistente</a></div>`:''}
   ${PUSH_KEY&&pushOk()&&Notification.permission==='default'?`<div class="info">🔔 <a href="#perfil">Activa las notificaciones</a> para enterarte de encomiendas, mensajes y aprobaciones.</div>`:''}
+  <div id="homeResp"></div>
   <div class="grid">${mods.map(m=>`<a class="tile" href="#${m.id}" data-tile="${m.id}"><span class="ic">${m.ic}</span><b>${m.t}</b><small>${m.d||''}</small></a>`).join('')}</div>
   <h2>Últimos comunicados</h2><div id="homeCom" class="list"><div class="empty">Cargando…</div></div>`);
   $('#bWizHome')?.addEventListener('click',e=>{ e.preventDefault(); asistente(); });
+  if(CFG.LOCAL && realRole()==='admin') sb.local.respaldo.estado().then(({data:e})=>{ const el=$('#homeResp'); if(!el||!e) return; const viejo=e.ultimo&&Date.now()-new Date(e.ultimo.fecha)>3*86400000;
+    el.innerHTML=!e.configurado?'<div class="note">Los respaldos solo quedan en este computador. <a href="#admin">Configura el respaldo en la nube</a>.</div>':e.ultimo&&!e.ultimo.ok?'<div class="err">El último respaldo en la nube falló. <a href="#admin">Revisar</a>.</div>':viejo?'<div class="note">No hay un respaldo en la nube desde hace más de 3 días. <a href="#admin">Revisar</a>.</div>':''; });
   if(setupPend && !S._wiz){ S._wiz=true; asistente(); }   // una vez por sesión
   watch('comunicados', ()=>q(T('comunicados').select('*').order('ts',{ascending:false}).limit(3)), rows=>{ const el=$('#homeCom'); if(!el) return; el.innerHTML = rows.length? rows.map(c=>`<div class="item static"><div class="hd"><b>${esc(c.titulo)}</b><span class="muted small">${fmtDate(c.ts)}</span></div><div class="small" style="margin-top:4px">${esc(c.cuerpo).slice(0,160)}${c.cuerpo.length>160?'…':''}</div></div>`).join('') : '<div class="empty">Sin comunicados aún</div>'; });
   const badge=(id,n)=>{ const t=$(`[data-tile="${id}"]`); if(!t) return; let b=$('.badge',t); if(n>0){ if(!b){b=document.createElement('span');b.className='badge';t.appendChild(b);} b.textContent=n; } else b?.remove(); };
@@ -970,6 +973,26 @@ function detalleOT(o){
   }catch(err){ toast('Error: '+errMsg(err)); } });
 }
 
+// RESPALDO EN LA NUBE (solo instalación local)
+// El servidor deja cada día una copia cifrada en una carpeta del computador; si esa carpeta es de
+// OneDrive, Google Drive u otra nube, su app la sube sola. Se usa en Administración y en el asistente.
+const RE_NUBE=/onedrive|google\s?drive|googledrive|my drive|mi unidad|dropbox|icloud|clouddocs|cloudstorage|nextcloud|pcloud|megasync|box sync|sync\.com/i;
+const AVISO_NO_NUBE='Esta carpeta no parece estar dentro de OneDrive, Google Drive u otra nube. Si no se sincroniza, el respaldo quedará solo en este computador y se perderá junto con él.';
+function respaldoCampos(e){ return `<p class="small muted">Instala en este computador la app de OneDrive, Google Drive u otra nube e inicia sesión en ella. Después elige una carpeta de esa nube: cada día Mi Edificio dejará ahí una copia cifrada de todo (base de datos, fotos y documentos) y la nube la subirá sola.</p>
+  ${e.sugerencias.length?`<div class="small" style="margin-bottom:10px">Carpetas de nube encontradas en este computador:<br>${e.sugerencias.map(s=>`<a href="#" data-sug="${esc(s)}">${esc(s)}</a>`).join('<br>')}</div>`:'<div class="info">No se encontró una carpeta de OneDrive, Google Drive, Dropbox ni iCloud en este computador. Instala una de esas apps, o escribe la ruta a mano.</div>'}
+  <label class="f"><span>Carpeta del respaldo (ruta completa en el computador del edificio)</span><input type="text" name="carpeta" value="${esc(e.carpeta)}" placeholder="C:\\Users\\Conserjeria\\OneDrive\\Respaldo Mi Edificio" autocomplete="off" spellcheck="false"></label><div id="rAviso"></div>
+  <div class="row"><label class="f grow"><span>${e.configurado?'Nueva contraseña (vacío = mantener)':'Contraseña del respaldo'}</span><input type="password" name="clave" minlength="8" autocomplete="new-password"></label><label class="f grow"><span>Repítela</span><input type="password" name="clave2" autocomplete="new-password"></label></div>
+  <p class="small muted">Anota esta contraseña fuera del computador. Sin ella el respaldo no se puede recuperar, y nadie puede restablecerla.</p>`; }
+function respaldoEventos(raiz){ const inp=$('[name=carpeta]',raiz); const av=()=>{ $('#rAviso',raiz).innerHTML=inp.value.trim()&&!RE_NUBE.test(inp.value)?`<div class="note">${AVISO_NO_NUBE}</div>`:''; };
+  inp.addEventListener('input',av); raiz.addEventListener('click',e=>{ const s=e.target.closest('[data-sug]'); if(s){ e.preventDefault(); inp.value=s.dataset.sug; av(); } }); av(); }
+async function respaldoGuardar(d, e){ if(d.clave!==d.clave2) throw new Error('Las dos contraseñas no coinciden.'); if(!d.clave&&!e.configurado) throw new Error('Define una contraseña para el respaldo.'); return q(sb.local.respaldo.configurar({carpeta:d.carpeta.trim(), clave:d.clave})); }
+const respaldoEstado=e=>!e.configurado?'<div class="note">Hoy los respaldos solo quedan en este computador. Si falla, se pierde todo.</div>'
+  :(e.pareceNube?'':`<div class="note">${AVISO_NO_NUBE}</div>`)+(!e.ultimo?'<div class="info">Carpeta configurada. El primer respaldo se hará esta noche, o ahora con "Respaldar ahora".</div>':e.ultimo.ok?`<div class="info">Último respaldo: ${fmtDate(e.ultimo.fecha)} · ${e.ultimo.archivos} ${e.ultimo.archivos===1?'archivo':'archivos'}, cifrado.</div>`:`<div class="err">El último respaldo (${fmtDate(e.ultimo.fecha)}) falló: ${esc(e.ultimo.error)}</div>`);
+async function tarjetaRespaldo(){ const el=$('#respBody'); if(!el) return; let e; try{ e=await q(sb.local.respaldo.estado()); }catch(err){ el.innerHTML=`<div class="err">${esc(errMsg(err))}</div>`; return; } if(!$('#respBody')) return;
+  el.innerHTML=`${respaldoEstado(e)}<form id="fResp">${respaldoCampos(e)}<div class="row wrap"><button class="btn">Guardar</button>${e.configurado?'<button type="button" class="btn sec" id="bRespYa">Respaldar ahora</button>':''}</div></form>`; respaldoEventos(el);
+  $('#fResp',el).addEventListener('submit', async ev=>{ ev.preventDefault(); const b=$('button',ev.target); busy(b,true); try{ await respaldoGuardar(formData(ev.target), e); toast('Respaldo configurado'); tarjetaRespaldo(); }catch(err){ toast(errMsg(err)); busy(b,false); } });
+  $('#bRespYa',el)?.addEventListener('click', async ev=>{ busy(ev.target,true,'Respaldando…'); try{ const r=await q(sb.local.respaldo.ahora()); toast(r.ultimo?.ok?'Respaldo listo':'El respaldo falló'); }catch(err){ toast(errMsg(err)); } tarjetaRespaldo(); }); }
+
 // ASISTENTE DE CONFIGURACIÓN INICIAL
 // Ventana por pasos para dejar operativo un edificio nuevo. Cada paso guarda al avanzar, así
 // que se puede abandonar y retomar; al terminar se marca edificios.configurado_at.
@@ -1011,6 +1034,10 @@ function asistente(i=0){
       h:()=>`<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 12px">${RETENCION.map(([k,t])=>`<label class="f"><span>${t}</span><input type="number" name="ret_${k}" min="1" max="240" placeholder="Indefinido" value="${Number(c.retencion?.[k])||''}"></label>`).join('')}</div>
         <label class="f"><span>Aviso de privacidad (vacío = texto por defecto)</span><textarea name="privacidad" placeholder="Quién es responsable de los datos, para qué se usan, por cuánto tiempo se guardan y cómo ejercer los derechos de acceso, rectificación y eliminación.">${esc(c.privacidad||'')}</textarea></label>`,
       g:d=>{ const retencion={}; RETENCION.forEach(([k])=>{ const x=Math.floor(Number(d['ret_'+k])); if(x>0) retencion[k]=x; }); return upd({retencion, privacidad:d.privacidad.trim()}); }},
+    ...(CFG.LOCAL?[{t:'Respaldo en la nube', d:'Todo lo de tu edificio vive en este computador. Para no perderlo si falla, deja una copia en una nube. Puedes saltar este paso y hacerlo después en Administración → Edificio.',
+      h:()=>'<div id="wResp" class="small muted">Buscando carpetas de nube en este computador…</div>',
+      ini:async m=>{ try{ const e=await q(sb.local.respaldo.estado()); m._resp=e; const el=$('#wResp',m); if(!el) return; el.className=''; el.innerHTML=(e.configurado?respaldoEstado(e):'')+respaldoCampos(e); respaldoEventos(el); }catch(err){ const el=$('#wResp',m); if(el) el.innerHTML=`<div class="err">${esc(errMsg(err))}</div>`; } },
+      g:async(d,m)=>{ if(!d.carpeta||!d.carpeta.trim()) return; await respaldoGuardar(d, m._resp||{}); sb.local.respaldo.ahora().then(()=>{},()=>{}); }}]:[]),
     {t:'Invita a tu comunidad', d:'Comparte este enlace con residentes, conserjes y empresas. Al crear su cuenta quedarán pendientes hasta que los apruebes.',
       h:()=>`<div class="row wrap"><input type="text" id="wInv" class="grow" readonly value="${esc(inv)}"><button type="button" class="btn sec" id="wCopiar">Copiar enlace</button></div><div style="height:14px"></div>
         <div class="small"><b>Lo que sigue</b><ol style="margin:6px 0 0;padding-left:20px;line-height:1.7"><li>Aprueba a quienes se registren en Administración → Usuarios, asignándoles depto y rol.</li><li>Publica el primer período en Gastos comunes.</li><li>Activa tus notificaciones en Mi cuenta.</li></ol></div>`,
@@ -1020,6 +1047,7 @@ function asistente(i=0){
   const m=modal(`<div class="small muted">Configuración inicial · paso ${i+1} de ${n}</div><div class="bar" style="margin:6px 0 14px"><i style="width:${Math.round((i+1)/n*100)}%;background:var(--p)"></i></div>
     <h3>${p.t}</h3><p class="small muted" style="margin-top:-6px">${p.d}</p><form id="fW">${p.h()}<div id="wErr" style="margin-top:10px"></div>
     <div class="row" style="margin-top:6px">${i?'<button type="button" class="btn sec" id="wAtras">Atrás</button>':''}<span class="grow"></span>${ult?'':'<button type="button" class="btn sec" id="wLuego">Seguir después</button>'}<button class="btn" id="wSig">${ult?'Terminar':'Guardar y seguir'}</button></div></form>`);
+  p.ini?.(m);
   $('#wAtras',m)?.addEventListener('click',()=>asistente(i-1));
   $('#wLuego',m)?.addEventListener('click',()=>{ closeModal(); routeNow(); });
   $('#wCopiar',m)?.addEventListener('click', async()=>{ const x=$('#wInv',m); try{ await navigator.clipboard.writeText(x.value); toast('Enlace copiado'); }catch(e){ x.select(); toast('Copia el enlace seleccionado'); } });
@@ -1049,6 +1077,7 @@ ADMIN.edificio = function(el){
   <label class="f"><span>Aviso de privacidad (se muestra al registrarse y en Mi cuenta; vacío = texto por defecto)</span><textarea name="privacidad" placeholder="Quién es responsable de los datos, para qué se usan, por cuánto tiempo se guardan y cómo ejercer los derechos de acceso, rectificación y eliminación.">${esc(c.privacidad||'')}</textarea></label>
   <label class="f"><span>Color principal</span><input type="color" name="color" value="${esc(c.color||'#1e5eff')}" style="width:60px;height:36px;padding:2px;border:1px solid var(--bd);border-radius:8px"></label>
   <button class="btn">Guardar cambios</button></form></div>
+  ${CFG.LOCAL?'<div class="card"><h3>Respaldo en la nube</h3><div id="respBody" class="small muted">Cargando…</div></div>':''}
   <div class="card"><h3>Conservación de datos</h3><p class="small muted">Define por cuántos meses se guarda cada tipo de dato. Lo que supere el plazo se borra en forma definitiva, cada día. Vacío = se conserva indefinidamente.</p>
   <form id="fRet"><div class="grid2">${RETENCION.map(([k,t,d])=>`<label class="f"><span>${t}</span><input type="number" name="${k}" min="1" max="240" placeholder="Indefinido" value="${Number(c.retencion?.[k])||''}"><span style="font-weight:400;margin-top:4px">${d}</span></label>`).join('')}</div>
   <div class="row wrap"><button class="btn">Guardar plazos</button><button type="button" class="btn sec" id="bDep">Aplicar ahora</button></div></form></div>
@@ -1057,6 +1086,7 @@ ADMIN.edificio = function(el){
   $('#fRet',el).addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); const retencion={}; RETENCION.forEach(([k])=>{ const n=Math.floor(Number(d[k])); if(n>0) retencion[k]=n; }); try{ await q(T('edificios').update({retencion}).eq('id',S.cfg.id)); toast('Plazos guardados'); }catch(err){ toast('Error: '+errMsg(err)); } });
   $('#bDep',el).addEventListener('click', async e=>{ if(!await confirmBox('Se borrarán en forma definitiva los datos que superen los plazos guardados. ¿Continuar?')) return; try{ const r=await q(sb.rpc('depurar_ahora'))||{}; const n=Object.values(r).reduce((a,b)=>a+Number(b),0); toast(n?(n===1?'Se borró 1 registro':`Se borraron ${n} registros`):'No había datos fuera de plazo'); limpiarArchivos(); }catch(err){ toast('Error: '+errMsg(err)); } });
   $('#bWiz',el).addEventListener('click',()=>asistente());
+  if(CFG.LOCAL) tarjetaRespaldo();
   let newLogo=null;
   $('#bLogo',el).addEventListener('click',()=>$('#logoIn',el).click());
   $('#logoIn',el).addEventListener('change', async e=>{ const f=e.target.files[0]; if(!f) return; try{ toast('Subiendo logo…'); newLogo=await uploadImage(f,'logo'); $('#logoPrev',el).innerHTML=`<img data-f="${esc(newLogo)}">`; toast('Logo listo, guarda los cambios'); }catch(err){ toast('Error: '+errMsg(err)); } });

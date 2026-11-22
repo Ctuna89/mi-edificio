@@ -40,6 +40,40 @@ if (restaurar) {
   opcionesDb.loadDataDir = new Blob([fs.readFileSync(restaurar)]);
   log('Restaurando la base de datos desde', restaurar);
 }
+
+// --- Respaldo cifrado: formato y restauración ------------------------------------------
+// Archivo = "MEB1" + sal(16) + iv(12) + AES-256-GCM(contenido) + etiqueta(16). La llave sale de la
+// contraseña del respaldo (scrypt), así que para restaurar basta la carpeta y esa contraseña.
+const MAGIA = Buffer.from('MEB1');
+const derivar = (clave, sal) => crypto.scryptSync(clave, sal, 32);
+function sellar(llave, sal, buf) { const iv = crypto.randomBytes(12), c = crypto.createCipheriv('aes-256-gcm', llave, iv); const x = Buffer.concat([c.update(buf), c.final()]); return Buffer.concat([MAGIA, sal, iv, x, c.getAuthTag()]); }
+const llaves = new Map();
+function abrirSellado(clave, buf) {
+  if (buf.length < 48 || !buf.subarray(0, 4).equals(MAGIA)) throw new Error('No es un respaldo de Mi Edificio');
+  const sal = buf.subarray(4, 20), k = sal.toString('hex'); if (!llaves.has(k)) llaves.set(k, derivar(clave, sal));
+  const d = crypto.createDecipheriv('aes-256-gcm', llaves.get(k), buf.subarray(20, 32)); d.setAuthTag(buf.subarray(buf.length - 16));
+  try { return Buffer.concat([d.update(buf.subarray(32, buf.length - 16)), d.final()]); } catch { throw new Error('La contraseña del respaldo no es correcta, o el archivo está dañado'); }
+}
+const recorrer = (dir, rel = '') => !fs.existsSync(dir) ? [] : fs.readdirSync(dir, { withFileTypes: true }).flatMap(e => e.isDirectory() ? recorrer(path.join(dir, e.name), rel + e.name + '/') : [rel + e.name]);
+
+const iNube = process.argv.indexOf('--restaurar-nube');
+if (iNube > 0) {
+  const carpeta = path.resolve(process.argv[iNube + 1] || '');
+  if (fs.readdirSync(DIR.db).length) { console.error(`Para restaurar, la carpeta ${DIR.db} debe estar vacía (muévela primero).`); process.exit(1); }
+  const bases = recorrer(path.join(carpeta, 'base')).filter(x => x.endsWith('.meb')).sort();
+  if (!bases.length) { console.error(`No hay respaldos en ${path.join(carpeta, 'base')}`); process.exit(1); }
+  let clave = process.env.MI_EDIFICIO_CLAVE_RESPALDO;
+  if (!clave) { const rl = (await import('node:readline/promises')).createInterface({ input: process.stdin, output: process.stdout }); clave = await rl.question('Contraseña del respaldo: '); rl.close(); }
+  try {
+    const j = JSON.parse(abrirSellado(clave, fs.readFileSync(path.join(carpeta, 'base', bases.at(-1)))).toString('utf8'));
+    opcionesDb.loadDataDir = new Blob([Buffer.from(j.db, 'base64')]);
+    fs.writeFileSync(path.join(DATOS, 'config.json'), JSON.stringify(j.config, null, 2), { mode: 0o600 });
+    const arch = recorrer(path.join(carpeta, 'archivos')).filter(x => x.endsWith('.enc'));
+    for (const a of arch) { const dest = path.join(DIR.archivos, ...a.slice(0, -4).split('/')); fs.mkdirSync(path.dirname(dest), { recursive: true }); fs.writeFileSync(dest, abrirSellado(clave, fs.readFileSync(path.join(carpeta, 'archivos', a)))); }
+    log(`Restaurado el respaldo ${bases.at(-1)} con ${arch.length} archivos. Vuelve a configurar el respaldo en Administración → Edificio.`);
+  } catch (e) { console.error('No se pudo restaurar:', e.message); process.exit(1); }
+}
+
 const db = await PGlite.create({ dataDir: DIR.db, ...opcionesDb });
 await db.exec(fs.readFileSync(path.join(AQUI, 'base.sql'), 'utf8'));
 await db.exec(fs.readFileSync(path.join(RAIZ, 'supabase', 'schema.sql'), 'utf8'));
@@ -52,7 +86,8 @@ let webpush = null;
 try { webpush = (await import('web-push')).default; } catch { log('web-push no está instalado: sin notificaciones push'); }
 if (!CFG.secreto) CFG.secreto = crypto.randomBytes(32).toString('hex');
 if (!CFG.vapid && webpush) CFG.vapid = webpush.generateVAPIDKeys();
-fs.writeFileSync(rutaCfg, JSON.stringify(CFG, null, 2), { mode: 0o600 });
+const guardarCfg = () => fs.writeFileSync(rutaCfg, JSON.stringify(CFG, null, 2), { mode: 0o600 });
+guardarCfg();
 if (webpush && CFG.vapid) webpush.setVapidDetails(process.env.MI_EDIFICIO_CONTACTO || 'mailto:admin@example.com', CFG.vapid.publicKey, CFG.vapid.privateKey);
 
 // Catálogo: tablas, claves primarias y funciones que la app puede usar (las de "public")
@@ -269,6 +304,55 @@ async function respaldar() {
   viejos.forEach(x => fs.rmSync(path.join(DIR.respaldos, x), { force: true }));
   return nombre;
 }
+// --- Respaldo completo y cifrado en una carpeta sincronizada con la nube ---------------------
+// La app de OneDrive, Google Drive u otra, instalada en este computador, sube lo que dejamos ahí.
+//   <carpeta>/base/mi-edificio-AAAA-MM-DD.meb   base de datos + claves de la instalación (últimos 14 días)
+//   <carpeta>/archivos/…​.enc                    cada foto o documento, una sola vez (espejo de datos/archivos)
+const RE_NUBE = /onedrive|google\s?drive|googledrive|my drive|mi unidad|dropbox|icloud|clouddocs|cloudstorage|nextcloud|pcloud|megasync|box sync|sync\.com/i;
+const pareceNube = p => RE_NUBE.test(p || '');
+function carpetasDeNube() {
+  const h = os.homedir(), c = new Set();
+  ['OneDrive', 'OneDriveConsumer', 'OneDriveCommercial'].forEach(v => process.env[v] && c.add(process.env[v]));
+  ['OneDrive', 'Dropbox', 'Google Drive', 'GoogleDrive', 'iCloudDrive', 'Nextcloud', path.join('Library', 'Mobile Documents', 'com~apple~CloudDocs')].forEach(n => c.add(path.join(h, n)));
+  try { fs.readdirSync(path.join(h, 'Library', 'CloudStorage')).forEach(n => c.add(path.join(h, 'Library', 'CloudStorage', n))); } catch {}
+  if (process.platform === 'win32') for (const l of 'DEFGHIJKLMNOPQRSTUVWXYZ') ['My Drive', 'Mi unidad'].forEach(n => c.add(`${l}:\\${n}`));
+  return [...c].filter(d => { try { return fs.statSync(d).isDirectory(); } catch { return false; } }).map(d => path.join(d, 'Respaldo Mi Edificio'));
+}
+const estadoRespaldo = () => { const r = CFG.respaldo || {}; return { configurado: !!(r.carpeta && r.llave), carpeta: r.carpeta || '', pareceNube: pareceNube(r.carpeta), ultimo: r.ultimo || null, sugerencias: carpetasDeNube() }; };
+function configurarRespaldo({ carpeta, clave }) {
+  carpeta = String(carpeta || '').trim();
+  if (!carpeta || !path.isAbsolute(carpeta)) throw new Fallo('Escribe la ruta completa de la carpeta, por ejemplo C:\\Users\\Conserjeria\\OneDrive\\Respaldo Mi Edificio');
+  carpeta = path.resolve(carpeta);
+  if ((carpeta + path.sep).startsWith(DATOS + path.sep)) throw new Fallo('Elige una carpeta fuera de los datos de Mi Edificio');
+  try { fs.mkdirSync(carpeta, { recursive: true }); fs.writeFileSync(path.join(carpeta, '.prueba'), 'ok'); fs.rmSync(path.join(carpeta, '.prueba')); } catch (e) { throw new Fallo('No se puede escribir en esa carpeta: ' + e.message); }
+  const r = CFG.respaldo || {};
+  if (clave) { if (typeof clave !== 'string' || clave.length < 8) throw new Fallo('La contraseña del respaldo debe tener al menos 8 caracteres'); const sal = crypto.randomBytes(16); r.sal = sal.toString('hex'); r.llave = derivar(clave, sal).toString('hex'); }
+  else if (!r.llave) throw new Fallo('Define una contraseña para el respaldo');
+  r.carpeta = carpeta; delete r.ultimo; CFG.respaldo = r; guardarCfg();
+}
+let respaldandoNube = false;
+async function respaldarNube() {
+  const r = CFG.respaldo; if (!r?.carpeta || !r.llave || respaldandoNube) return null; respaldandoNube = true;
+  try {
+    const llave = Buffer.from(r.llave, 'hex'), sal = Buffer.from(r.sal, 'hex'), base = path.join(r.carpeta, 'base'), arch = path.join(r.carpeta, 'archivos'), marca = path.join(r.carpeta, '.clave');
+    const escribir = (f, buf) => { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f + '.tmp', buf); fs.renameSync(f + '.tmp', f); };
+    // si cambió la contraseña, lo anterior ya no se podría abrir con la nueva: se rehace
+    const huella = sha(r.llave).slice(0, 16);
+    if (fs.existsSync(marca) && fs.readFileSync(marca, 'utf8') !== huella) { fs.rmSync(base, { recursive: true, force: true }); fs.rmSync(arch, { recursive: true, force: true }); }
+    escribir(marca, huella);
+    escribir(path.join(r.carpeta, 'LEEME.txt'), 'Respaldo cifrado de Mi Edificio. No modifiques estos archivos.\nPara restaurar en un computador nuevo: instala Mi Edificio y ejecuta\n  iniciar --restaurar-nube "<esta carpeta>"\nTe pedirá la contraseña del respaldo. Sin esa contraseña no se puede recuperar.\n');
+    const dump = Buffer.from(await (await db.dumpDataDir('gzip')).arrayBuffer());
+    escribir(path.join(base, `mi-edificio-${new Date().toISOString().slice(0, 10)}.meb`), sellar(llave, sal, Buffer.from(JSON.stringify({ v: 1, fecha: new Date().toISOString(), config: { secreto: CFG.secreto, vapid: CFG.vapid }, db: dump.toString('base64') }))));
+    recorrer(base).filter(x => x.endsWith('.meb')).sort().slice(0, -14).forEach(x => fs.rmSync(path.join(base, x), { force: true }));
+    const locales = recorrer(DIR.archivos), enNube = new Set(recorrer(arch)); let nuevos = 0;
+    for (const a of locales) if (!enNube.has(a + '.enc')) { escribir(path.join(arch, ...(a + '.enc').split('/')), sellar(llave, sal, fs.readFileSync(path.join(DIR.archivos, ...a.split('/'))))); nuevos++; }
+    const vivos = new Set(locales.map(a => a + '.enc')); for (const a of enNube) if (a.endsWith('.enc') && !vivos.has(a)) fs.rmSync(path.join(arch, ...a.split('/')), { force: true });
+    r.ultimo = { fecha: new Date().toISOString(), ok: true, archivos: locales.length, nuevos };
+  } catch (e) { r.ultimo = { fecha: new Date().toISOString(), ok: false, error: e.message }; log('respaldo en la nube:', e.message); }
+  finally { respaldandoNube = false; guardarCfg(); }
+  return r.ultimo;
+}
+
 // Cada 5 minutos: plazos de estacionamiento. Una vez al día: plazos de conservación y respaldo.
 let diaHecho = '';
 async function tareas() {
@@ -282,6 +366,7 @@ async function tareas() {
       const pend = await db.query(`delete from public.archivos_por_borrar returning path`);
       for (const x of pend.rows) { if (rutaValida(x.path)) { fs.rmSync(enDisco(x.path), { force: true }); await db.query(`delete from storage.objects where name = $1`, [x.path]); } }
       log('Respaldo diario:', await respaldar());
+      const n = await respaldarNube(); if (n) log('Respaldo en la carpeta de nube:', n.ok ? `listo (${n.archivos} archivos)` : 'FALLÓ: ' + n.error);
     }
     await despacharPush();
   } catch (e) { log('tareas:', e.message); }
@@ -343,6 +428,13 @@ async function api(req, res, url) {
   if (ruta.startsWith('/api/rpc/')) { const r = await llamar(uid, decodeURIComponent(ruta.slice('/api/rpc/'.length)), cuerpo); if (r.cambia) trasCambio(); return responder(res, 200, { data: r.dato }); }
   if (ruta === '/api/archivos/firmar') return responder(res, 200, { data: await firmar(uid, cuerpo.rutas, cuerpo.seg) });
   if (ruta === '/api/archivos/borrar') return responder(res, 200, { data: await borrar(uid, cuerpo.rutas) });
+  if (ruta.startsWith('/api/respaldo/')) {   // solo administración
+    const adm = await como(uid, tx => tx.query(`select public.es_admin() as ok`)); if (!adm.rows[0]?.ok) throw new Fallo('Solo la administración puede gestionar el respaldo', 403);
+    if (ruta === '/api/respaldo/configurar') configurarRespaldo(cuerpo);
+    else if (ruta === '/api/respaldo/ahora') { if (!estadoRespaldo().configurado) throw new Fallo('Primero configura la carpeta y la contraseña del respaldo'); await respaldarNube(); }
+    else if (ruta !== '/api/respaldo/estado') throw new Fallo('No encontrado', 404);
+    return responder(res, 200, { data: estadoRespaldo() });
+  }
   throw new Fallo('No encontrado', 404);
 }
 
@@ -380,5 +472,5 @@ servidor.listen(PUERTO, () => {
 });
 // Al detenerlo deja un respaldo fresco de la base de datos
 let cerrando = false;
-const cerrar = async () => { if (cerrando) return; cerrando = true; servidor.close(); oyentes.forEach(r => r.end()); try { log('Respaldo al cerrar:', await respaldar()); } catch (e) { log('respaldo:', e.message); } try { await db.close(); } catch {} process.exit(0); };
+const cerrar = async () => { if (cerrando) return; cerrando = true; servidor.close(); oyentes.forEach(r => r.end()); try { log('Respaldo al cerrar:', await respaldar()); await respaldarNube(); } catch (e) { log('respaldo:', e.message); } try { await db.close(); } catch {} process.exit(0); };
 process.on('SIGINT', cerrar); process.on('SIGTERM', cerrar);

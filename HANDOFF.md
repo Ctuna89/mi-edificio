@@ -18,6 +18,7 @@ App web para la comunidad de un edificio: residentes, conserjería, comité, adm
 
 - **Local primero**: el feedback fue que mantener una cuenta en la nube era el mismo problema que pagar un servicio. Se probó que `schema.sql` corre sin cambios en PGlite (pasa `tests/rls.sql` completo), así que el modo local reutiliza todas las reglas en vez de reescribirlas.
 - **Un solo edificio**: se eliminó el soporte multi-edificio (códigos de invitación, apertura de creación). Un índice único impide un segundo edificio. Las tablas conservan la columna `edificio_id` y las políticas la siguen comparando con `mi_edificio()`: es un vestigio interno que se podría retirar.
+- **Respaldo en la nube sin integraciones**: en vez de OAuth con Google o Microsoft (que exige registrar la aplicación), el servidor escribe una copia cifrada (`base/*.meb` + espejo `archivos/*.enc`, AES-256-GCM, llave por scrypt) en una carpeta que la app de escritorio de la nube sincroniza. `pareceNube()` solo mira el nombre de la ruta para advertir. Restauración con `--restaurar-nube`.
 - **Sin correo**: en local no hay verificación ni recuperación por correo; la administración restablece contraseñas (`/api/auth/restablecer`).
 - **Encuestas**: un voto por unidad (`votos` con PK `encuesta_id, depto`). El voto individual solo lo ve su unidad; los totales salen de `resultados_encuestas()` (SECURITY DEFINER). Los plazos se evalúan en hora de Chile (`hoy()`).
 - **Exportación** de gastos: `.xlsx` generado en el navegador y PDF mediante impresión (`@media print` + `#printArea`). Sin librerías.
