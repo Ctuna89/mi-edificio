@@ -156,7 +156,6 @@ insert into incidencias (titulo, descripcion, depto, uid, estado, asignado_a) va
 select t.ok((select estado = 'abierta' and asignado_a is null from incidencias where id = :'inc'), 'la incidencia nace abierta y sin asignar');
 select t.falla(format($$update incidencias set estado = 'resuelta' where id = %L returning 1$$, :'inc'), 'el residente marca resuelta su incidencia');
 select t.falla(format($$insert into visitas (depto, nombre, fecha, estado, uid) values ('102', 'Falso', '2026-12-01', 'ingreso', %L)$$, :'a3'), 'residente registra un ingreso');
-select t.falla($$select count(*) from storage.objects having count(*) > 0$$, 'residente lista archivos antes de subir');
 -- empresa de mantención
 reset role;
 insert into auth.users (id) values ('00000000-0000-0000-0000-0000000000a5');
@@ -256,8 +255,25 @@ select t.ok((select count(*) = 0 from visitas where edificio_id = :'eb'), 'la ta
 select t.soy(:'a2');
 insert into storage.objects (bucket_id, name) values ('fotos', :'ea' || '/incidencias/2026-11-20/x.jpg');
 select t.falla(format($$insert into storage.objects (bucket_id, name) values ('fotos', %L)$$, :'eb' || '/incidencias/x.jpg'), 'subir a la carpeta de otro edificio');
-select t.ok((select count(*) = 1 from storage.objects), 'cada edificio lista solo su carpeta');
-select t.soy(:'b2'); select t.ok((select count(*) = 0 from storage.objects), 'otro edificio no puede listar esos archivos');
-set role anon; select t.ok((select count(*) = 0 from storage.objects), 'sin sesión no se puede enumerar el bucket');
+-- bucket privado: cada archivo se lee según la fila que lo referencia
+reset role; select set_config('request.jwt.claim.sub', '', false);
+select t.ok((select not public from storage.buckets where id = 'fotos'), 'el bucket es privado');
+insert into storage.objects (bucket_id, name) values
+  ('fotos', :'ea' || '/encomiendas/d/e101.jpg'), ('fotos', :'ea' || '/encomiendas/d/e102.jpg'), ('fotos', :'ea' || '/rondas/d/r.jpg'),
+  ('fotos', :'ea' || '/documentos/d/acta.pdf'), ('fotos', :'ea' || '/incidencias/d/i101.jpg'), ('fotos', :'ea' || '/incidencias/d/nota.jpg'),
+  ('fotos', :'ea' || '/incidencias/d/i102.jpg'), ('fotos', :'ea' || '/ot/d/despues.jpg'), ('fotos', :'ea' || '/ot/d/otra.jpg'), ('fotos', :'eb' || '/documentos/d/b.pdf');
+insert into encomiendas (edificio_id, depto, descripcion, foto) values (:'ea', '101', 'Con foto', :'ea' || '/encomiendas/d/e101.jpg'), (:'ea', '102', 'Con foto', :'ea' || '/encomiendas/d/e102.jpg');
+insert into incidencias (edificio_id, titulo, descripcion, depto, uid, fotos, historial) values
+  (:'ea', 'Mía', 'x', '101', :'a2', array[:'ea' || '/incidencias/d/i101.jpg'], jsonb_build_array(jsonb_build_object('accion', 'Nota', 'fotos', jsonb_build_array(:'ea' || '/incidencias/d/nota.jpg')))),
+  (:'ea', 'Ajena', 'x', '102', :'a3', array[:'ea' || '/incidencias/d/i102.jpg'], '[]');
+update ot set fotos_antes = array[:'ea' || '/incidencias/d/i102.jpg'], fotos_despues = array[:'ea' || '/ot/d/despues.jpg'] where id = :'ot';
+create or replace function t.veo() returns text language sql as $$ select coalesce(string_agg(regexp_replace(name, '^[^/]+/', ''), ' ' order by name), '') from storage.objects $$;
+select t.soy(:'a2'); select t.ok(t.veo() = 'documentos/d/acta.pdf encomiendas/d/e101.jpg incidencias/d/i101.jpg incidencias/d/nota.jpg', 'residente: documentos y solo las fotos de su unidad (' || t.veo() || ')');
+select t.soy(:'a4'); select t.ok(t.veo() like '%encomiendas/d/e102.jpg%' and t.veo() like '%rondas/d/r.jpg%' and t.veo() not like '%ot/%', 'conserjería: encomiendas, rondas e incidencias, no órdenes de trabajo');
+select t.soy('00000000-0000-0000-0000-0000000000a5'); select t.ok(t.veo() = 'incidencias/d/i102.jpg ot/d/despues.jpg', 'empresa: solo las fotos de sus órdenes (' || t.veo() || ')');
+select t.soy(:'a1'); select t.ok((select count(*) = 10 from storage.objects), 'administración ve todos los archivos de su edificio');
+select t.soy(:'b2'); select t.ok(t.veo() = 'documentos/d/b.pdf', 'otro edificio no ve esos archivos');
+select t.soy(:'a3'); select t.ok(t.veo() = '', 'una cuenta eliminada no ve archivos');
+set role anon; select t.ok((select count(*) = 0 from storage.objects), 'sin sesión no se ve ningún archivo');
 reset role;
 \echo 'OK: todas las pruebas de RLS pasaron'
