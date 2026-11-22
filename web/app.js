@@ -184,7 +184,7 @@ async function start(){
   // catálogos globales (RLS limita lo que cada rol ve)
   S.cfgW=watch('edificios', ()=>q(T('edificios').select('*').maybeSingle()), d=>{ const k=cfgKey(); S.cfg=d; S.cfgLoaded=true; applyColor(); if(S.ready && cfgKey()!==k && !$('.modal')) routeNow(); else if(S.ready) updateBrand(); gate(); }, {global:true});
   S.usersW=watch({table:'usuarios'}, ()=>q(T('usuarios').select('*')), rows=>{ S.users={}; rows.forEach(u=>S.users[u.id]=u); const me=S.users[S.uid]||null; const k=meKey(); S.me=me; S.meLoaded=true; if((me?.edificio_id||null)!==(S.cfg?.id||null)) S.cfgW?.reload(); if(S.ready && meKey()!==k && !$('.modal')) routeNow(); else if(S.ready) refreshView(); gate(); }, {global:true, silent:true});
-  watch('unidades', ()=>q(T('unidades').select('*')), rows=>{ S.unidades={}; rows.forEach(u=>S.unidades[u.depto]=u); refreshView(); }, {global:true, silent:true});
+  S.unidadesW=watch('unidades', ()=>q(T('unidades').select('*')), rows=>{ S.unidades={}; rows.forEach(u=>S.unidades[u.depto]=u); refreshView(); }, {global:true, silent:true});
   watch('empresas', ()=>q(T('empresas').select('*')), rows=>{ S.empresas={}; rows.forEach(u=>S.empresas[u.id]=u); refreshView(); }, {global:true, silent:true});
   watch('activos', ()=>q(T('activos').select('*')), rows=>{ S.activos={}; rows.forEach(u=>S.activos[u.id]=u); refreshView(); }, {global:true, silent:true});
   watch('estacionamientos', ()=>q(T('estacionamientos').select('*')), rows=>{ S.estac={}; rows.forEach(u=>S.estac[u.id]=u); refreshView(); }, {global:true, silent:true});
@@ -285,12 +285,14 @@ VIEWS.perfil = function(){
 // INICIO
 VIEWS.inicio = function(){
   const r=role(); const mods=MODULES.filter(m=>m.roles.includes(r) && !['inicio','perfil'].includes(m.id));
-  const setupPend = isAdmin() && (!S.cfg || S.cfg.nombre==='Mi Edificio');
+  const setupPend = realRole()==='admin' && S.cfg && !S.cfg.configurado_at;
   setMain(`<h1>Hola, ${esc(S.me.nombre.split(' ')[0])}</h1>
-  ${setupPend?`<div class="note">Configura el nombre, logo y dirección del edificio en <a href="#admin">Administración</a>.</div>`:''}
+  ${setupPend?`<div class="note">Falta terminar la configuración inicial del edificio. <a href="#" id="bWizHome">Continuar con el asistente</a></div>`:''}
   ${PUSH_KEY&&pushOk()&&Notification.permission==='default'?`<div class="info">🔔 <a href="#perfil">Activa las notificaciones</a> para enterarte de encomiendas, mensajes y aprobaciones.</div>`:''}
   <div class="grid">${mods.map(m=>`<a class="tile" href="#${m.id}" data-tile="${m.id}"><span class="ic">${m.ic}</span><b>${m.t}</b><small>${m.d||''}</small></a>`).join('')}</div>
   <h2>Últimos comunicados</h2><div id="homeCom" class="list"><div class="empty">Cargando…</div></div>`);
+  $('#bWizHome')?.addEventListener('click',e=>{ e.preventDefault(); asistente(); });
+  if(setupPend && !S._wiz){ S._wiz=true; asistente(); }   // una vez por sesión
   watch('comunicados', ()=>q(T('comunicados').select('*').order('ts',{ascending:false}).limit(3)), rows=>{ const el=$('#homeCom'); if(!el) return; el.innerHTML = rows.length? rows.map(c=>`<div class="item static"><div class="hd"><b>${esc(c.titulo)}</b><span class="muted small">${fmtDate(c.ts)}</span></div><div class="small" style="margin-top:4px">${esc(c.cuerpo).slice(0,160)}${c.cuerpo.length>160?'…':''}</div></div>`).join('') : '<div class="empty">Sin comunicados aún</div>'; });
   const badge=(id,n)=>{ const t=$(`[data-tile="${id}"]`); if(!t) return; let b=$('.badge',t); if(n>0){ if(!b){b=document.createElement('span');b.className='badge';t.appendChild(b);} b.textContent=n; } else b?.remove(); };
   const count=(table,build,id)=>watch(table, ()=>build().then(r=>r.length), n=>badge(id,n), {silent:true});
@@ -812,6 +814,64 @@ function detalleOT(o){
   }catch(err){ toast('Error: '+errMsg(err)); } });
 }
 
+// ASISTENTE DE CONFIGURACIÓN INICIAL
+// Ventana por pasos para dejar operativo un edificio nuevo. Cada paso guarda al avanzar, así
+// que se puede abandonar y retomar; al terminar se marca edificios.configurado_at.
+const ESPACIOS_EJ=[
+  {id:'quincho', nombre:'Quincho', capacidad:15, desde:'10:00', hasta:'23:00', maxHoras:5, anticipacionDias:30, aprobacion:true, costo:0},
+  {id:'salon', nombre:'Salón de eventos', capacidad:40, desde:'10:00', hasta:'23:00', maxHoras:6, anticipacionDias:60, aprobacion:true, costo:0},
+  {id:'gym', nombre:'Gimnasio', capacidad:4, desde:'06:00', hasta:'23:00', maxHoras:1, anticipacionDias:3, aprobacion:false, costo:0},
+  {id:'juegos', nombre:'Sala de juegos', capacidad:8, desde:'10:00', hasta:'22:00', maxHoras:2, anticipacionDias:7, aprobacion:false, costo:0}];
+const leerUnidades = txt => txt.split('\n').map(l=>l.trim()).filter(Boolean).map(l=>{ const [d,a,p]=l.split(/[;\t]/.test(l)?/[;\t]/:','); return d&&d.trim()?{edificio_id:S.me.edificio_id, depto:d.trim(), alicuota:Number(String(a||'0').trim().replace(',','.'))||0, prop:(p||'').trim()}:null; }).filter(Boolean);   // con ; o tabulador, la coma es decimal (39,5)
+function asistente(i=0){
+  const c=S.cfg||{}; const upd=p=>q(T('edificios').update({...p, actualizado:now()}).eq('id',c.id));
+  const inv=location.origin+location.pathname+'?e='+(c.codigo||'');
+  const nUn=Object.keys(S.unidades).length, suma=Object.values(S.unidades).reduce((a,u)=>a+(Number(u.alicuota)||0),0), nEst=Object.keys(S.estac).length;
+  const PASOS=[
+    {t:'Tu edificio', d:'Estos datos aparecen en la app y en los documentos que se exportan.',
+      h:()=>`<label class="f"><span>Nombre del edificio o condominio</span><input type="text" name="nombre" value="${esc(c.nombre||'')}" required></label>
+        <div class="row"><label class="f grow"><span>Dirección</span><input type="text" name="direccion" value="${esc(c.direccion||'')}"></label><label class="f grow"><span>Comuna / ciudad</span><input type="text" name="comuna" value="${esc(c.comuna||'')}"></label></div>
+        <div class="row"><label class="f grow"><span>Teléfono conserjería</span><input type="tel" name="telefono" value="${esc(c.telefono||'')}"></label><label class="f grow"><span>Email administración</span><input type="email" name="email" value="${esc(c.email||'')}"></label></div>
+        <div class="row"><label class="f grow"><span>Logo (opcional)</span><input type="file" name="logo" accept="image/*"></label><label class="f"><span>Color principal</span><input type="color" name="color" value="${esc(c.color||'#1e5eff')}" style="width:60px;height:38px;padding:2px;border:1px solid var(--bd);border-radius:8px"></label></div>`,
+      g:async(d,m)=>{ const f=$('[name=logo]',m).files[0]; const logo=f?await uploadImage(f,'logo'):null; await upd({nombre:d.nombre.trim(), direccion:d.direccion.trim(), comuna:d.comuna.trim(), telefono:d.telefono.trim(), email:d.email.trim(), color:d.color, ...(logo?{logo}:{})}); }},
+    {t:'Unidades y alícuotas', d:'La alícuota (%) de cada departamento define su parte del gasto común. Pega una unidad por línea: depto;alícuota;propietario.',
+      h:()=>`<div class="${nUn&&Math.abs(suma-100)>=0.05?'note':'info'}">${nUn?`Ya hay ${nUn} unidades cargadas; sus alícuotas suman ${suma.toFixed(2)}%${Math.abs(suma-100)<0.05?'.':' (deben sumar 100%).'}`:'Aún no hay unidades cargadas.'}</div>
+        <label class="f"><span>Agregar o corregir unidades</span><textarea name="bulk" style="min-height:150px" placeholder="101;1.25;Juan Pérez&#10;102;1.30;&#10;103;1.25;María Soto"></textarea></label><p class="small muted">Puedes dejarlo en blanco y cargarlas después en Administración → Unidades.</p>`,
+      g:async d=>{ const rows=leerUnidades(d.bulk); if(rows.length){ await q(T('unidades').upsert(rows)); await S.unidadesW?.reload(); } }},
+    {t:'Gastos comunes', d:'Los residentes verán estos datos junto a su cobro para transferir. El pago se marca a mano en Gastos comunes.',
+      h:()=>`<label class="f"><span>Datos bancarios</span><textarea name="datos_bancarios" style="min-height:120px" placeholder="Banco, tipo y número de cuenta, RUT, nombre, correo para el comprobante">${esc(c.datos_bancarios||'')}</textarea></label>`,
+      g:d=>upd({datos_bancarios:d.datos_bancarios.trim()})},
+    {t:'Espacios comunes', d:'Áreas que los residentes podrán reservar. Horarios y reglas se ajustan después en Administración → Espacios.',
+      h:()=>{ const ya=(c.espacios||[]); const falt=ESPACIOS_EJ.filter(e=>!ya.some(x=>x.id===e.id)); return `${ya.length?`<div class="info">Ya configurados: ${ya.map(e=>esc(e.nombre)).join(', ')}.</div>`:''}${falt.map(e=>`<label class="sw" style="margin-bottom:10px"><input type="checkbox" name="esp_${e.id}"> <span><b>${e.nombre}</b> <span class="muted small">· ${e.desde}–${e.hasta} · máx ${e.maxHoras} h · ${e.aprobacion?'requiere aprobación':'confirmación inmediata'}</span></span></label>`).join('')||'<p class="small muted">Ya están todos los espacios de ejemplo.</p>'}`; },
+      g:async d=>{ const add=ESPACIOS_EJ.filter(e=>d['esp_'+e.id]); if(add.length) await upd({espacios:[...(c.espacios||[]), ...add]}); }},
+    {t:'Visitas y estacionamientos', d:'Conserjería controla los estacionamientos de visita desde un tablero. Si no hay, deja la cantidad en 0.',
+      h:()=>`${nEst?`<div class="info">Ya hay ${nEst} estacionamientos de visita.</div>`:''}<label class="f"><span>${nEst?'Estacionamientos de visita a agregar':'¿Cuántos estacionamientos de visita hay?'}</span><input type="number" name="n" min="0" max="50" value="0"></label>
+        <div class="row"><label class="f grow"><span>Avisar al residente a los (minutos)</span><input type="number" name="a" min="1" max="10080" placeholder="Sin aviso" value="${Number(c.est_alerta_min)||''}"></label><label class="f grow"><span>Informar a administración y comité a los (minutos)</span><input type="number" name="m" min="1" max="10080" placeholder="Sin aviso" value="${Number(c.est_aviso_min)||''}"></label></div>
+        <label class="sw"><input type="checkbox" name="visita_patente" ${c.visita_patente?'checked':''}> Exigir la patente a las visitas que necesitan estacionamiento</label><p class="small muted">Los reservados (discapacidad, carga) se marcan después en Administración → Estacionamientos.</p>`,
+      g:async d=>{ const a=Math.floor(Number(d.a))||0, m=Math.floor(Number(d.m))||0, n=Math.min(50,Math.max(0,Math.floor(Number(d.n))||0)); if(a&&m&&m<=a) throw new Error('El informe a administración debe ser posterior al aviso al residente.');
+        await upd({est_alerta_min:a, est_aviso_min:m, visita_patente:!!d.visita_patente});
+        if(n){ const sp=estOrden(); const us=sp.map(x=>/^V\d+$/.test(x.nombre)?Number(x.nombre.slice(1)):0); const k=Math.max(0,...us), ord=sp.reduce((x,y)=>Math.max(x,y.orden||0),0); await q(T('estacionamientos').insert(Array.from({length:n},(_,j)=>({nombre:'V'+(k+j+1), orden:ord+j+1, reservado:''})))); } }},
+    {t:'Datos personales', d:'Define cuánto tiempo se guarda cada tipo de dato (en meses; vacío = indefinido) y, si quieres, tu propio aviso de privacidad.',
+      h:()=>`<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 12px">${RETENCION.map(([k,t])=>`<label class="f"><span>${t}</span><input type="number" name="ret_${k}" min="1" max="240" placeholder="Indefinido" value="${Number(c.retencion?.[k])||''}"></label>`).join('')}</div>
+        <label class="f"><span>Aviso de privacidad (vacío = texto por defecto)</span><textarea name="privacidad" placeholder="Quién es responsable de los datos, para qué se usan, por cuánto tiempo se guardan y cómo ejercer los derechos de acceso, rectificación y eliminación.">${esc(c.privacidad||'')}</textarea></label>`,
+      g:d=>{ const retencion={}; RETENCION.forEach(([k])=>{ const x=Math.floor(Number(d['ret_'+k])); if(x>0) retencion[k]=x; }); return upd({retencion, privacidad:d.privacidad.trim()}); }},
+    {t:'Invita a tu comunidad', d:'Comparte este enlace con residentes, conserjes y empresas. Al crear su cuenta quedarán pendientes hasta que los apruebes.',
+      h:()=>`<div class="row wrap"><input type="text" id="wInv" class="grow" readonly value="${esc(inv)}"><button type="button" class="btn sec" id="wCopiar">Copiar enlace</button></div><p class="small muted" style="margin:8px 0 14px">Código de invitación: <code>${esc(c.codigo||'')}</code></p>
+        <div class="small"><b>Lo que sigue</b><ol style="margin:6px 0 0;padding-left:20px;line-height:1.7"><li>Aprueba a quienes se registren en Administración → Usuarios, asignándoles depto y rol.</li><li>Publica el primer período en Gastos comunes.</li><li>Activa tus notificaciones en Mi cuenta.</li></ol></div>`,
+      g:()=>upd({configurado_at:now()})},
+  ];
+  const n=PASOS.length, p=PASOS[i], ult=i===n-1;
+  const m=modal(`<div class="small muted">Configuración inicial · paso ${i+1} de ${n}</div><div class="bar" style="margin:6px 0 14px"><i style="width:${Math.round((i+1)/n*100)}%;background:var(--p)"></i></div>
+    <h3>${p.t}</h3><p class="small muted" style="margin-top:-6px">${p.d}</p><form id="fW">${p.h()}<div id="wErr" style="margin-top:10px"></div>
+    <div class="row" style="margin-top:6px">${i?'<button type="button" class="btn sec" id="wAtras">Atrás</button>':''}<span class="grow"></span>${ult?'':'<button type="button" class="btn sec" id="wLuego">Seguir después</button>'}<button class="btn" id="wSig">${ult?'Terminar':'Guardar y seguir'}</button></div></form>`);
+  $('#wAtras',m)?.addEventListener('click',()=>asistente(i-1));
+  $('#wLuego',m)?.addEventListener('click',()=>{ closeModal(); routeNow(); });
+  $('#wCopiar',m)?.addEventListener('click', async()=>{ const x=$('#wInv',m); try{ await navigator.clipboard.writeText(x.value); toast('Enlace copiado'); }catch(e){ x.select(); toast('Copia el enlace seleccionado'); } });
+  $('#fW',m).addEventListener('submit', async e=>{ e.preventDefault(); const b=$('#wSig',m); busy(b,true); $('#wErr',m).innerHTML='';
+    try{ await p.g(formData(e.target), m); await S.cfgW?.reload(); if(ult){ closeModal(); toast('Edificio configurado'); routeNow(); } else asistente(i+1); }
+    catch(err){ $('#wErr',m).innerHTML=`<div class="err">${esc(errMsg(err))}</div>`; busy(b,false); } });
+}
+
 // ADMINISTRACIÓN
 VIEWS.admin = function(param){
   const tabs={edificio:'Edificio',usuarios:'Usuarios',unidades:'Unidades',espacios:'Espacios',estacionamientos:'Estacionamientos',activos:'Activos',empresas:'Empresas'};
@@ -825,7 +885,7 @@ const ADMIN={};
 const RETENCION=[['visitas','Visitas','Nombre, RUT y patente de quienes visitan'],['registros','Rondas y bitácora','Registros y fotos de las rondas'],['encomiendas','Encomiendas entregadas','Desde la fecha de entrega'],['mensajes','Mensajes','Conversaciones con conserjería, comité y administración'],['reservas','Reservas','Desde la fecha reservada'],['incidencias','Incidencias cerradas','Con sus fotos e historial'],['estacionamientos','Uso de estacionamientos','Patentes y horarios, desde que se libera']];
 ADMIN.edificio = function(el){
   const c=S.cfg||{};
-  el.innerHTML=`<div class="card"><h3>Datos del edificio</h3><form id="fEd"><div class="row" style="align-items:flex-start"><div><div class="logo-prev" id="logoPrev">${c.logo?`<img src="${fotoUrl(c.logo)}">`:'🏢'}</div><input type="file" id="logoIn" accept="image/*" style="display:none"><div class="row" style="margin-top:6px;gap:4px"><button type="button" class="btn sec sm" id="bLogo">Cambiar logo</button>${c.logo?'<button type="button" class="btn sec sm" id="bLogoDel">Quitar</button>':''}</div></div><div class="grow"><label class="f"><span>Nombre</span><input type="text" name="nombre" value="${esc(c.nombre||'')}" required></label><label class="f"><span>Dirección</span><input type="text" name="direccion" value="${esc(c.direccion||'')}"></label></div></div>
+  el.innerHTML=`<div class="card"><div class="row" style="margin-bottom:8px"><h3 class="grow" style="margin:0">Datos del edificio</h3><button type="button" class="btn sec sm" id="bWiz">Asistente de configuración</button></div><form id="fEd"><div class="row" style="align-items:flex-start"><div><div class="logo-prev" id="logoPrev">${c.logo?`<img src="${fotoUrl(c.logo)}">`:'🏢'}</div><input type="file" id="logoIn" accept="image/*" style="display:none"><div class="row" style="margin-top:6px;gap:4px"><button type="button" class="btn sec sm" id="bLogo">Cambiar logo</button>${c.logo?'<button type="button" class="btn sec sm" id="bLogoDel">Quitar</button>':''}</div></div><div class="grow"><label class="f"><span>Nombre</span><input type="text" name="nombre" value="${esc(c.nombre||'')}" required></label><label class="f"><span>Dirección</span><input type="text" name="direccion" value="${esc(c.direccion||'')}"></label></div></div>
   <div class="row"><label class="f grow"><span>Comuna / ciudad</span><input type="text" name="comuna" value="${esc(c.comuna||'')}"></label><label class="f grow"><span>Teléfono conserjería</span><input type="tel" name="telefono" value="${esc(c.telefono||'')}"></label></div>
   <label class="f"><span>Email administración</span><input type="email" name="email" value="${esc(c.email||'')}"></label>
   <label class="f"><span>Datos bancarios para transferir gastos comunes (visibles a residentes)</span><textarea name="datos_bancarios" placeholder="Banco, tipo de cuenta, número, RUT, correo">${esc(c.datos_bancarios||'')}</textarea></label>
@@ -840,6 +900,7 @@ ADMIN.edificio = function(el){
   $('#bInv',el).addEventListener('click', async()=>{ const i=$('#invUrl',el); try{ await navigator.clipboard.writeText(i.value); toast('Enlace copiado'); }catch(e){ i.select(); toast('Copia el enlace seleccionado'); } });
   $('#fRet',el).addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); const retencion={}; RETENCION.forEach(([k])=>{ const n=Math.floor(Number(d[k])); if(n>0) retencion[k]=n; }); try{ await q(T('edificios').update({retencion}).eq('id',S.cfg.id)); toast('Plazos guardados'); }catch(err){ toast('Error: '+errMsg(err)); } });
   $('#bDep',el).addEventListener('click', async e=>{ if(!await confirmBox('Se borrarán en forma definitiva los datos que superen los plazos guardados. ¿Continuar?')) return; try{ const r=await q(sb.rpc('depurar_ahora'))||{}; const n=Object.values(r).reduce((a,b)=>a+Number(b),0); toast(n?(n===1?'Se borró 1 registro':`Se borraron ${n} registros`):'No había datos fuera de plazo'); limpiarArchivos(); }catch(err){ toast('Error: '+errMsg(err)); } });
+  $('#bWiz',el).addEventListener('click',()=>asistente());
   let newLogo=null;
   $('#bLogo',el).addEventListener('click',()=>$('#logoIn',el).click());
   $('#logoIn',el).addEventListener('change', async e=>{ const f=e.target.files[0]; if(!f) return; try{ toast('Subiendo logo…'); newLogo=await uploadImage(f,'logo'); $('#logoPrev',el).innerHTML=`<img src="${fotoUrl(newLogo)}">`; toast('Logo listo, guarda los cambios'); }catch(err){ toast('Error: '+errMsg(err)); } });
@@ -860,7 +921,7 @@ ADMIN.unidades = function(el){
   <details><summary>Carga masiva (pegar: depto;alícuota;propietario por línea)</summary><textarea id="bulk" placeholder="101;1.25;Juan Pérez&#10;102;1.30;"></textarea><button class="btn sec sm" id="bBulk" style="margin-top:6px">Cargar</button></details>
   <div style="overflow:auto;margin-top:10px"><table><thead><tr><th>Unidad</th><th class="num">Alícuota</th><th>Propietario</th><th></th></tr></thead><tbody>${us.map(u=>`<tr><td>${esc(u.depto)}</td><td class="num"><input type="number" value="${Number(u.alicuota)}" step="0.0001" data-al="${esc(u.depto)}" style="width:100px;padding:4px 6px;text-align:right"></td><td><input type="text" value="${esc(u.prop||'')}" data-pr="${esc(u.depto)}" style="padding:4px 6px"></td><td><button class="btn sec sm" data-del="${esc(u.depto)}">✕</button></td></tr>`).join('')||'<tr><td colspan="4" class="muted">Sin unidades</td></tr>'}</tbody></table></div></div>`;
   $('#fU',el).addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); try{ await q(T('unidades').upsert({edificio_id:S.me.edificio_id, depto:d.depto.trim(), alicuota:Number(d.alicuota), prop:d.prop.trim()})); e.target.reset(); toast('Unidad agregada'); }catch(err){ toast(errMsg(err)); } });
-  $('#bBulk',el).addEventListener('click', async()=>{ const lines=$('#bulk',el).value.split('\n').map(l=>l.trim()).filter(Boolean); const rows=lines.map(l=>{ const [d,a,p]=l.split(/[;,\t]/); return d?{edificio_id:S.me.edificio_id, depto:d.trim(), alicuota:Number(String(a||'0').replace(',','.'))||0, prop:(p||'').trim()}:null; }).filter(Boolean); if(!rows.length) return; try{ await q(T('unidades').upsert(rows)); toast(rows.length+' unidades cargadas'); }catch(err){ toast(errMsg(err)); } });
+  $('#bBulk',el).addEventListener('click', async()=>{ const rows=leerUnidades($('#bulk',el).value); if(!rows.length) return; try{ await q(T('unidades').upsert(rows)); toast(rows.length+' unidades cargadas'); }catch(err){ toast(errMsg(err)); } });
   el.addEventListener('change', async e=>{ const t=e.target; try{ if(t.dataset.al) await q(T('unidades').update({alicuota:Number(t.value)||0}).eq('depto',t.dataset.al)); if(t.dataset.pr) await q(T('unidades').update({prop:t.value.trim()}).eq('depto',t.dataset.pr)); }catch(err){ toast(errMsg(err)); } });
   el.addEventListener('click', async e=>{ const b=e.target.closest('[data-del]'); if(b&&await confirmBox('¿Eliminar unidad '+b.dataset.del+'?')) await q(T('unidades').delete().eq('depto',b.dataset.del)); });
 };

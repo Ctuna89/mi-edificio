@@ -49,11 +49,15 @@ No hay paso de build. Si cambias `config.js` solo vuelve a subir la carpeta.
 
 1. Abre la app → **Crear cuenta** con tu correo → **Crear un edificio nuevo** (nombre del edificio y tu nombre).
    Quien crea el edificio queda como su **Administrador activo**.
-2. Entra a **Administración → Edificio**: logo, dirección, color, datos bancarios. Ahí mismo está el **enlace de invitación** del edificio.
-3. **Unidades**: carga los departamentos con su alícuota (hay carga masiva pegando `depto;alícuota;propietario` por línea). La suma debe dar 100 %.
-4. **Espacios**: botón "Cargar ejemplos" crea quincho, salón, gimnasio y sala de juegos; edita reglas (horario, máx. horas, anticipación, si requiere aprobación).
-5. **Empresas** y **Activos** (para rondas NFC y mantención preventiva).
-6. Comparte el enlace de invitación con residentes y conserjes. Cuando se registren, aparecerán en **Administración → Usuarios** como pendientes: asígnales depto y rol y actívalos.
+2. Se abre el **asistente de configuración**, una ventana de 7 pasos: datos del edificio, unidades y alícuotas, datos bancarios, espacios comunes, visitas y estacionamientos, datos personales (plazos de conservación y aviso de privacidad) e invitación a la comunidad. Cada paso se guarda al avanzar, así que puedes dejarlo y retomarlo desde Inicio o desde Administración → Edificio.
+
+Todo lo que configura el asistente también se puede ajustar a mano después:
+
+1. **Administración → Edificio**: logo, dirección, color, datos bancarios. Ahí mismo está el **enlace de invitación** del edificio.
+2. **Unidades**: carga los departamentos con su alícuota (hay carga masiva pegando `depto;alícuota;propietario` por línea; la alícuota admite coma decimal). La suma debe dar 100 %.
+3. **Espacios**: botón "Cargar ejemplos" crea quincho, salón, gimnasio y sala de juegos; edita reglas (horario, máx. horas, anticipación, si requiere aprobación).
+4. **Empresas** y **Activos** (para rondas NFC y mantención preventiva).
+5. Comparte el enlace de invitación con residentes y conserjes. Cuando se registren, aparecerán en **Administración → Usuarios** como pendientes: asígnales depto y rol y actívalos.
 
 Como administrador tienes el selector **"Ver como"** para revisar la interfaz de cada rol (sigues teniendo permisos de admin en la base de datos; solo cambia la vista).
 

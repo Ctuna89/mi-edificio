@@ -30,6 +30,7 @@ select t.soy(:'a1');
 select t.ok(public.puede_crear_edificio(), 'el primer edificio siempre se puede crear');
 select public.crear_edificio('Torre A', 'Ana Admin') as ea \gset
 select t.ok((select rol = 'admin' and estado = 'activo' from usuarios where id = :'a1'), 'quien crea el edificio es admin activo');
+select t.ok((select configurado_at is null from edificios), 'un edificio nuevo parte con el asistente pendiente');
 select t.soy(:'b1');
 select t.ok(not public.puede_crear_edificio(), 'el segundo edificio está cerrado por defecto');
 select t.falla($$select public.crear_edificio('Torre B','Beto')$$, 'crear edificio con creación cerrada');

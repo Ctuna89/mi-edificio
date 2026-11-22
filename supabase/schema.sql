@@ -38,11 +38,19 @@ create table if not exists public.edificios (
   visita_patente boolean not null default false,     -- exigir patente a visitas con estacionamiento
   est_alerta_min int not null default 0,             -- estacionamiento de visita: minutos para avisar al residente
   est_aviso_min  int not null default 0,             -- ... y para informar a administración y comité
+  configurado_at timestamptz,                        -- cuándo se completó el asistente de configuración inicial
   creado_por    uuid,
   creado        timestamptz default now(),
   actualizado   timestamptz default now()
 );
 alter table public.edificios add column if not exists privacidad text default '';
+-- Asistente de configuración inicial: los edificios que ya existían se dan por configurados
+do $$ begin
+  if not exists (select 1 from information_schema.columns where table_schema = 'public' and table_name = 'edificios' and column_name = 'configurado_at') then
+    alter table public.edificios add column configurado_at timestamptz;
+    update public.edificios set configurado_at = now();
+  end if;
+end $$;
 -- true: una visita que necesita estacionamiento debe indicar su patente (p. ej. acceso con lectura de patentes, LPR)
 alter table public.edificios add column if not exists visita_patente boolean not null default false;
 -- Estacionamientos de visita: minutos tras los cuales se avisa al residente y, después, a
@@ -381,8 +389,8 @@ begin
   -- la fila única de "config" pasa a ser el primer edificio
   if to_regclass('public.config') is not null then
     if not exists (select 1 from public.edificios) then
-      execute 'insert into public.edificios (nombre,direccion,comuna,telefono,email,logo,color,datos_bancarios,espacios)
-               select nombre,direccion,comuna,telefono,email,logo,color,datos_bancarios,espacios from public.config where id = 1';
+      execute 'insert into public.edificios (nombre,direccion,comuna,telefono,email,logo,color,datos_bancarios,espacios,configurado_at)
+               select nombre,direccion,comuna,telefono,email,logo,color,datos_bancarios,espacios,now() from public.config where id = 1';
     end if;
     begin
       execute 'alter publication supabase_realtime drop table public.config';

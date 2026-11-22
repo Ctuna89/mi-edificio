@@ -5,6 +5,7 @@ begin
   select id into strict e from edificios;
   if (select nombre <> 'Edificio Antiguo' or color <> '#123456' from edificios) then raise exception 'config no migró a edificios'; end if;
   if to_regclass('public.config') is not null then raise exception 'config sigue existiendo'; end if;
+  if (select configurado_at is null from edificios) then raise exception 'un edificio migrado no debe volver a pasar por el asistente'; end if;
   foreach t in array array['usuarios','unidades','gastos','gasto_unidades','conversaciones','mensajes','encomiendas'] loop
     execute format('select count(*) from %I where edificio_id = $1', t) into n using e;
     if n < 1 then raise exception 'filas de % sin migrar', t; end if;
