@@ -35,11 +35,14 @@ create table if not exists public.edificios (
   espacios      jsonb not null default '[]'::jsonb,  -- [{id,nombre,capacidad,desde,hasta,maxHoras,anticipacionDias,aprobacion,costo}]
   privacidad    text default '',          -- aviso de privacidad que se muestra al registrarse
   retencion     jsonb not null default '{}'::jsonb,  -- plazos de conservación en meses, por tipo de dato
+  visita_patente boolean not null default false,     -- exigir patente a visitas con estacionamiento
   creado_por    uuid,
   creado        timestamptz default now(),
   actualizado   timestamptz default now()
 );
 alter table public.edificios add column if not exists privacidad text default '';
+-- true: una visita que necesita estacionamiento debe indicar su patente (p. ej. acceso con lectura de patentes, LPR)
+alter table public.edificios add column if not exists visita_patente boolean not null default false;
 -- Plazos de conservación en meses, definidos por la administración de cada edificio.
 -- Claves: visitas, registros, encomiendas, mensajes, reservas, incidencias. Sin clave o 0 = no se borra.
 alter table public.edificios add column if not exists retencion jsonb not null default '{}'::jsonb;
@@ -215,6 +218,7 @@ create table if not exists public.visitas (
   nombre     text not null,
   rut        text default '',
   patente    text default '',
+  estacionamiento boolean not null default false,   -- la visita necesita estacionamiento
   fecha      date not null,
   hora       text default '',
   nota       text default '',
@@ -389,6 +393,7 @@ drop function public._pk_cols(text);
 -- Código del QR de acceso de cada visita (las visitas ya existentes reciben uno)
 alter table public.visitas add column if not exists codigo text not null default upper(substr(replace(gen_random_uuid()::text,'-',''),1,8));
 create unique index if not exists visitas_codigo_idx on public.visitas (edificio_id, codigo);
+alter table public.visitas add column if not exists estacionamiento boolean not null default false;
 
 -- ---------------------------------------------------------------------
 -- Funciones auxiliares (SECURITY DEFINER para evitar recursión en RLS)
@@ -607,10 +612,16 @@ drop trigger if exists incidencias_antes on public.incidencias;
 create trigger incidencias_antes before insert or update on public.incidencias
 for each row execute function public.incidencias_antes();
 
--- Visitas: el código del QR lo genera siempre la base de datos
+-- Visitas: el código del QR lo genera siempre la base de datos. La patente se guarda normalizada
+-- (mayúsculas, solo letras y números) y es obligatoria con estacionamiento si el edificio lo exige.
 create or replace function public.visitas_antes_insert() returns trigger
 language plpgsql security definer set search_path = public as $$
 begin
+  new.patente := upper(regexp_replace(coalesce(new.patente, ''), '[^A-Za-z0-9]', '', 'g'));
+  if new.estacionamiento and new.patente = ''
+     and coalesce((select visita_patente from public.edificios where id = new.edificio_id), false) then
+    raise exception 'Indica la patente del vehículo: el edificio la exige para usar estacionamiento de visitas';
+  end if;
   if auth.uid() is not null then new.codigo := upper(substr(replace(gen_random_uuid()::text,'-',''),1,8)); end if;
   return new;
 end $$;

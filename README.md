@@ -178,6 +178,8 @@ Se guardan en el bucket `fotos` de Supabase Storage (lectura pública por URL co
 
 Al anunciar una visita, el residente obtiene un QR (con el nombre del edificio, la fecha y un código) que comparte como imagen, por ejemplo por WhatsApp. En conserjería se escanea con **Escanear QR**, o se escribe el código de 8 caracteres, y se abre la ficha de la visita para registrar el ingreso; al salir se escanea de nuevo para registrar la salida. Si las notificaciones push están configuradas, el residente recibe un aviso cuando su visita ingresa.
 
+Al anunciar la visita se puede marcar que **necesita estacionamiento**. En Administración → Edificio, la administración decide si en ese caso la patente es obligatoria, pensado para accesos con lectura automática de patentes (LPR). La patente se guarda normalizada (mayúsculas, sin espacios ni guiones) para poder compararla con lo que lea la cámara. La app no se conecta a ningún sistema LPR: deja el dato disponible en la tabla `visitas`.
+
 El QR no contiene datos personales, solo un código aleatorio: para saber a qué visita corresponde hay que tener sesión de conserjería o administración en ese edificio. La lectura usa el lector de códigos del navegador cuando existe (Chrome en Android) y, si no (iPhone, Firefox), una librería incluida en `web/vendor/`. La cámara requiere que la app esté publicada con HTTPS.
 
 ## NFC

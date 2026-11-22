@@ -182,6 +182,15 @@ select t.soy(:'a2');
 insert into visitas (depto, nombre, fecha, uid, codigo) values ('101', 'Tía Marta', current_date, :'a2', 'AAAAAAAA') returning id as vis \gset
 select t.ok((select codigo ~ '^[0-9A-F]{8}$' and codigo <> 'AAAAAAAA' from visitas where id = :'vis'), 'el código del QR lo genera la base de datos');
 select t.falla(format($$update visitas set estado = 'ingreso' where id = %L returning 1$$, :'vis'), 'el residente registra el ingreso de su visita');
+-- estacionamiento y patente
+insert into visitas (depto, nombre, fecha, uid, estacionamiento, patente) values ('101', 'Con auto', current_date, :'a2', true, '') returning id as vis2 \gset
+select t.ok((select estacionamiento and patente = '' from visitas where id = :'vis2'), 'por defecto el estacionamiento no exige patente');
+select t.soy(:'a1'); update edificios set visita_patente = true where id = :'ea';
+select t.soy(:'a2');
+select t.falla(format($$insert into visitas (depto, nombre, fecha, uid, estacionamiento) values ('101', 'Sin patente', current_date, %L, true)$$, :'a2'), 'estacionamiento sin patente cuando el edificio la exige');
+insert into visitas (depto, nombre, fecha, uid, estacionamiento, patente) values ('101', 'Con patente', current_date, :'a2', true, ' ab-cd 12 ') returning id as vis3 \gset
+select t.ok((select patente = 'ABCD12' from visitas where id = :'vis3'), 'la patente se guarda normalizada');
+insert into visitas (depto, nombre, fecha, uid) values ('101', 'A pie', current_date, :'a2');
 reset role; truncate net.llamadas;
 select t.soy(:'a4');
 select t.ok((select count(*) = 1 from visitas where codigo = (select codigo from visitas where id = :'vis')), 'conserjería encuentra la visita por su código');
