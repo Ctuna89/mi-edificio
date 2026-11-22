@@ -477,5 +477,9 @@ servidor.listen(PUERTO, () => {
 });
 // Al detenerlo deja un respaldo fresco de la base de datos
 let cerrando = false;
-const cerrar = async () => { if (cerrando) return; cerrando = true; servidor.close(); oyentes.forEach(r => r.end()); try { log('Respaldo al cerrar:', await respaldar()); await respaldarNube(); } catch (e) { log('respaldo:', e.message); } try { await db.close(); } catch {} process.exit(0); };
+const cerrar = async () => { if (cerrando) return; cerrando = true; servidor.close(); oyentes.forEach(r => r.end()); try { log('Respaldo al cerrar:', await respaldar()); await respaldarNube(); } catch (e) { log('respaldo:', e.message); } try { await db.close(); } catch {} fs.rmSync(path.join(DATOS, 'servidor.pid'), { force: true }); process.exit(0); };
 process.on('SIGINT', cerrar); process.on('SIGTERM', cerrar);
+// En Windows no llegan esas señales: "lanzar.mjs detener" deja un archivo "detener" en la carpeta de datos
+const bandera = path.join(DATOS, 'detener'); fs.rmSync(bandera, { force: true });
+fs.writeFileSync(path.join(DATOS, 'servidor.pid'), String(process.pid));   // lo borra al terminar de cerrarse
+setInterval(() => { if (fs.existsSync(bandera)) { fs.rmSync(bandera, { force: true }); log('Detención solicitada.'); cerrar(); } }, 1500).unref();

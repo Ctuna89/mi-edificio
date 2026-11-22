@@ -8,10 +8,12 @@ Se instala **en un computador del propio edificio**: un solo programa sirve la a
 
 ```
 mi-edificio/
+├── instalador/          ← instalador de Windows (se construye con construir.sh)
 ├── local/               ← servidor local: lo único que hay que ejecutar
 │   ├── server.mjs       ← sirve la app, la base de datos, las cuentas y los archivos
 │   ├── cliente.js       ← conexión del navegador con el servidor
 │   ├── base.sql         ← cuentas, archivos y cola de avisos
+│   ├── lanzar.mjs       ← lo inicia en segundo plano, lo abre o lo detiene
 │   ├── iniciar.bat / iniciar.sh
 │   └── datos/           ← se crea al iniciar: base de datos, archivos, respaldos (no va al repositorio)
 ├── web/                 ← la app (HTML y JS sin build)
@@ -23,23 +25,37 @@ mi-edificio/
 
 ## 1. Instalar en un computador del edificio
 
-Necesitas un computador que quede encendido (el de conserjería o administración sirve) con [Node.js](https://nodejs.org) 20 o superior.
+Elige un computador que quede encendido, como el de conserjería o administración.
 
-1. Descarga este repositorio (botón **Code → Download ZIP**, o `git clone`).
-2. Inicia el servidor:
-   - **Windows**: doble clic en `local/iniciar.bat`.
-   - **Mac o Linux**:
+### Windows
 
-     ```bash
-     ./local/iniciar.sh
-     ```
+1. Descarga `MiEdificio-Instalar-<versión>.exe` desde [Releases](https://github.com/Ctuna89/mi-edificio/releases/latest).
+2. Ábrelo y sigue el asistente: aceptar la licencia, elegir si parte junto con Windows (recomendado) y si quieres el ícono en el escritorio, e instalar. No pide permisos de administrador ni instalar nada más: trae todo incluido.
+3. Al terminar se abre la app en el navegador, en `http://localhost:8080`.
 
-   La primera vez descarga sus dependencias (necesita internet) y crea la carpeta `local/datos`.
-3. Abre la dirección que muestra, por ejemplo `http://localhost:8080`.
+Cosas que conviene saber:
 
-Con eso la app ya funciona en ese computador y, por la dirección de red que también muestra, en los equipos conectados a la red del edificio. Para que residentes y conserjes entren desde sus teléfonos, sigue con el paso 2.
+- **Windows mostrará una advertencia** ("Windows protegió su PC" o "editor desconocido") porque el instalador no está firmado digitalmente. Hay que elegir *Más información → Ejecutar de todas formas*. Descárgalo solo desde este repositorio.
+- Si el Firewall pregunta por el acceso a la red, permítelo en redes privadas para que otros equipos del edificio puedan entrar.
+- Quedan en el menú Inicio **Abrir Mi Edificio**, **Detener Mi Edificio** y **Desinstalar**. El servidor corre en segundo plano, sin ventana.
+- "Iniciar junto con Windows" lo arranca cuando **ese usuario inicia sesión**. Si el computador se reinicia y nadie entra a la sesión, la app no parte: configura el inicio de sesión automático o deja la sesión abierta.
+- Los datos quedan en `%LOCALAPPDATA%\MiEdificio\datos`. **Actualizar** es instalar la versión nueva encima; **desinstalar** no borra los datos.
 
-Para cambiar el puerto, define la variable `PUERTO`; para guardar los datos en otra carpeta, `MI_EDIFICIO_DATOS`.
+### Mac o Linux
+
+Con [Node.js](https://nodejs.org) 20 o superior instalado, descarga este repositorio (**Code → Download ZIP** o `git clone`) y ejecuta:
+
+```bash
+./local/iniciar.sh
+```
+
+La primera vez descarga sus dependencias (necesita internet) y crea la carpeta `local/datos`. Abre la dirección que muestra, por ejemplo `http://localhost:8080`. Para dejarlo en segundo plano: `node local/lanzar.mjs iniciar` (y `detener` para pararlo).
+
+### En ambos casos
+
+La app ya funciona en ese computador y, por la dirección de red que muestra el servidor, en los equipos conectados a la red del edificio. Para que residentes y conserjes entren desde sus teléfonos, sigue con el paso 2.
+
+Para cambiar el puerto, crea un archivo `puerto.txt` con el número en la carpeta de datos (o define la variable `PUERTO`) y reinicia.
 
 ## 2. Acceso desde internet
 
@@ -72,7 +88,7 @@ Como administrador tienes el selector **"Ver como"** para revisar la interfaz de
 
 ## 4. Respaldos y mantención
 
-Todo lo de tu edificio está en `local/datos`:
+Todo lo de tu edificio está en la carpeta de datos: `%LOCALAPPDATA%\MiEdificio\datos` si usaste el instalador de Windows, o `local/datos` en los demás casos.
 
 | Carpeta | Contenido |
 |---|---|
@@ -98,7 +114,13 @@ Si la carpeta no parece estar dentro de una nube, la app lo advierte: el respald
 ./local/iniciar.sh --restaurar-nube "/ruta/a/Respaldo Mi Edificio"
 ```
 
-(en Windows, `local\iniciar.bat --restaurar-nube "C:\ruta\Respaldo Mi Edificio"`). Pide la contraseña del respaldo y recupera cuentas, datos y archivos. Después vuelve a configurar el respaldo en Administración.
+En Windows con el instalador, abre una ventana de comandos y ejecuta:
+
+```bat
+"%LOCALAPPDATA%\Programs\Mi Edificio\node.exe" "%LOCALAPPDATA%\Programs\Mi Edificio\local\server.mjs" --restaurar-nube "C:\ruta\Respaldo Mi Edificio"
+```
+
+(define antes `set MI_EDIFICIO_DATOS=%LOCALAPPDATA%\MiEdificio\datos`). Este comando en Windows no está probado. Pide la contraseña del respaldo y recupera cuentas, datos y archivos. Después vuelve a configurar el respaldo en Administración.
 
 ### Otras tareas
 
@@ -109,7 +131,7 @@ Si la carpeta no parece estar dentro de una nube, la app lo advierte: el respald
   ./local/iniciar.sh --restaurar local/datos/respaldos/mi-edificio-AAAA-MM-DD.tar.gz
   ```
 
-- **Actualizar**: detén el servidor, reemplaza los archivos del repositorio por la versión nueva (sin tocar `local/datos`) e inícialo. Los cambios de la base de datos se aplican solos.
+- **Actualizar**: en Windows, instala la versión nueva encima. En Mac o Linux, detén el servidor, reemplaza los archivos del repositorio por los nuevos (sin tocar `local/datos`) e inícialo. Los cambios de la base de datos se aplican solos.
 - **Si el computador se apaga** o se corta internet, la app deja de responder hasta que vuelva. Conviene configurar que el servidor parta al encender el equipo.
 
 Límites: está pensada para un edificio. La base de datos atiende una consulta a la vez, lo que alcanza de sobra para ese tamaño, y usa PGlite, un Postgres embebido todavía joven.
@@ -233,7 +255,7 @@ Este modo comparte el esquema y sus pruebas con el modo local, pero **nunca se h
   cd local && npm install && npm test
   ```
 
-La CI ejecuta ambas en cada push.
+La CI ejecuta ambas en cada push y construye el instalador de Windows.
 
 ## Versiones
 
@@ -242,7 +264,7 @@ La versión vigente está en el archivo [`VERSION`](VERSION) y los cambios de ca
 ## Próximos pasos sugeridos
 
 1. Probarla en un edificio real, con túnel y notificaciones en teléfonos.
-2. Instalador de doble clic para Windows que incluya Node.js y deje el servidor como servicio.
+2. Firmar el instalador de Windows y dejar el servidor como servicio, para que parta sin iniciar sesión.
 3. Respaldo con inicio de sesión directo en Google Drive o OneDrive, sin instalar su aplicación.
 4. Pagos en línea e intereses por mora.
 

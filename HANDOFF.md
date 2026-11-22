@@ -19,6 +19,7 @@ App web para la comunidad de un edificio: residentes, conserjería, comité, adm
 - **Local primero**: el feedback fue que mantener una cuenta en la nube era el mismo problema que pagar un servicio. Se probó que `schema.sql` corre sin cambios en PGlite (pasa `tests/rls.sql` completo), así que el modo local reutiliza todas las reglas en vez de reescribirlas.
 - **Un solo edificio**: se eliminó el soporte multi-edificio (códigos de invitación, apertura de creación). Un índice único impide un segundo edificio. Las tablas conservan la columna `edificio_id` y las políticas la siguen comparando con `mi_edificio()`: es un vestigio interno que se podría retirar.
 - **Respaldo en la nube sin integraciones**: en vez de OAuth con Google o Microsoft (que exige registrar la aplicación), el servidor escribe una copia cifrada (`base/*.meb` + espejo `archivos/*.enc`, AES-256-GCM, llave por scrypt) en una carpeta que la app de escritorio de la nube sincroniza. `pareceNube()` solo mira el nombre de la ruta para advertir. Restauración con `--restaurar-nube`.
+- **Instalador de Windows** (`instalador/`): NSIS, se construye en Linux con `construir.sh` e incluye Node.js para Windows (suma verificada) y las dependencias. Instala por usuario sin permisos de administrador; programa en `%LOCALAPPDATA%\Programs\Mi Edificio`, datos en `%LOCALAPPDATA%\MiEdificio\datos`. Los accesos directos ejecutan `.vbs` que llaman a `local/lanzar.mjs` sin ventana. El servidor se detiene con un archivo bandera (`detener`) porque en Windows no hay SIGTERM, y avisa su cierre real borrando `servidor.pid`. El workflow `Release` lo adjunta a cada versión.
 - **Sin correo**: en local no hay verificación ni recuperación por correo; la administración restablece contraseñas (`/api/auth/restablecer`).
 - **Encuestas**: un voto por unidad (`votos` con PK `encuesta_id, depto`). El voto individual solo lo ve su unidad; los totales salen de `resultados_encuestas()` (SECURITY DEFINER). Los plazos se evalúan en hora de Chile (`hoy()`).
 - **Exportación** de gastos: `.xlsx` generado en el navegador y PDF mediante impresión (`@media print` + `#printArea`). Sin librerías.
@@ -44,12 +45,13 @@ Funciones RPC: `crear_edificio`, `buscar_edificio`, `puede_crear_edificio`, `rec
 - `schema.sql` probado con `supabase/tests/run.sh` en Postgres 16 y, manualmente, sobre PGlite: instalación nueva, re-ejecución, permisos por rol y unidad, pagos y convenios, encuestas, avisos, archivos y migración.
 - Servidor local probado con `local/test.mjs` (por HTTP) y con una prueba en Chromium de punta a punta contra el servidor real: cuentas, asistente, gastos, pago, incidencia con foto, visita con QR, avisos en vivo, restablecer contraseña, reinicio. También respaldo al cerrar y restauración.
 - La prueba en navegador y las de interfaz con cliente simulado no están en el repositorio.
-- **Sin probar**: túnel HTTPS real, envío de notificaciones push a teléfonos, Windows (`iniciar.bat`), y cualquier uso en un edificio real. La instalación en Supabase nunca se ha desplegado.
+- Instalador y servidor probados con Wine (Node para Windows): instalación silenciosa, accesos directos, arranque por `iniciar.vbs`, archivos, respaldo en una carpeta OneDrive, detener, actualizar encima y desinstalar. Las páginas del asistente se revisaron por captura.
+- **Sin probar**: un Windows real (SmartScreen, Firewall, antivirus, inicio con la sesión), túnel HTTPS real, envío de notificaciones push a teléfonos, y cualquier uso en un edificio real. La instalación en Supabase nunca se ha desplegado.
 
 ## Pendientes sugeridos (en orden)
 
 1. Usarla en un edificio real con túnel y teléfonos.
-2. Instalador para Windows con Node incluido y arranque como servicio.
+2. Probar el instalador en Windows real; firmarlo; arranque como servicio.
 3. Respaldo automático fuera del computador.
 4. Retirar la columna `edificio_id`.
 5. Pagos en línea e intereses por mora.

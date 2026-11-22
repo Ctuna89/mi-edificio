@@ -42,6 +42,12 @@ PGHOST=localhost PGUSER=postgres supabase/tests/run.sh
 
 Crea y borra las bases `mi_edificio_test` y `mi_edificio_mig`; no lo apuntes a un servidor con datos reales.
 
+Si tocas `instalador/`, constrúyelo (necesita `nsis`) y pruébalo en Windows o con Wine:
+
+```bash
+./instalador/construir.sh
+```
+
 Si tocas `local/`, ejecuta sus pruebas (usan una carpeta de datos temporal):
 
 ```bash

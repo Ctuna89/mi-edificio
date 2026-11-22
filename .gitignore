@@ -10,3 +10,7 @@ supabase/.branches/
 web/config.local.js
 # Datos del servidor local (base de datos, archivos, respaldos y claves)
 local/datos/
+# Construcción del instalador de Windows
+instalador/obra/
+instalador/cache/
+dist/
