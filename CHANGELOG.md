@@ -4,7 +4,7 @@
 
 - **Instalación local**: un solo programa (`local/`) sirve la app y guarda la base de datos y los archivos en una carpeta del computador del edificio, sin servicios en la nube. Incluye cuentas, permisos, archivos con enlaces firmados, avisos en vivo, notificaciones, tareas programadas y respaldo diario. Supabase queda como instalación alternativa.
 - **Un solo edificio por instalación**: se elimina el soporte multi-edificio y los códigos de invitación. La primera cuenta crea el edificio; las siguientes piden acceso.
-- **Acceso desde internet integrado**: desde la app se activa una dirección temporal con un clic, o una fija con el dominio del edificio pegando el token de un túnel de Cloudflare. El servidor maneja el túnel y lo reconecta solo.
+- **Acceso desde internet integrado**: desde la app se conecta una dirección fija con el dominio del edificio, pegando el token de un túnel de Cloudflare. El servidor maneja el túnel y lo reconecta solo.
 - **Instalador para Windows**: asistente que instala todo (incluye Node.js), incluye el programa del túnel, crea accesos para abrir y detener, y puede dejarlo iniciando con Windows. Se adjunta a cada versión publicada.
 - En local, la administración restablece las contraseñas olvidadas.
 - **Respaldo en la nube**: copia diaria cifrada de base de datos y archivos en una carpeta de OneDrive, Google Drive u otra nube, con advertencia si la carpeta no parece sincronizada, hora del respaldo elegida por la administración, paso propio en el asistente y restauración en un computador nuevo.

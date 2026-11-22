@@ -34,7 +34,7 @@ No abras un issue público. Usa **Security → Report a vulnerability** en GitHu
 ## Lista de verificación para quien opera una instalación
 
 1. El computador: sistema actualizado, sesión con contraseña, sin uso compartido para navegar o instalar programas.
-2. Activa el acceso desde internet con una dirección fija y comparte solo esa dirección. La dirección temporal es para probar: cualquiera que la conozca llega a la pantalla de inicio de sesión, igual que con la fija.
+2. Activa el acceso desde internet y comparte solo esa dirección.
 3. Ten al menos dos cuentas de administración.
 4. Configura el respaldo en la nube, guarda su contraseña fuera del computador y prueba una restauración. La llave del respaldo queda en `local/datos/config.json` para poder cifrar cada noche: quien acceda al computador puede leerla.
 5. No compartas `local/datos/config.json`.

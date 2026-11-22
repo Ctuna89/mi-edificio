@@ -360,24 +360,22 @@ async function respaldarNube() {
 
 // --- Acceso desde internet: túnel de Cloudflare ------------------------------------------------
 // El servidor maneja el programa cloudflared, que publica este computador en una dirección HTTPS
-// sin abrir puertos. Dos modos:
-//   prueba → dirección temporal *.trycloudflare.com, sin cuenta (cambia en cada arranque)
-//   fijo   → túnel creado en la cuenta Cloudflare del edificio, con su dominio (se conecta con un token)
+// sin abrir puertos. El túnel se crea en la cuenta Cloudflare del edificio, con su dominio, y se
+// conecta con un token. (No se ofrecen las direcciones temporales de Cloudflare: cambian en cada
+// arranque y no tienen garantía de disponibilidad.)
 const buscarCloudflared = () => [process.env.MI_EDIFICIO_CLOUDFLARED, path.join(RAIZ, process.platform === 'win32' ? 'cloudflared.exe' : 'cloudflared'), path.join(DATOS, process.platform === 'win32' ? 'cloudflared.exe' : 'cloudflared')].find(f => f && fs.existsSync(f)) || 'cloudflared';
 const tunel = { proc: null, estado: 'apagado', direccion: '', error: '', reintento: null, espera: 15000 };
-const estadoTunel = () => { const t = CFG.tunel || {}; return { modo: t.modo || 'apagado', estado: tunel.estado, direccion: tunel.estado === 'conectado' ? tunel.direccion : '', direccionFija: t.direccion || '', tieneToken: !!t.token, error: tunel.error, puerto: PUERTO }; };
+const estadoTunel = () => { const t = CFG.tunel || {}; return { modo: t.modo === 'fijo' ? 'fijo' : 'apagado', estado: tunel.estado, direccion: tunel.estado === 'conectado' ? tunel.direccion : '', direccionFija: t.direccion || '', tieneToken: !!t.token, error: tunel.error, puerto: PUERTO }; };
 function detenerTunel() { clearTimeout(tunel.reintento); tunel.reintento = null; const p = tunel.proc; tunel.proc = null; if (p) { p.removeAllListeners('exit'); try { p.kill(); } catch {} } tunel.estado = 'apagado'; tunel.direccion = ''; tunel.error = ''; }
 function iniciarTunel() {
-  detenerTunel(); const t = CFG.tunel || {}; if (!t.modo || t.modo === 'apagado') return;
+  detenerTunel(); const t = CFG.tunel || {}; if (t.modo !== 'fijo' || !t.token) return;
   tunel.estado = 'iniciando';
-  const args = t.modo === 'prueba' ? ['tunnel', '--no-autoupdate', '--url', `http://localhost:${PUERTO}`] : ['tunnel', '--no-autoupdate', 'run'];
   let p;
-  try { p = spawn(buscarCloudflared(), args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...(t.modo === 'fijo' ? { TUNNEL_TOKEN: t.token } : {}) } }); }   // el token va por variable de entorno, no en la línea de comandos
+  try { p = spawn(buscarCloudflared(), ['tunnel', '--no-autoupdate', 'run'], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, TUNNEL_TOKEN: t.token } }); }   // el token va por variable de entorno, no en la línea de comandos
   catch (e) { tunel.estado = 'error'; tunel.error = e.message; return; }
   tunel.proc = p; let ultimoError = '';
   const leer = d => { for (const l of String(d).split(/\r?\n/)) {
-    const u = l.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/); if (u && t.modo === 'prueba') tunel.direccion = u[0];
-    if (/Registered tunnel connection/.test(l)) { tunel.estado = 'conectado'; tunel.error = ''; tunel.espera = 15000; if (t.modo === 'fijo') tunel.direccion = t.direccion || ''; log('Acceso desde internet conectado:', tunel.direccion || '(dirección definida en Cloudflare)'); }
+    if (/Registered tunnel connection/.test(l)) { tunel.estado = 'conectado'; tunel.error = ''; tunel.espera = 15000; tunel.direccion = t.direccion || ''; log('Acceso desde internet conectado:', tunel.direccion || '(dirección definida en Cloudflare)'); }
     else if (/ ERR /.test(l) && !/Failed to fetch features|ICMP/.test(l)) ultimoError = l.replace(/^\S+ ERR\s+/, '').replace(/\s+event=\d+$/, '').slice(0, 300);
   } };
   p.stdout.on('data', leer); p.stderr.on('data', leer);
@@ -389,7 +387,7 @@ function iniciarTunel() {
     tunel.reintento = setTimeout(iniciarTunel, tunel.espera); tunel.reintento.unref(); tunel.espera = Math.min(tunel.espera * 2, 300000); });   // se reintenta solo: 15 s, 30 s… hasta cada 5 min
 }
 function configurarTunel({ modo, token, direccion }) {
-  if (!['apagado', 'prueba', 'fijo'].includes(modo)) throw new Fallo('Modo no válido');
+  if (!['apagado', 'fijo'].includes(modo)) throw new Fallo('Modo no válido');
   const t = CFG.tunel || {};
   if (modo === 'fijo') {
     // la gente suele pegar el comando completo que muestra Cloudflare: se toma solo el token

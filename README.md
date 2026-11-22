@@ -61,22 +61,22 @@ Para cambiar el puerto, crea un archivo `puerto.txt` con el número en la carpet
 
 Los residentes entran desde fuera del edificio, y la cámara (QR de visitas) y las notificaciones exigen una dirección **HTTPS**. Mi Edificio lo resuelve con un túnel de [Cloudflare](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/): un programa (`cloudflared`) que publica el servidor en una dirección segura sin abrir puertos del router. Los datos siguen en tu computador; el túnel solo los transporta.
 
-Se configura desde la app, en el asistente inicial (paso "Acceso desde internet") o en **Administración → Edificio → Acceso desde internet**:
+Necesitas un **dominio** propio (comprarlo cuesta unos US$10 al año) y una **cuenta gratuita en Cloudflare**. Se configura una vez, desde la app, en el asistente inicial (paso "Acceso desde internet") o en **Administración → Edificio → Acceso desde internet**:
 
-- **Dirección temporal, para probar**: un botón. No pide cuenta ni dominio y en unos segundos entrega una dirección `https://….trycloudflare.com`. Cambia cada vez que se reinicia el servidor o el computador, y Cloudflare no garantiza su disponibilidad: sirve para probar, no para el uso diario.
-- **Dirección fija, para el uso diario**: con el dominio del edificio, por ejemplo `https://app.miedificio.cl`.
-  1. Crea una cuenta gratuita en Cloudflare y agrega tu dominio (comprarlo cuesta unos US$10 al año).
-  2. En el panel, entra a *Zero Trust → Networks → Tunnels* y crea un túnel de tipo *Cloudflared*.
-  3. Cloudflare muestra un comando con un token largo que empieza con `eyJ`. Cópialo y pégalo en la app; no hace falta ejecutarlo.
-  4. En *Public Hostname* elige la dirección y, como servicio, `http://localhost:8080`.
-  5. Escribe esa dirección en la app y pulsa **Conectar dirección fija**.
+1. Crea la cuenta en Cloudflare y agrega tu dominio.
+2. En el panel, entra a *Zero Trust → Networks → Tunnels* y crea un túnel de tipo *Cloudflared*.
+3. Cloudflare muestra un comando con un token largo que empieza con `eyJ`. Cópialo y pégalo en la app; no hace falta ejecutarlo.
+4. En *Public Hostname* elige la dirección, por ejemplo `app.miedificio.cl`, y como servicio `http://localhost:8080`.
+5. Escribe esa dirección en la app y pulsa **Conectar**.
 
 El servidor inicia el túnel solo cada vez que arranca, lo reconecta si se cae, y avisa en Inicio si deja de funcionar. Con el acceso activo, el enlace para invitar a la comunidad usa esa dirección.
+
+La app no ofrece las direcciones temporales gratuitas de Cloudflare (`trycloudflare.com`): cambian en cada reinicio y no tienen garantía de disponibilidad, así que no sirven para una comunidad.
 
 - **Windows**: `cloudflared` viene incluido en el instalador.
 - **Mac o Linux**: instálalo aparte (ver la documentación de Cloudflare) y déjalo en el `PATH`.
 
-Los nombres de las secciones del panel de Cloudflare pueden cambiar. La conexión real con Cloudflare **no está probada por el proyecto**: se probó cómo el servidor maneja el programa (arranque, dirección, token, errores, reconexión), no un túnel funcionando. Si lo configuras, cuéntanos cómo te fue.
+Los nombres de las secciones del panel de Cloudflare pueden cambiar. La conexión real con Cloudflare **no está probada por el proyecto**: se probó cómo el servidor maneja el programa (arranque, token, errores, reconexión), no un túnel funcionando. Si lo configuras, cuéntanos cómo te fue.
 
 Cualquier otro túnel o proxy inverso con HTTPS también sirve, siempre que reenvíe la cabecera `X-Forwarded-Proto`. Abrir un puerto del router rara vez es opción: muchos proveedores no entregan una IP pública propia.
 

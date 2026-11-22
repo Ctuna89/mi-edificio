@@ -976,30 +976,28 @@ function detalleOT(o){
 }
 
 // ACCESO DESDE INTERNET (solo instalación local)
-// El servidor maneja un túnel de Cloudflare: una dirección temporal para probar, o una fija con el
-// dominio del edificio. Se usa en Administración y en el asistente.
+// El servidor maneja un túnel de Cloudflare hacia una dirección fija con el dominio del edificio.
+// Se usa en Administración y en el asistente.
 function tunelUI(el, alCambiar){
   let sondeo=null;
   const dibujar=e=>{ if(!document.body.contains(el)) return; S.dirPublica=e.estado==='conectado'&&e.direccion?e.direccion+'/':'';
-    const estado=e.estado==='conectado'?`<div class="info">La app está publicada en <b>${esc(e.direccion||'la dirección definida en Cloudflare')}</b>${e.direccion?` <button type="button" class="btn sec sm" data-copiar="${esc(e.direccion)}">Copiar</button>`:''}</div>${e.modo==='prueba'?'<div class="note">Es una dirección temporal: cambia cada vez que se reinicia el servidor o el computador, y Cloudflare no garantiza que esté siempre disponible. Sirve para probar; para el uso diario configura una dirección fija.</div>':''}`
+    const estado=e.estado==='conectado'?`<div class="info">La app está publicada en <b>${esc(e.direccion)}</b> <button type="button" class="btn sec sm" data-copiar="${esc(e.direccion)}">Copiar</button></div>`
       :e.estado==='iniciando'?'<div class="info">Conectando con Cloudflare…</div>'
       :e.estado==='sin-programa'?'<div class="err">Falta el programa <code>cloudflared</code> en este computador. En Windows viene con el instalador de Mi Edificio; en Mac o Linux instálalo desde developers.cloudflare.com y vuelve a intentarlo.</div>'
-      :e.estado==='error'?`<div class="err">No se pudo conectar: ${esc(e.error||'error desconocido')} Se reintenta automáticamente; revisa que este computador tenga internet.</div>`
+      :e.estado==='error'?`<div class="err">No se pudo conectar: ${esc(e.error||'error desconocido')} Se reintenta automáticamente.</div>`
       :'<div class="note">Hoy la app solo funciona en este computador y en la red del edificio. Para que residentes y conserjes entren desde sus teléfonos, y para usar la cámara y las notificaciones, necesita una dirección de internet.</div>';
     el.innerHTML=`${estado}
-      ${e.modo==='prueba'?'':`<div class="row wrap" style="margin-bottom:10px"><button type="button" class="btn ${e.modo==='fijo'?'sec':''}" data-tun="prueba">Probar con una dirección temporal</button><span class="small muted">Sin cuenta ni dominio. Lista en unos segundos.</span></div>`}
-      <details ${e.modo==='fijo'?'open':''}><summary>Dirección fija con el dominio del edificio (recomendada)</summary>
-      <ol class="small" style="padding-left:20px;line-height:1.7"><li>Crea una cuenta gratuita en <b>cloudflare.com</b> y agrega tu dominio (comprarlo cuesta unos US$10 al año).</li><li>En el panel, entra a <b>Zero Trust → Networks → Tunnels</b> y crea un túnel de tipo <b>Cloudflared</b>.</li><li>Cloudflare muestra un comando con un token largo que empieza con <code>eyJ</code>. Cópialo y pégalo abajo; no hace falta ejecutarlo.</li><li>En <b>Public Hostname</b> elige la dirección (por ejemplo <code>app.miedificio.cl</code>) y como servicio <code>http://localhost:${e.puerto}</code>.</li></ol>
+      <p class="small muted">Se usa un túnel de Cloudflare con el dominio del edificio, por ejemplo <code>app.miedificio.cl</code>. Los datos siguen en este computador; el túnel solo los transporta. Se configura una vez:</p>
+      <ol class="small" style="padding-left:20px;line-height:1.7"><li>Crea una cuenta gratuita en <b>cloudflare.com</b> y agrega tu dominio (comprarlo cuesta unos US$10 al año).</li><li>En el panel, entra a <b>Zero Trust → Networks → Tunnels</b> y crea un túnel de tipo <b>Cloudflared</b>.</li><li>Cloudflare muestra un comando con un token largo que empieza con <code>eyJ</code>. Cópialo y pégalo abajo; no hace falta ejecutarlo.</li><li>En <b>Public Hostname</b> elige la dirección y, como servicio, <code>http://localhost:${e.puerto}</code>.</li></ol>
       <label class="f"><span>Token del túnel${e.tieneToken?' (ya guardado; vacío = mantener)':''}</span><input type="password" name="tk" autocomplete="off" placeholder="eyJ…  o el comando completo"></label>
-      <label class="f"><span>Dirección pública que elegiste</span><input type="text" name="dir" value="${esc(e.direccionFija)}" placeholder="https://app.miedificio.cl" autocomplete="off" spellcheck="false"></label>
-      <button type="button" class="btn ${e.modo==='fijo'?'sec':''}" data-tun="fijo">${e.modo==='fijo'?'Volver a conectar':'Conectar dirección fija'}</button></details>
-      ${e.modo!=='apagado'?'<div style="margin-top:12px"><button type="button" class="btn sec sm" data-tun="apagado">Desactivar el acceso desde internet</button></div>':''}`;
+      <label class="f"><span>Dirección que elegiste en Cloudflare</span><input type="text" name="dir" value="${esc(e.direccionFija)}" placeholder="https://app.miedificio.cl" autocomplete="off" spellcheck="false"></label>
+      <div class="row wrap"><button type="button" class="btn" data-tun="fijo">${e.modo==='fijo'?'Volver a conectar':'Conectar'}</button>${e.modo==='fijo'?'<button type="button" class="btn sec" data-tun="apagado">Desactivar el acceso desde internet</button>':''}</div>`;
     alCambiar?.(e); clearTimeout(sondeo); if(e.estado==='iniciando') sondeo=setTimeout(cargar,2000); };
   const cargar=()=>q(sb.local.tunel.estado()).then(dibujar,err=>{ if(document.body.contains(el)) el.innerHTML=`<div class="err">${esc(errMsg(err))}</div>`; });
   if(!el._tun){ el._tun=true; el.addEventListener('click', async ev=>{ const c=ev.target.closest('[data-copiar]'), b=ev.target.closest('[data-tun]');
     if(c){ try{ await navigator.clipboard.writeText(c.dataset.copiar); toast('Dirección copiada'); }catch(e){ toast(c.dataset.copiar); } return; } if(!b) return;
-    if(b.dataset.tun==='apagado' && !await confirmBox('Nadie podrá entrar desde fuera del edificio hasta que lo vuelvas a activar. ¿Desactivar?')) return;
-    busy(b,true,'Un momento…'); try{ dibujar(await q(sb.local.tunel.configurar({modo:b.dataset.tun, token:$('[name=tk]',el)?.value||'', direccion:$('[name=dir]',el)?.value||''}))); }catch(err){ toast(errMsg(err)); busy(b,false); } }); }
+    const modo=b.dataset.tun; if(modo==='apagado' && !await confirmBox('Nadie podrá entrar desde fuera del edificio hasta que lo vuelvas a activar. ¿Desactivar?')) return;
+    busy(b,true,'Un momento…'); try{ dibujar(await q(sb.local.tunel.configurar({modo, token:$('[name=tk]',el)?.value||'', direccion:$('[name=dir]',el)?.value||''}))); }catch(err){ toast(errMsg(err)); busy(b,false); } }); }
   cargar();
 }
 
@@ -1066,7 +1064,7 @@ function asistente(i=0){
       h:()=>`<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 12px">${RETENCION.map(([k,t])=>`<label class="f"><span>${t}</span><input type="number" name="ret_${k}" min="1" max="240" placeholder="Indefinido" value="${Number(c.retencion?.[k])||''}"></label>`).join('')}</div>
         <label class="f"><span>Aviso de privacidad (vacío = texto por defecto)</span><textarea name="privacidad" placeholder="Quién es responsable de los datos, para qué se usan, por cuánto tiempo se guardan y cómo ejercer los derechos de acceso, rectificación y eliminación.">${esc(c.privacidad||'')}</textarea></label>`,
       g:d=>{ const retencion={}; RETENCION.forEach(([k])=>{ const x=Math.floor(Number(d['ret_'+k])); if(x>0) retencion[k]=x; }); return upd({retencion, privacidad:d.privacidad.trim()}); }},
-    ...(CFG.LOCAL?[{t:'Acceso desde internet', d:'Para que tu comunidad entre desde sus teléfonos, la app necesita una dirección de internet. Puedes probar ahora con una temporal y dejar la definitiva para después, en Administración → Edificio.',
+    ...(CFG.LOCAL?[{t:'Acceso desde internet', d:'Para que tu comunidad entre desde sus teléfonos, la app necesita una dirección de internet. Requiere un dominio y una cuenta gratuita en Cloudflare; si aún no los tienes, sigue y complétalo después en Administración → Edificio.',
       h:()=>'<div id="wTun" class="small muted">Consultando…</div>', ini:m=>tunelUI($('#wTun',m)), g:()=>{}}]:[]),
     ...(CFG.LOCAL?[{t:'Respaldo en la nube', d:'Todo lo de tu edificio vive en este computador. Para no perderlo si falla, deja una copia en una nube. Puedes saltar este paso y hacerlo después en Administración → Edificio.',
       h:()=>'<div id="wResp" class="small muted">Buscando carpetas de nube en este computador…</div>',
