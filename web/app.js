@@ -1,7 +1,7 @@
 /* =====================================================================
    Mi Edificio — frontend (vanilla JS) sobre Supabase
    Auth (email/clave) · Postgres con RLS · Storage (bucket "fotos") · Realtime
-   Varios edificios por instalación: RLS limita cada consulta al edificio del usuario.
+   Una instalación = un edificio. RLS decide qué ve y qué puede hacer cada rol.
    ===================================================================== */
 (function(){
 'use strict';
@@ -173,7 +173,6 @@ function render(html){ applyColor(); $('#app').innerHTML=html; }
 const applyColor=()=>{ const c=S.cfg?.color; if(c){ document.documentElement.style.setProperty('--p',c); document.documentElement.style.setProperty('--p2',c+'22'); } };
 
 async function boot(){
-  const cod=new URLSearchParams(location.search).get('e'); if(cod){ lsSet('codigo',cod.trim().toUpperCase()); history.replaceState(null,'',location.pathname+location.hash); }
   if('serviceWorker' in navigator){ navigator.serviceWorker.register('sw.js').catch(e=>console.warn('sw',e)); navigator.serviceWorker.addEventListener('message',e=>{ if(e.data?.ir) location.hash=e.data.ir; }); }
   const {data:{session}} = await sb.auth.getSession();
   sb.auth.onAuthStateChange((ev,sess)=>{ const was=S.uid; S.session=sess; S.uid=sess?.user?.id||null; if(was!==S.uid){ teardown(); S.uid? start() : viewAuth(); } });
@@ -262,38 +261,30 @@ function renderShell(){
 }
 function setMain(html){ $('#main').innerHTML=html; }
 
-// Cuenta sin perfil: unirse a un edificio (por enlace/código de invitación, o directo si la
-// instalación tiene uno solo) o crear uno nuevo y quedar como su administrador.
+// Cuenta sin perfil: si la instalación ya tiene edificio, pedir acceso; si no, crearlo y
+// quedar como su administrador.
 async function viewCrearPerfil(){
-  render(shellLess(`<div class="loading"><div class="spin"></div>Buscando tu edificio…</div>`));
-  let edif=null, puede=false, aviso='';
-  const buscar=async cod=>(await q(sb.rpc('buscar_edificio',{p_codigo:cod||null})))[0]||null;
-  try{ const cod=lsGet('codigo'); [edif,puede]=await Promise.all([buscar(cod), q(sb.rpc('puede_crear_edificio'))]);
-    if(cod&&!edif){ aviso='El código de invitación no corresponde a ningún edificio.'; lsSet('codigo',null); edif=await buscar(null); }
-  }catch(e){ aviso='No se pudo consultar el edificio: '+errMsg(e); }
+  render(shellLess(`<div class="loading"><div class="spin"></div>Un momento…</div>`));
+  let edif=null, aviso='';
+  try{ edif=(await q(sb.rpc('buscar_edificio')))[0]||null; }catch(e){ aviso='No se pudo consultar el edificio: '+errMsg(e); }
   if(S.me) return;
   const err=m=>{ $('#pErr').innerHTML=m?`<div class="err">${esc(m)}</div>`:''; };
-  const listo=()=>{ lsSet('codigo',null); S.usersW?.reload(); };
-  const draw=()=>{
-    const pie=`<div class="links" style="margin-top:10px"><a href="#" id="out">Cerrar sesión</a>${edif?'<a href="#" id="otro">Mi edificio es otro</a>':''}</div>`;
-    render(shellLess(edif?`<div class="card"><h3>Únete a ${esc(edif.nombre)}</h3><p class="small muted">La administración del edificio aprobará tu acceso.</p><div id="pErr"></div>
-      <form id="fAcc"><label class="f"><span>Nombre completo</span><input type="text" name="nombre" required></label>
-      <label class="f"><span>Departamento / unidad</span><input type="text" name="depto" placeholder="Ej: 1204 (vacío si eres conserje o empresa)"></label>
-      <label class="f"><span>Teléfono</span><input type="tel" name="telefono"></label>
-      <label class="f"><span>Soy</span><select name="rol"><option value="residente">Residente (arrendatario)</option><option value="propietario">Propietario</option><option value="conserje">Conserje</option><option value="mantencion">Empresa de mantención</option></select></label>
-      <details style="margin-bottom:10px"><summary>Aviso de privacidad</summary><p class="small" style="white-space:pre-wrap">${esc(avisoPriv(edif))}</p></details>
-      <label class="sw" style="margin-bottom:12px"><input type="checkbox" name="acepto" required> Leí el aviso de privacidad</label>
-      <button class="btn full">Enviar solicitud</button></form>${pie}</div>`
-    :`<div id="pErr"></div><div class="card"><h3>Unirme a mi edificio</h3><p class="small muted">Pide a la administración de tu edificio el enlace o el código de invitación.</p><form id="fCod" class="row"><input type="text" name="codigo" class="grow" placeholder="Código de invitación" required autocapitalize="characters" autocomplete="off"><button class="btn">Buscar</button></form></div>
-      ${puede?`<div class="card"><h3>Crear un edificio nuevo</h3><p class="small muted">Quedarás como administrador y podrás invitar a tu comunidad.</p><form id="fNew"><label class="f"><span>Nombre del edificio o condominio</span><input type="text" name="edificio" required></label><label class="f"><span>Tu nombre completo</span><input type="text" name="nombre" required></label><label class="f"><span>Teléfono</span><input type="tel" name="telefono"></label><button class="btn full">Crear edificio</button></form></div>`:''}${pie}`));
-    err(aviso); aviso='';
-    $('#out').addEventListener('click',e=>{e.preventDefault(); salir();});
-    $('#otro')?.addEventListener('click',e=>{e.preventDefault(); lsSet('codigo',null); edif=null; draw();});
-    $('#fAcc')?.addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); const b=$('button',e.target); busy(b,true); try{ await q(T('usuarios').insert({id:S.uid, edificio_id:edif.id, nombre:d.nombre.trim(), depto:d.depto.trim(), telefono:d.telefono.trim(), rol:d.rol})); listo(); }catch(ex){ err(errMsg(ex)); busy(b,false); } });
-    $('#fCod')?.addEventListener('submit', async e=>{ e.preventDefault(); const cod=formData(e.target).codigo.trim().toUpperCase(); const b=$('button',e.target); busy(b,true,'Buscando…'); try{ const x=await buscar(cod); if(x){ edif=x; lsSet('codigo',cod); draw(); } else { err('No existe un edificio con ese código.'); busy(b,false); } }catch(ex){ err(errMsg(ex)); busy(b,false); } });
-    $('#fNew')?.addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); const b=$('button',e.target); busy(b,true,'Creando…'); try{ await q(sb.rpc('crear_edificio',{p_edificio:d.edificio.trim(), p_nombre:d.nombre.trim(), p_telefono:d.telefono.trim()})); listo(); }catch(ex){ err(errMsg(ex)); busy(b,false); } });
-  };
-  draw();
+  const listo=()=>S.usersW?.reload();
+  const pie=`<div class="links" style="margin-top:10px"><a href="#" id="out">Cerrar sesión</a></div>`;
+  render(shellLess(edif?`<div class="card"><h3>Únete a ${esc(edif.nombre)}</h3><p class="small muted">La administración del edificio aprobará tu acceso.</p><div id="pErr"></div>
+    <form id="fAcc"><label class="f"><span>Nombre completo</span><input type="text" name="nombre" required></label>
+    <label class="f"><span>Departamento / unidad</span><input type="text" name="depto" placeholder="Ej: 1204 (vacío si eres conserje o empresa)"></label>
+    <label class="f"><span>Teléfono</span><input type="tel" name="telefono"></label>
+    <label class="f"><span>Soy</span><select name="rol"><option value="residente">Residente (arrendatario)</option><option value="propietario">Propietario</option><option value="conserje">Conserje</option><option value="mantencion">Empresa de mantención</option></select></label>
+    <details style="margin-bottom:10px"><summary>Aviso de privacidad</summary><p class="small" style="white-space:pre-wrap">${esc(avisoPriv(edif))}</p></details>
+    <label class="sw" style="margin-bottom:12px"><input type="checkbox" name="acepto" required> Leí el aviso de privacidad</label>
+    <button class="btn full">Enviar solicitud</button></form>${pie}</div>`
+  :`<div class="card"><h3>Configura tu edificio</h3><p class="small muted">Eres la primera persona en entrar: crea el edificio y quedarás como su administrador. Después podrás invitar a tu comunidad.</p><div id="pErr"></div>
+    <form id="fNew"><label class="f"><span>Nombre del edificio o condominio</span><input type="text" name="edificio" required></label><label class="f"><span>Tu nombre completo</span><input type="text" name="nombre" required></label><label class="f"><span>Teléfono</span><input type="tel" name="telefono"></label><button class="btn full">Crear edificio</button></form>${pie}</div>`));
+  err(aviso);
+  $('#out').addEventListener('click',e=>{e.preventDefault(); salir();});
+  $('#fAcc')?.addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); const b=$('button',e.target); busy(b,true); try{ await q(T('usuarios').insert({id:S.uid, edificio_id:edif.id, nombre:d.nombre.trim(), depto:d.depto.trim(), telefono:d.telefono.trim(), rol:d.rol})); listo(); }catch(ex){ err(errMsg(ex)); busy(b,false); } });
+  $('#fNew')?.addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); const b=$('button',e.target); busy(b,true,'Creando…'); try{ await q(sb.rpc('crear_edificio',{p_edificio:d.edificio.trim(), p_nombre:d.nombre.trim(), p_telefono:d.telefono.trim()})); listo(); }catch(ex){ err(errMsg(ex)); busy(b,false); } });
 }
 
 // ---------- VISTAS ----------
@@ -987,7 +978,7 @@ const ESPACIOS_EJ=[
 const leerUnidades = txt => txt.split('\n').map(l=>l.trim()).filter(Boolean).map(l=>{ const [d,a,p]=l.split(/[;\t]/.test(l)?/[;\t]/:','); return d&&d.trim()?{edificio_id:S.me.edificio_id, depto:d.trim(), alicuota:Number(String(a||'0').trim().replace(',','.'))||0, prop:(p||'').trim()}:null; }).filter(Boolean);   // con ; o tabulador, la coma es decimal (39,5)
 function asistente(i=0){
   const c=S.cfg||{}; const upd=p=>q(T('edificios').update({...p, actualizado:now()}).eq('id',c.id));
-  const inv=location.origin+location.pathname+'?e='+(c.codigo||'');
+  const inv=location.origin+location.pathname;
   const nUn=Object.keys(S.unidades).length, suma=Object.values(S.unidades).reduce((a,u)=>a+(Number(u.alicuota)||0),0), nEst=Object.keys(S.estac).length;
   const PASOS=[
     {t:'Tu edificio', d:'Estos datos aparecen en la app y en los documentos que se exportan.',
@@ -1018,7 +1009,7 @@ function asistente(i=0){
         <label class="f"><span>Aviso de privacidad (vacío = texto por defecto)</span><textarea name="privacidad" placeholder="Quién es responsable de los datos, para qué se usan, por cuánto tiempo se guardan y cómo ejercer los derechos de acceso, rectificación y eliminación.">${esc(c.privacidad||'')}</textarea></label>`,
       g:d=>{ const retencion={}; RETENCION.forEach(([k])=>{ const x=Math.floor(Number(d['ret_'+k])); if(x>0) retencion[k]=x; }); return upd({retencion, privacidad:d.privacidad.trim()}); }},
     {t:'Invita a tu comunidad', d:'Comparte este enlace con residentes, conserjes y empresas. Al crear su cuenta quedarán pendientes hasta que los apruebes.',
-      h:()=>`<div class="row wrap"><input type="text" id="wInv" class="grow" readonly value="${esc(inv)}"><button type="button" class="btn sec" id="wCopiar">Copiar enlace</button></div><p class="small muted" style="margin:8px 0 14px">Código de invitación: <code>${esc(c.codigo||'')}</code></p>
+      h:()=>`<div class="row wrap"><input type="text" id="wInv" class="grow" readonly value="${esc(inv)}"><button type="button" class="btn sec" id="wCopiar">Copiar enlace</button></div><div style="height:14px"></div>
         <div class="small"><b>Lo que sigue</b><ol style="margin:6px 0 0;padding-left:20px;line-height:1.7"><li>Aprueba a quienes se registren en Administración → Usuarios, asignándoles depto y rol.</li><li>Publica el primer período en Gastos comunes.</li><li>Activa tus notificaciones en Mi cuenta.</li></ol></div>`,
       g:()=>upd({configurado_at:now()})},
   ];
@@ -1058,7 +1049,7 @@ ADMIN.edificio = function(el){
   <div class="card"><h3>Conservación de datos</h3><p class="small muted">Define por cuántos meses se guarda cada tipo de dato. Lo que supere el plazo se borra en forma definitiva, cada día. Vacío = se conserva indefinidamente.</p>
   <form id="fRet"><div class="grid2">${RETENCION.map(([k,t,d])=>`<label class="f"><span>${t}</span><input type="number" name="${k}" min="1" max="240" placeholder="Indefinido" value="${Number(c.retencion?.[k])||''}"><span style="font-weight:400;margin-top:4px">${d}</span></label>`).join('')}</div>
   <div class="row wrap"><button class="btn">Guardar plazos</button><button type="button" class="btn sec" id="bDep">Aplicar ahora</button></div></form></div>
-  <div class="card"><h3>Invitar a la comunidad</h3><p class="small muted">Comparte este enlace con residentes, conserjes y empresas. Al crear su cuenta quedarán asociados a este edificio y pendientes de tu aprobación en Usuarios.</p><div class="row wrap"><input type="text" id="invUrl" class="grow" readonly value="${esc(location.origin+location.pathname+'?e='+(c.codigo||''))}"><button type="button" class="btn sec" id="bInv">Copiar enlace</button></div><p class="small muted" style="margin:8px 0 0">Código de invitación: <code>${esc(c.codigo||'')}</code></p></div>`;
+  <div class="card"><h3>Invitar a la comunidad</h3><p class="small muted">Comparte este enlace con residentes, conserjes y empresas. Al crear su cuenta quedarán asociados a este edificio y pendientes de tu aprobación en Usuarios.</p><div class="row wrap"><input type="text" id="invUrl" class="grow" readonly value="${esc(location.origin+location.pathname)}"><button type="button" class="btn sec" id="bInv">Copiar enlace</button></div></div>`;
   $('#bInv',el).addEventListener('click', async()=>{ const i=$('#invUrl',el); try{ await navigator.clipboard.writeText(i.value); toast('Enlace copiado'); }catch(e){ i.select(); toast('Copia el enlace seleccionado'); } });
   $('#fRet',el).addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); const retencion={}; RETENCION.forEach(([k])=>{ const n=Math.floor(Number(d[k])); if(n>0) retencion[k]=n; }); try{ await q(T('edificios').update({retencion}).eq('id',S.cfg.id)); toast('Plazos guardados'); }catch(err){ toast('Error: '+errMsg(err)); } });
   $('#bDep',el).addEventListener('click', async e=>{ if(!await confirmBox('Se borrarán en forma definitiva los datos que superen los plazos guardados. ¿Continuar?')) return; try{ const r=await q(sb.rpc('depurar_ahora'))||{}; const n=Object.values(r).reduce((a,b)=>a+Number(b),0); toast(n?(n===1?'Se borró 1 registro':`Se borraron ${n} registros`):'No había datos fuera de plazo'); limpiarArchivos(); }catch(err){ toast('Error: '+errMsg(err)); } });
