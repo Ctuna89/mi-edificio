@@ -1,6 +1,6 @@
 # Cambios
 
-## Sin publicar
+## 0.1.1 — 2026-11-22
 
 - Finanzas: pagos registrados por la administración (con abonos parciales y anulación), convenios de pago para unidades morosas con aceptación del residente, panel de estado económico y flujo de caja mensual y anual con exportación a Excel.
 - Estado de cuenta de la unidad en Gastos comunes.
