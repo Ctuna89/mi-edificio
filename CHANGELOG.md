@@ -1,6 +1,6 @@
 # Cambios
 
-## Sin publicar
+## 0.2.0 — 2026-11-22
 
 - **Instalación local**: un solo programa (`local/`) sirve la app y guarda la base de datos y los archivos en una carpeta del computador del edificio, sin servicios en la nube. Incluye cuentas, permisos, archivos con enlaces firmados, avisos en vivo, notificaciones, tareas programadas y respaldo diario. Supabase queda como instalación alternativa.
 - **Un solo edificio por instalación**: se elimina el soporte multi-edificio y los códigos de invitación. La primera cuenta crea el edificio; las siguientes piden acceso.
