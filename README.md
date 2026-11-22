@@ -65,7 +65,8 @@ Como administrador tienes el selector **"Ver como"** para revisar la interfaz de
 
 | Módulo | Residente / Propietario | Conserje | Comité | Admin | Empresa mantención |
 |---|---|---|---|---|---|
-| Gastos comunes (desglose, prorrateo, estado de pago, PDF/Excel) | ve y descarga su aviso de cobro | – | ve todo y exporta | edita, marca pagos, exporta | – |
+| Gastos comunes (desglose, prorrateo, estado de pago, PDF/Excel) | ve y descarga su aviso de cobro | – | ve todo y exporta | edita, registra pagos, exporta | – |
+| Finanzas: pagos, morosidad, convenios y flujo de caja | ve su estado de cuenta, acepta convenios | – | ve todo | registra pagos, propone convenios, anota egresos | – |
 | Reservas de áreas comunes | reserva / cancela | ve agenda | aprueba | aprueba, configura | – |
 | Incidencias con fotos | reporta, cierra las suyas | gestiona, se asigna | gestiona | gestiona, crea OT | ve las ligadas a sus OT |
 | Mensajes (canales conserjería / comité / administración) | chat por canal | canal conserjería | canal comité | todos | – |
@@ -104,6 +105,18 @@ El comité o la administración publican una pregunta con opciones, plazo opcion
 - **Residentes**: descargan su aviso de cobro del período vigente en PDF o Excel.
 
 El Excel es un `.xlsx` real generado en el navegador (`web/xlsx.js`, sin dependencias). El PDF usa el diálogo de impresión del navegador: elige "Guardar como PDF".
+
+## Pagos, convenios y flujo de caja
+
+**Pagos.** No hay pago en línea: la administración registra cada pago al recibirlo (Finanzas → Pagos, o el botón "Registrar pago" de la unidad). Se indica a qué se aplica, el monto, la fecha, el medio y el comprobante. Puede ser un abono parcial; el cobro queda pagado cuando los abonos completan su monto. Un pago no se edita ni se borra: se anula con un motivo y queda en el historial.
+
+**Convenios de pago.** Para una unidad morosa, la administración elige los cobros atrasados, el número de cuotas mensuales y la fecha de la primera. El convenio queda *propuesto* hasta que alguien de la unidad lo acepta en la app (o la administración registra la aceptación, si se firmó en papel). Mientras está vigente y al día, esos cobros no cuentan como vencidos. Lo que se abona al convenio salda las cuotas en orden y los períodos del más antiguo al más nuevo. Si se anula, lo abonado se conserva y el resto vuelve a ser deuda corriente. El total es la deuda de los cobros incluidos: no calcula intereses ni multas.
+
+**Estado económico.** La administración y el comité ven en Finanzas → Estado lo por cobrar, lo vencido, lo que está en convenio, cuántas unidades están morosas, lo recaudado en el mes y la lista de unidades con deuda. Cada residente ve en Gastos comunes el estado de cuenta de su unidad: saldo, cobros pendientes, convenios y pagos registrados.
+
+**Flujo de caja.** Finanzas → Flujo de caja muestra, por mes y con totales del año, los ingresos por gastos comunes (tomados de los pagos registrados, en el mes en que se recibieron), otros ingresos, egresos, flujo neto y saldo acumulado; se exporta a Excel. Los egresos y otros ingresos los anota la administración; para partir con la caja real, anota un ingreso de categoría "Saldo inicial". Los ítems de un período de gastos comunes son lo que se cobra, no egresos: no entran solos al flujo.
+
+Al actualizar una instalación anterior, los cobros que estaban marcados como pagados se convierten en pagos con esa fecha.
 
 ## Notificaciones push (opcional)
 
@@ -203,7 +216,7 @@ El escaneo usa **Web NFC**, disponible solo en Chrome para Android. Graba en cad
 
 ## Pagos en línea
 
-No incluidos por decisión de alcance. Si más adelante se agrega (Webpay, Khipu, Fintoc), lo correcto es hacerlo en una **Edge Function** de Supabase que reciba la confirmación del proveedor y marque `gasto_unidades.pagado`, nunca desde el navegador.
+No incluidos por decisión de alcance: los pagos se registran a mano (ver "Pagos, convenios y flujo de caja"). Si más adelante se agrega (Webpay, Khipu, Fintoc), lo correcto es hacerlo en una **Edge Function** de Supabase que reciba la confirmación del proveedor y inserte el pago en la tabla `pagos`, nunca desde el navegador.
 
 ## Actualizar una instalación anterior (un solo edificio)
 

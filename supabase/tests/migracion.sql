@@ -7,7 +7,7 @@ insert into usuarios (id, nombre, depto) values ('00000000-0000-0000-0000-000000
 alter table usuarios disable trigger user; update usuarios set estado = 'activo'; alter table usuarios enable trigger user;
 insert into unidades (depto, alicuota) values ('5', 100);
 insert into gastos (periodo, total) values ('2026-10', 900);
-insert into gasto_unidades (periodo, depto, alicuota, monto) values ('2026-10', '5', 100, 900);
+insert into gasto_unidades (periodo, depto, alicuota, monto, pagado, pagado_at) values ('2026-10', '5', 100, 900, true, '2026-10-20');
 insert into conversaciones (id, canal, depto) values ('comite_5', 'comite', '5');
 insert into mensajes (conv_id, texto, uid, rol) values ('comite_5', 'hola', '00000000-0000-0000-0000-0000000000c2', 'residente');
 insert into encomiendas (depto, descripcion) values ('5', 'Paquete');

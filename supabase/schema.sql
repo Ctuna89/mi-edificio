@@ -121,8 +121,10 @@ create table if not exists public.gasto_unidades (
   depto     text not null,
   alicuota  numeric(8,4) not null default 0,
   monto     numeric(14,2) not null default 0,
-  pagado    boolean not null default false,
+  pagado    boolean not null default false,   -- lo calcula la base de datos a partir de los pagos
   pagado_at timestamptz,
+  pagado_monto numeric(14,2) not null default 0,  -- suma de pagos aplicados a este cobro
+  convenio_id uuid,                               -- convenio de pago que incluye este cobro
   primary key (edificio_id, periodo, depto),
   constraint gasto_unidades_gasto_fkey foreign key (edificio_id, periodo) references public.gastos(edificio_id, periodo) on delete cascade
 );
@@ -362,6 +364,70 @@ create table if not exists public.estacionamiento_usos (
 );
 create unique index if not exists est_usos_abierto_idx on public.estacionamiento_usos (estacionamiento_id) where fin is null;
 
+-- Convenios de pago: acuerdo entre la administración y una unidad para saldar cobros
+-- atrasados en cuotas. propuesto → vigente (al aceptarlo) → cumplido; o anulado.
+create table if not exists public.convenios (
+  id          uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  depto       text not null,
+  periodos    text[] not null default '{}',     -- períodos de gastos comunes incluidos
+  monto_total numeric(14,2) not null,
+  cuotas      int not null,
+  nota        text default '',
+  estado      text not null default 'propuesto',
+  creado_por  uuid references public.usuarios(id),
+  ts          timestamptz default now(),
+  aceptado_at timestamptz,
+  aceptado_por uuid,
+  anulado_at  timestamptz,
+  anulado_motivo text
+);
+
+create table if not exists public.convenio_cuotas (
+  id          uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  convenio_id uuid not null references public.convenios(id) on delete cascade,
+  depto       text not null,
+  n           int not null,
+  vence       date not null,
+  monto       numeric(14,2) not null,
+  pagado_monto numeric(14,2) not null default 0
+);
+
+-- Pagos registrados a mano por la administración. Cada pago va a un período o a un convenio.
+-- No se editan ni se borran: se anulan.
+create table if not exists public.pagos (
+  id          uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  depto       text not null,
+  periodo     text,
+  convenio_id uuid references public.convenios(id),
+  monto       numeric(14,2) not null check (monto > 0),
+  fecha       date not null default current_date,
+  medio       text not null default 'transferencia',  -- transferencia|efectivo|cheque|otro
+  referencia  text default '',
+  nota        text default '',
+  anulado     boolean not null default false,
+  anulado_motivo text,
+  registrado_por uuid references public.usuarios(id),
+  ts          timestamptz default now(),
+  check ((periodo is null) <> (convenio_id is null))
+);
+create index if not exists pagos_depto_idx on public.pagos (depto);
+
+-- Otros movimientos de caja (egresos reales y otros ingresos) para el flujo de caja
+create table if not exists public.caja_movimientos (
+  id          uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  tipo        text not null check (tipo in ('ingreso','egreso')),
+  fecha       date not null default current_date,
+  categoria   text not null default '',
+  descripcion text default '',
+  monto       numeric(14,2) not null check (monto > 0),
+  registrado_por uuid references public.usuarios(id),
+  ts          timestamptz default now()
+);
+
 -- Archivos de filas borradas por plazo de conservación, pendientes de eliminar del bucket.
 -- Los elimina la app de la administración (la base de datos no puede borrar archivos de Storage).
 create table if not exists public.archivos_por_borrar (
@@ -400,7 +466,7 @@ begin
   end if;
 
   select id into def from public.edificios order by creado, id limit 1;
-  foreach t in array array['empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos']
+  foreach t in array array['empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos']
   loop
     execute format('alter table public.%I add column if not exists edificio_id uuid references public.edificios(id) on delete cascade', t);
     execute format('select count(*) from public.%I where edificio_id is null', t) into n;
@@ -431,6 +497,17 @@ begin
   end if;
 end $$;
 drop function public._pk_cols(text);
+
+-- Registro de pagos: los cobros que ya estaban marcados como pagados pasan a tener su pago
+do $$ begin
+  if not exists (select 1 from information_schema.columns where table_schema = 'public' and table_name = 'gasto_unidades' and column_name = 'pagado_monto') then
+    alter table public.gasto_unidades add column pagado_monto numeric(14,2) not null default 0, add column convenio_id uuid;
+    insert into public.pagos (edificio_id, depto, periodo, monto, fecha, medio, nota)
+    select edificio_id, depto, periodo, monto, coalesce(pagado_at::date, current_date), 'otro', 'Pago marcado antes de existir el registro de pagos'
+    from public.gasto_unidades where pagado and monto > 0;
+    update public.gasto_unidades set pagado_monto = monto where pagado;
+  end if;
+end $$;
 
 -- Código del QR de acceso de cada visita (las visitas ya existentes reciben uno)
 alter table public.visitas add column if not exists codigo text not null default upper(substr(replace(gen_random_uuid()::text,'-',''),1,8));
@@ -488,7 +565,7 @@ $$;
 do $$
 declare t text;
 begin
-  foreach t in array array['empresas','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos']
+  foreach t in array array['empresas','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos']
   loop
     execute format('alter table public.%I alter column edificio_id set default public.mi_edificio()', t);
   end loop;
@@ -720,6 +797,140 @@ drop trigger if exists ot_antes_update on public.ot;
 create trigger ot_antes_update before update on public.ot
 for each row execute function public.ot_antes_update();
 
+-- ---------------------------------------------------------------------
+-- Pagos y convenios
+-- ---------------------------------------------------------------------
+create schema if not exists privado;
+
+-- Recalcula cuánto está pagado de cada cobro y cuota de una unidad, a partir de sus pagos vigentes.
+-- Lo abonado a un convenio se reparte entre sus períodos y sus cuotas, del más antiguo al más nuevo.
+create or replace function privado.recalc_unidad(p_e uuid, p_depto text) returns void
+language plpgsql security definer set search_path = public as $$
+declare c record; r record; abonado numeric; rest numeric; x numeric;
+begin
+  update public.gasto_unidades g set pagado_monto = coalesce((
+      select sum(p.monto) from public.pagos p
+      where p.edificio_id = p_e and p.depto = p_depto and p.periodo = g.periodo and p.convenio_id is null and not p.anulado), 0)
+  where g.edificio_id = p_e and g.depto = p_depto;
+
+  for c in select * from public.convenios where edificio_id = p_e and depto = p_depto order by ts loop
+    abonado := coalesce((select sum(monto) from public.pagos where convenio_id = c.id and not anulado), 0);
+    rest := abonado;
+    for r in select periodo, monto, pagado_monto from public.gasto_unidades
+             where edificio_id = p_e and depto = p_depto and periodo = any(c.periodos) order by periodo loop
+      x := least(rest, greatest(r.monto - r.pagado_monto, 0));
+      update public.gasto_unidades set pagado_monto = pagado_monto + x where edificio_id = p_e and depto = p_depto and periodo = r.periodo;
+      rest := rest - x;
+    end loop;
+    rest := abonado;
+    for r in select id, monto from public.convenio_cuotas where convenio_id = c.id order by n loop
+      x := least(rest, r.monto);
+      update public.convenio_cuotas set pagado_monto = x where id = r.id;
+      rest := rest - x;
+    end loop;
+    if c.estado = 'vigente' and abonado >= c.monto_total then update public.convenios set estado = 'cumplido' where id = c.id;
+    elsif c.estado = 'cumplido' and abonado < c.monto_total then update public.convenios set estado = 'vigente' where id = c.id;
+    end if;
+  end loop;
+
+  update public.gasto_unidades set
+    pagado = (monto > 0 and pagado_monto >= monto),
+    pagado_at = case when monto > 0 and pagado_monto >= monto then coalesce(pagado_at, now()) end
+  where edificio_id = p_e and depto = p_depto;
+end $$;
+
+create or replace function public.pagos_antes() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare g public.gasto_unidades; c public.convenios; saldo numeric; ret public.pagos;
+begin
+  if auth.uid() is null then return new; end if;   -- SQL Editor / service role
+  if tg_op = 'UPDATE' then
+    if old.anulado then raise exception 'El pago ya está anulado'; end if;
+    if not new.anulado then raise exception 'Un pago no se modifica: anúlalo y regístralo de nuevo'; end if;
+    ret := old; ret.anulado := true; ret.anulado_motivo := new.anulado_motivo;
+    return ret;
+  end if;
+  new.registrado_por := auth.uid(); new.anulado := false; new.anulado_motivo := null; new.depto := trim(new.depto);
+  if new.periodo is not null then
+    select * into g from public.gasto_unidades where edificio_id = new.edificio_id and periodo = new.periodo and depto = new.depto;
+    if not found then raise exception 'Esa unidad no tiene cobro en ese período'; end if;
+    if exists (select 1 from public.convenios where id = g.convenio_id and estado in ('propuesto','vigente')) then
+      raise exception 'Ese período está en un convenio de pago: registra el pago en el convenio';
+    end if;
+    saldo := case when g.pagado then 0 else g.monto - g.pagado_monto end;
+  else
+    select * into c from public.convenios where id = new.convenio_id and edificio_id = new.edificio_id and depto = new.depto;
+    if not found then raise exception 'Convenio no válido'; end if;
+    if c.estado <> 'vigente' then raise exception 'El convenio no está vigente'; end if;
+    saldo := c.monto_total - coalesce((select sum(monto) from public.pagos where convenio_id = c.id and not anulado), 0);
+  end if;
+  if new.monto > saldo then raise exception 'El monto supera el saldo pendiente ($%)', saldo::bigint; end if;
+  return new;
+end $$;
+drop trigger if exists pagos_antes on public.pagos;
+create trigger pagos_antes before insert or update on public.pagos
+for each row execute function public.pagos_antes();
+
+create or replace function public.pagos_despues() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  perform privado.recalc_unidad(new.edificio_id, new.depto);
+  return null;
+end $$;
+drop trigger if exists pagos_despues on public.pagos;
+create trigger pagos_despues after insert or update on public.pagos
+for each row execute function public.pagos_despues();
+
+-- Crea un convenio por los períodos indicados: total = saldo pendiente de esos cobros,
+-- dividido en cuotas mensuales desde p_primera. Queda "propuesto" hasta que se acepte.
+create or replace function public.crear_convenio(p_depto text, p_periodos text[], p_cuotas int, p_primera date, p_nota text default '') returns uuid
+language plpgsql security definer set search_path = public as $$
+declare e uuid := public.mi_edificio(); total numeric; n int; cid uuid; cuota numeric; i int;
+begin
+  if not public.es_admin() then raise exception 'Solo administración'; end if;
+  if p_cuotas is null or p_cuotas < 1 or p_cuotas > 60 then raise exception 'Las cuotas deben estar entre 1 y 60'; end if;
+  if p_primera is null then raise exception 'Indica la fecha de la primera cuota'; end if;
+  select count(*), coalesce(sum(g.monto - g.pagado_monto), 0) into n, total
+  from public.gasto_unidades g join public.gastos x on x.edificio_id = g.edificio_id and x.periodo = g.periodo
+  where g.edificio_id = e and g.depto = p_depto and g.periodo = any(p_periodos) and x.publicado and not g.pagado
+    and not exists (select 1 from public.convenios c where c.id = g.convenio_id and c.estado in ('propuesto','vigente'));
+  if n = 0 or n <> cardinality(p_periodos) or total <= 0 then raise exception 'Algún período no tiene deuda o ya está en otro convenio'; end if;
+  insert into public.convenios (edificio_id, depto, periodos, monto_total, cuotas, nota, creado_por)
+  values (e, p_depto, p_periodos, total, p_cuotas, coalesce(trim(p_nota), ''), auth.uid()) returning id into cid;
+  update public.gasto_unidades set convenio_id = cid where edificio_id = e and depto = p_depto and periodo = any(p_periodos);
+  cuota := floor(total / p_cuotas);
+  for i in 1..p_cuotas loop
+    insert into public.convenio_cuotas (edificio_id, convenio_id, depto, n, vence, monto)
+    values (e, cid, p_depto, i, (p_primera + make_interval(months => i - 1))::date, case when i = p_cuotas then total - cuota * (p_cuotas - 1) else cuota end);
+  end loop;
+  return cid;
+end $$;
+
+-- Lo acepta alguien de la unidad desde la app, o la administración si se firmó en papel
+create or replace function public.aceptar_convenio(p_id uuid) returns void
+language plpgsql security definer set search_path = public as $$
+declare c public.convenios;
+begin
+  select * into c from public.convenios where id = p_id and edificio_id = public.mi_edificio();
+  if not found or not (public.es_admin() or (public.es_residente() and c.depto = public.mi_depto())) then raise exception 'Sin permiso'; end if;
+  if c.estado <> 'propuesto' then raise exception 'El convenio ya no está pendiente de aceptación'; end if;
+  update public.convenios set estado = 'vigente', aceptado_at = now(), aceptado_por = auth.uid() where id = p_id;
+end $$;
+
+-- La administración puede anularlo siempre; la unidad, solo rechazarlo mientras está propuesto.
+-- Lo ya abonado sigue aplicado a los períodos; el resto vuelve a ser deuda corriente.
+create or replace function public.anular_convenio(p_id uuid, p_motivo text default '') returns void
+language plpgsql security definer set search_path = public as $$
+declare c public.convenios;
+begin
+  select * into c from public.convenios where id = p_id and edificio_id = public.mi_edificio();
+  if not found or not (public.es_admin() or (public.es_residente() and c.depto = public.mi_depto() and c.estado = 'propuesto')) then raise exception 'Sin permiso'; end if;
+  if c.estado not in ('propuesto','vigente') then raise exception 'El convenio ya está cerrado'; end if;
+  update public.convenios set estado = 'anulado', anulado_at = now(), anulado_motivo = coalesce(trim(p_motivo), '') where id = p_id;
+  update public.gasto_unidades set convenio_id = null where edificio_id = c.edificio_id and convenio_id = p_id;
+  perform privado.recalc_unidad(c.edificio_id, c.depto);
+end $$;
+
 -- Recalcular prorrateo de un período con las alícuotas actuales
 create or replace function public.recalcular_prorrateo(p_periodo text) returns void
 language plpgsql security definer set search_path = public as $$
@@ -733,6 +944,7 @@ begin
   on conflict (edificio_id, periodo, depto) do update set alicuota = excluded.alicuota, monto = excluded.monto;
   delete from public.gasto_unidades g where g.edificio_id = e and g.periodo = p_periodo
     and not exists (select 1 from public.unidades u where u.edificio_id = e and u.depto = g.depto);
+  perform privado.recalc_unidad(e, g.depto) from public.gasto_unidades g where g.edificio_id = e and g.periodo = p_periodo;
 end $$;
 
 -- Encuestas: ¿puede mi unidad votar esta opción ahora?
@@ -951,6 +1163,34 @@ exception when others then
   raise notice 'pg_cron no disponible: los avisos de estacionamiento solo se revisan mientras conserjería tiene la app abierta';
 end $$;
 
+create or replace function privado.clp(m numeric) returns text
+language sql immutable as $$ select '$' || replace(to_char(round(m), 'FM999,999,999,990'), ',', '.') $$;
+
+create or replace function privado.tg_push_pago() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  perform privado.push(new.edificio_id, privado.usuarios_de(new.edificio_id, '{residente,propietario}', new.depto),
+    '💳 Pago registrado', privado.clp(new.monto) || ' · ' || coalesce('gastos comunes ' || new.periodo, 'convenio de pago'), '#gastos');
+  return null;
+end $$;
+drop trigger if exists push_pago on public.pagos;
+create trigger push_pago after insert on public.pagos for each row execute function privado.tg_push_pago();
+
+create or replace function privado.tg_push_convenio() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if tg_op = 'INSERT' then
+    perform privado.push(new.edificio_id, privado.usuarios_de(new.edificio_id, '{residente,propietario}', new.depto),
+      '🤝 Convenio de pago por aceptar', privado.clp(new.monto_total) || ' en ' || new.cuotas || ' cuotas', '#gastos');
+  elsif new.estado is distinct from old.estado and new.estado in ('vigente','anulado') and old.estado = 'propuesto' then
+    perform privado.push(new.edificio_id, privado.usuarios_de(new.edificio_id, '{admin}', null, null, auth.uid()),
+      case new.estado when 'vigente' then '🤝 Convenio aceptado' else '🤝 Convenio rechazado' end, 'Depto ' || new.depto || ' · ' || privado.clp(new.monto_total), '#finanzas');
+  end if;
+  return null;
+end $$;
+drop trigger if exists push_convenio on public.convenios;
+create trigger push_convenio after insert or update on public.convenios for each row execute function privado.tg_push_convenio();
+
 drop trigger if exists push_encomienda on public.encomiendas;
 create trigger push_encomienda after insert on public.encomiendas for each row execute function privado.tg_push_encomienda();
 drop trigger if exists push_mensaje on public.mensajes;
@@ -1106,6 +1346,10 @@ alter table public.push_subs      enable row level security;
 alter table public.archivos_por_borrar enable row level security;
 alter table public.estacionamientos enable row level security;
 alter table public.estacionamiento_usos enable row level security;
+alter table public.pagos            enable row level security;
+alter table public.convenios        enable row level security;
+alter table public.convenio_cuotas  enable row level security;
+alter table public.caja_movimientos enable row level security;
 
 -- helper para (re)crear políticas sin errores. Salvo que se indique lo contrario, toda
 -- política queda además limitada a las filas del edificio del usuario.
@@ -1235,6 +1479,19 @@ select public._pol('estacionamiento_usos','eu_sel','select','public.es_staff() o
 select public._pol('estacionamiento_usos','eu_ins','insert','public.mi_rol() in (''conserje'',''admin'')');
 select public._pol('estacionamiento_usos','eu_upd','update','public.mi_rol() in (''conserje'',''admin'')');
 
+-- pagos, convenios y cuotas: comité y administración ven todo; cada unidad, lo suyo.
+-- Los pagos los registra y anula la administración; los convenios se crean y cambian con sus funciones.
+select public._pol('pagos','pag_sel','select','public.mi_rol() in (''comite'',''admin'') or (public.es_residente() and depto = public.mi_depto())');
+select public._pol('pagos','pag_ins','insert','public.es_admin()');
+select public._pol('pagos','pag_upd','update','public.es_admin()');
+select public._pol('convenios','cv_sel','select','public.mi_rol() in (''comite'',''admin'') or (public.es_residente() and depto = public.mi_depto())');
+select public._pol('convenio_cuotas','cc_sel','select','public.mi_rol() in (''comite'',''admin'') or (public.es_residente() and depto = public.mi_depto())');
+-- caja: comité y administración leen; la administración registra
+select public._pol('caja_movimientos','cj_sel','select','public.mi_rol() in (''comite'',''admin'')');
+select public._pol('caja_movimientos','cj_ins','insert','public.es_admin()');
+select public._pol('caja_movimientos','cj_upd','update','public.es_admin()');
+select public._pol('caja_movimientos','cj_del','delete','public.es_admin()');
+
 -- archivos_por_borrar: la administración los lee y los quita de la cola al borrarlos del bucket
 select public._pol('archivos_por_borrar','apb_sel','select','public.es_admin()');
 select public._pol('archivos_por_borrar','apb_del','delete','public.es_admin()');
@@ -1300,7 +1557,7 @@ create policy "fotos_delete" on storage.objects for delete to authenticated usin
 do $$
 declare t text;
 begin
-  foreach t in array array['edificios','empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','estacionamientos','estacionamiento_usos']
+  foreach t in array array['edificios','empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos']
   loop
     begin
       execute format('alter publication supabase_realtime add table public.%I', t);

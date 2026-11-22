@@ -11,6 +11,9 @@ begin
     if n < 1 then raise exception 'filas de % sin migrar', t; end if;
   end loop;
   if (select rol <> 'admin' from usuarios where nombre = 'Admin Antiguo') then raise exception 'se perdió el admin'; end if;
+  if (select count(*) <> 1 or min(monto) <> 900 or min(fecha) <> '2026-10-20' from pagos) or (select not pagado or pagado_monto <> 900 from gasto_unidades) then
+    raise exception 'el cobro marcado como pagado no se convirtió en un pago';
+  end if;
   perform set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-0000000000c2', true);
   set local role authenticated;
   if (select count(*) from gasto_unidades) <> 1 or (select count(*) from mensajes) <> 1 or (select count(*) from encomiendas) <> 1 then

@@ -81,6 +81,53 @@ select t.soy(:'a2');
 select t.ok((select count(*) = 1 and sum(monto) = 600 from gasto_unidades), 'residente ve solo el cobro de su unidad');
 select t.ok((select count(*) = 2 from unidades), 'residente ve unidades de su edificio');
 
+-- ---------- pagos, convenios y caja ----------
+select t.soy(:'a1');
+insert into gastos (periodo, total, publicado, vence) values ('2026-10', 500, true, '2026-10-05');
+select public.recalcular_prorrateo('2026-10');   -- 101: 300 · 102: 200  (2026-11 → 101: 600 · 102: 400)
+select t.soy(:'a2');
+select t.falla($$insert into pagos (depto, periodo, monto) values ('101', '2026-11', 100)$$, 'un residente registra su propio pago');
+select t.soy(:'a1');
+insert into pagos (depto, periodo, monto, medio, referencia) values ('101', '2026-11', 200, 'transferencia', 'TRX-1') returning id as pago1 \gset
+select t.ok((select pagado_monto = 200 and not pagado from gasto_unidades where periodo = '2026-11' and depto = '101'), 'abono parcial');
+select t.falla($$insert into pagos (depto, periodo, monto) values ('101', '2026-11', 401)$$, 'pago mayor que el saldo');
+select t.falla($$insert into pagos (depto, periodo, monto) values ('999', '2026-11', 10)$$, 'pago a una unidad sin cobro');
+insert into pagos (depto, periodo, monto) values ('101', '2026-11', 400);
+select t.ok((select pagado and pagado_monto = 600 and pagado_at is not null from gasto_unidades where periodo = '2026-11' and depto = '101'), 'al completar el monto queda pagado');
+select t.falla(format($$update pagos set monto = 1 where id = %L returning 1$$, :'pago1'), 'editar un pago');
+update pagos set anulado = true, anulado_motivo = 'Transferencia rechazada', monto = 1 where id = :'pago1';
+select t.ok((select anulado and monto = 200 from pagos where id = :'pago1') and (select not pagado and pagado_monto = 400 from gasto_unidades where periodo = '2026-11' and depto = '101'), 'anular un pago revierte el cobro sin alterar el registro');
+-- convenio de la unidad 102 por sus dos períodos (200 + 400)
+select t.falla($$select public.crear_convenio('102', array['2026-10','2099-01'], 3, '2026-12-05')$$, 'convenio con un período inexistente');
+select public.crear_convenio('102', array['2026-10','2026-11'], 3, '2026-12-05', 'Sin intereses') as conv \gset
+select t.ok((select monto_total = 600 and estado = 'propuesto' from convenios where id = :'conv') and (select string_agg(monto::int || '@' || vence, ' ' order by n) = '200@2026-12-05 200@2027-01-05 200@2027-02-05' from convenio_cuotas where convenio_id = :'conv'), 'el convenio suma la deuda y la divide en cuotas mensuales');
+select t.falla($$select public.crear_convenio('102', array['2026-11'], 2, '2026-12-05')$$, 'un período en dos convenios');
+select t.falla($$insert into pagos (depto, periodo, monto) values ('102', '2026-10', 50)$$, 'pago directo a un período en convenio');
+select t.falla(format($$insert into pagos (depto, convenio_id, monto) values ('102', %L, 50)$$, :'conv'), 'pago a un convenio sin aceptar');
+select t.soy(:'a2');
+select t.ok((select count(*) = 0 from convenios) and (select count(*) = 1 from pagos where not anulado), 'un residente no ve convenios ni pagos de otra unidad');
+select t.falla(format($$select public.aceptar_convenio(%L)$$, :'conv'), 'aceptar el convenio de otra unidad');
+select t.soy(:'a3'); select public.aceptar_convenio(:'conv');
+select t.ok((select estado = 'vigente' and aceptado_por = :'a3' from convenios where id = :'conv'), 'la unidad acepta su convenio');
+select t.soy(:'a1');
+insert into pagos (depto, convenio_id, monto) values ('102', :'conv', 250);
+select t.ok((select string_agg(pagado_monto::int::text, ',' order by n) = '200,50,0' from convenio_cuotas where convenio_id = :'conv'), 'lo abonado cubre las cuotas en orden');
+select t.ok((select string_agg(periodo || ':' || pagado_monto::int || ':' || pagado, ' ' order by periodo) = '2026-10:200:true 2026-11:50:false' from gasto_unidades where depto = '102'), 'y salda los períodos del más antiguo al más nuevo');
+select t.falla(format($$insert into pagos (depto, convenio_id, monto) values ('102', %L, 351)$$, :'conv'), 'abono mayor que el saldo del convenio');
+insert into pagos (depto, convenio_id, monto) values ('102', :'conv', 350);
+select t.ok((select estado = 'cumplido' from convenios where id = :'conv') and (select bool_and(pagado) from gasto_unidades where depto = '102'), 'pagado completo, el convenio queda cumplido');
+-- convenio anulado: lo abonado se conserva
+select public.crear_convenio('101', array['2026-10','2026-11'], 2, '2026-12-05') as conv2 \gset
+select public.aceptar_convenio(:'conv2');
+insert into pagos (depto, convenio_id, monto) values ('101', :'conv2', 100);
+select public.anular_convenio(:'conv2', 'No pagó la segunda cuota');
+select t.ok((select string_agg(periodo || ':' || pagado_monto::int || ':' || (convenio_id is null), ' ' order by periodo) = '2026-10:100:true 2026-11:400:true' from gasto_unidades where depto = '101'), 'anular un convenio conserva lo abonado y libera los períodos');
+insert into caja_movimientos (tipo, fecha, categoria, monto) values ('egreso', '2026-11-10', 'Remuneraciones', 300);
+select t.soy(:'a2'); select t.ok((select count(*) = 0 from caja_movimientos), 'un residente no ve la caja');
+select t.falla($$insert into caja_movimientos (tipo, categoria, monto) values ('ingreso', 'x', 1)$$, 'un residente registra movimientos de caja');
+select t.soy(:'b1'); select t.ok((select count(*) = 0 from pagos) and (select count(*) = 0 from convenios) and (select count(*) = 0 from caja_movimientos), 'otro edificio no ve pagos, convenios ni caja');
+select t.soy(:'a2');
+
 -- ---------- mensajes ----------
 insert into conversaciones (id, canal, depto) values ('conserjeria_101', 'conserjeria', '101');
 insert into mensajes (conv_id, texto, uid, rol) values ('conserjeria_101', 'Hola desde A', :'a2', 'residente');
