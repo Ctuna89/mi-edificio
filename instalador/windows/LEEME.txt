@@ -12,5 +12,7 @@ Para actualizar, instala la versión nueva encima: se conservan los datos.
 
 Para usar otro puerto, crea en esa carpeta de datos un archivo puerto.txt con el número y reinicia.
 
+Incluye Node.js (licencia MIT) y cloudflared de Cloudflare (licencia Apache 2.0).
+
 Documentación, respaldo en la nube y acceso desde internet:
   https://github.com/Ctuna89/mi-edificio

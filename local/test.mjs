@@ -11,9 +11,21 @@ import { fileURLToPath } from 'node:url';
 const AQUI = path.dirname(fileURLToPath(import.meta.url));
 const DATOS = fs.mkdtempSync(path.join(os.tmpdir(), 'mi-edificio-'));
 const PUERTO = 8900 + Math.floor(Math.random() * 90), B = `http://localhost:${PUERTO}`;
+// Un "cloudflared" de mentira, que escribe lo mismo que el real: así se prueba cómo lo maneja el servidor
+const FALSO = path.join(DATOS, 'cloudflared-de-prueba');
+fs.writeFileSync(FALSO, `#!/usr/bin/env node
+const fs = require('fs'), a = process.argv.slice(2), e = m => process.stderr.write(new Date().toISOString() + ' ' + m + '\\n');
+fs.writeFileSync(__filename + '.pid', String(process.pid));
+const conectar = () => { setTimeout(() => e('INF Registered tunnel connection connIndex=0 protocol=quic'), 200); setInterval(() => {}, 1000); };
+if (a.includes('--url')) { e('INF |  https://prueba-de-tunel-falso.trycloudflare.com                             |'); conectar(); }
+else if ((process.env.TUNNEL_TOKEN || '').startsWith('eyJbueno')) conectar();
+else { e('ERR Unauthorized: Invalid tunnel secret event=0'); process.exit(1); }
+`, { mode: 0o755 });
+const hasta = async (fn, seg = 15) => { for (let i = 0; i < seg * 5; i++) { const x = await fn(); if (x) return x; await new Promise(r => setTimeout(r, 200)); } return null; };
+const vive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
 let proc;
 const levantar = () => new Promise((ok, mal) => {
-  proc = spawn(process.execPath, [path.join(AQUI, 'server.mjs')], { env: { ...process.env, MI_EDIFICIO_DATOS: DATOS, PUERTO: String(PUERTO) }, stdio: ['ignore', 'pipe', 'pipe'] });
+  proc = spawn(process.execPath, [path.join(AQUI, 'server.mjs')], { env: { ...process.env, MI_EDIFICIO_DATOS: DATOS, PUERTO: String(PUERTO), MI_EDIFICIO_CLOUDFLARED: FALSO }, stdio: ['ignore', 'pipe', 'pipe'] });
   let salida = ''; const ver = d => { salida += d; if (salida.includes('está funcionando')) ok(); };
   proc.stdout.on('data', ver); proc.stderr.on('data', ver); proc.on('exit', c => mal(new Error('el servidor terminó (' + c + '): ' + salida.slice(-500))));
 });
@@ -126,6 +138,25 @@ test('peticiones de otro sitio y avisos de cambios', async () => {
   assert.match(await llego, /data: cambio/); ctl.abort();
 });
 
+test('acceso desde internet: dirección temporal, dirección fija con token, errores y apagado', async () => {
+  const est = async () => (await ana.pedir('/api/tunel/estado')).data, pidFalso = () => Number(fs.readFileSync(FALSO + '.pid', 'utf8'));
+  assert.equal((await rita.pedir('/api/tunel/estado')).estado, 403, 'solo administración');
+  assert.deepEqual([(await est()).modo, (await est()).estado], ['apagado', 'apagado']);
+  assert.equal((await ana.pedir('/api/tunel/configurar', { modo: 'prueba' })).estado, 200);
+  let e = await hasta(async () => { const x = await est(); return x.estado === 'conectado' && x; }); assert.equal(e?.direccion, 'https://prueba-de-tunel-falso.trycloudflare.com', 'toma la dirección temporal que entrega Cloudflare');
+  const pid1 = pidFalso(); assert.ok(vive(pid1));
+  assert.equal((await ana.pedir('/api/tunel/configurar', { modo: 'fijo', token: '', direccion: 'app.miedificio.cl' })).estado, 400, 'la dirección fija exige el token');
+  assert.equal((await ana.pedir('/api/tunel/configurar', { modo: 'fijo', token: 'eyJbueno' + 'A'.repeat(60), direccion: 'no es una dirección' })).estado, 400);
+  const r = await ana.pedir('/api/tunel/configurar', { modo: 'fijo', token: 'cloudflared.exe service install eyJbueno' + 'A'.repeat(60), direccion: 'app.miedificio.cl/' }); assert.equal(r.estado, 200, r.error);
+  assert.ok(r.data.tieneToken && !JSON.stringify(r.data).includes('eyJbueno'), 'el token no vuelve al navegador');
+  e = await hasta(async () => { const x = await est(); return x.estado === 'conectado' && x; }); assert.equal(e?.direccion, 'https://app.miedificio.cl', 'acepta el comando completo pegado y normaliza la dirección');
+  assert.ok(await hasta(() => !vive(pid1)), 'al cambiar de modo se cierra el túnel anterior');
+  await ana.pedir('/api/tunel/configurar', { modo: 'fijo', token: 'eyJmalo' + 'B'.repeat(60), direccion: 'https://app.miedificio.cl' });
+  e = await hasta(async () => { const x = await est(); return x.estado === 'error' && x; }); assert.match(e?.error || '', /rechazó el token/); assert.equal(e.direccion, '');
+  assert.equal((await ana.pedir('/api/tunel/configurar', { modo: 'apagado' })).data.estado, 'apagado');
+  await ana.pedir('/api/tunel/configurar', { modo: 'prueba' }); await hasta(async () => (await est()).estado === 'conectado');   // queda activo para comprobar que vuelve tras reiniciar
+});
+
 test('respaldo cifrado en una carpeta, con aviso si no es de nube, y restauración en un equipo nuevo', async () => {
   const nube = fs.mkdtempSync(path.join(os.tmpdir(), 'me-nube-')), simple = path.join(nube, 'Documentos', 'Respaldo'), deNube = path.join(nube, 'OneDrive', 'Respaldo Mi Edificio');
   assert.equal((await rita.pedir('/api/respaldo/estado')).estado, 403, 'solo administración');
@@ -166,4 +197,5 @@ test('contraseñas: la restablece la administración, y los datos persisten tras
   await bajar(); await levantar();
   assert.equal((await rita.db({ t: 'gasto_unidades', op: 'select' })).data[0].monto, 600, 'sesión y datos siguen ahí');
   assert.equal((await ana.db({ t: 'comunicados', op: 'select' })).data[0].titulo, 'Corte de agua');
+  assert.ok(await hasta(async () => (await ana.pedir('/api/tunel/estado')).data.estado === 'conectado'), 'el acceso desde internet vuelve solo al reiniciar');
 });

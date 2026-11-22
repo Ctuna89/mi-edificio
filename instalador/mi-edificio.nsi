@@ -102,7 +102,7 @@ Section "Acceso directo en el escritorio" SecEscritorio
 SectionEnd
 
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
-  !insertmacro MUI_DESCRIPTION_TEXT ${SecPrincipal} "La app, su servidor y Node.js. No requiere instalar nada más."
+  !insertmacro MUI_DESCRIPTION_TEXT ${SecPrincipal} "La app, su servidor, Node.js y el programa para el acceso desde internet. No requiere instalar nada más."
   !insertmacro MUI_DESCRIPTION_TEXT ${SecInicio} "Recomendado: el servidor parte solo cuando este usuario inicia sesión en Windows, para que la app esté siempre disponible."
   !insertmacro MUI_DESCRIPTION_TEXT ${SecEscritorio} "Un ícono en el escritorio para abrir la app en el navegador."
 !insertmacro MUI_FUNCTION_DESCRIPTION_END
@@ -126,6 +126,7 @@ Section "Uninstall"
       Sleep 500
       Goto borrar_node
     ${EndIf}
+  Delete "$INSTDIR\cloudflared.exe"
   Delete "$INSTDIR\abrir.vbs"
   Delete "$INSTDIR\iniciar.vbs"
   Delete "$INSTDIR\detener.vbs"

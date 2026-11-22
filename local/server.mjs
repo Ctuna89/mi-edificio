@@ -15,6 +15,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { PGlite } from '@electric-sql/pglite';
 import { pgcrypto } from '@electric-sql/pglite/contrib/pgcrypto';
@@ -357,6 +358,51 @@ async function respaldarNube() {
   return r.ultimo;
 }
 
+// --- Acceso desde internet: túnel de Cloudflare ------------------------------------------------
+// El servidor maneja el programa cloudflared, que publica este computador en una dirección HTTPS
+// sin abrir puertos. Dos modos:
+//   prueba → dirección temporal *.trycloudflare.com, sin cuenta (cambia en cada arranque)
+//   fijo   → túnel creado en la cuenta Cloudflare del edificio, con su dominio (se conecta con un token)
+const buscarCloudflared = () => [process.env.MI_EDIFICIO_CLOUDFLARED, path.join(RAIZ, process.platform === 'win32' ? 'cloudflared.exe' : 'cloudflared'), path.join(DATOS, process.platform === 'win32' ? 'cloudflared.exe' : 'cloudflared')].find(f => f && fs.existsSync(f)) || 'cloudflared';
+const tunel = { proc: null, estado: 'apagado', direccion: '', error: '', reintento: null, espera: 15000 };
+const estadoTunel = () => { const t = CFG.tunel || {}; return { modo: t.modo || 'apagado', estado: tunel.estado, direccion: tunel.estado === 'conectado' ? tunel.direccion : '', direccionFija: t.direccion || '', tieneToken: !!t.token, error: tunel.error, puerto: PUERTO }; };
+function detenerTunel() { clearTimeout(tunel.reintento); tunel.reintento = null; const p = tunel.proc; tunel.proc = null; if (p) { p.removeAllListeners('exit'); try { p.kill(); } catch {} } tunel.estado = 'apagado'; tunel.direccion = ''; tunel.error = ''; }
+function iniciarTunel() {
+  detenerTunel(); const t = CFG.tunel || {}; if (!t.modo || t.modo === 'apagado') return;
+  tunel.estado = 'iniciando';
+  const args = t.modo === 'prueba' ? ['tunnel', '--no-autoupdate', '--url', `http://localhost:${PUERTO}`] : ['tunnel', '--no-autoupdate', 'run'];
+  let p;
+  try { p = spawn(buscarCloudflared(), args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...(t.modo === 'fijo' ? { TUNNEL_TOKEN: t.token } : {}) } }); }   // el token va por variable de entorno, no en la línea de comandos
+  catch (e) { tunel.estado = 'error'; tunel.error = e.message; return; }
+  tunel.proc = p; let ultimoError = '';
+  const leer = d => { for (const l of String(d).split(/\r?\n/)) {
+    const u = l.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/); if (u && t.modo === 'prueba') tunel.direccion = u[0];
+    if (/Registered tunnel connection/.test(l)) { tunel.estado = 'conectado'; tunel.error = ''; tunel.espera = 15000; if (t.modo === 'fijo') tunel.direccion = t.direccion || ''; log('Acceso desde internet conectado:', tunel.direccion || '(dirección definida en Cloudflare)'); }
+    else if (/ ERR /.test(l) && !/Failed to fetch features|ICMP/.test(l)) ultimoError = l.replace(/^\S+ ERR\s+/, '').replace(/\s+event=\d+$/, '').slice(0, 300);
+  } };
+  p.stdout.on('data', leer); p.stderr.on('data', leer);
+  p.on('error', e => { if (tunel.proc !== p) return; tunel.proc = null; tunel.estado = e.code === 'ENOENT' ? 'sin-programa' : 'error'; tunel.error = e.code === 'ENOENT' ? '' : e.message; });
+  p.on('exit', () => { if (tunel.proc !== p) return; tunel.proc = null; tunel.estado = 'error'; tunel.direccion = '';
+    tunel.error = /Unauthorized|Invalid tunnel secret|token/i.test(ultimoError) ? 'Cloudflare rechazó el token. Copia de nuevo el token del túnel.'
+      : /no such host|lookup |dial tcp|network is unreachable|timeout/i.test(ultimoError) ? 'Este computador no logró comunicarse con Cloudflare. Revisa su conexión a internet.'
+      : (ultimoError || 'El programa del túnel se cerró.');
+    tunel.reintento = setTimeout(iniciarTunel, tunel.espera); tunel.reintento.unref(); tunel.espera = Math.min(tunel.espera * 2, 300000); });   // se reintenta solo: 15 s, 30 s… hasta cada 5 min
+}
+function configurarTunel({ modo, token, direccion }) {
+  if (!['apagado', 'prueba', 'fijo'].includes(modo)) throw new Fallo('Modo no válido');
+  const t = CFG.tunel || {};
+  if (modo === 'fijo') {
+    // la gente suele pegar el comando completo que muestra Cloudflare: se toma solo el token
+    const tk = (String(token || '').match(/eyJ[A-Za-z0-9_\-=+\/]{40,}/) || [])[0]; if (tk) t.token = tk;
+    if (!t.token) throw new Fallo('Pega el token del túnel (o el comando completo que muestra Cloudflare)');
+    direccion = String(direccion || '').trim().replace(/\/+$/, ''); if (direccion && !/^https?:\/\//i.test(direccion)) direccion = 'https://' + direccion;
+    let u; try { u = new URL(direccion); } catch { throw new Fallo('Escribe la dirección pública que definiste en Cloudflare, por ejemplo https://app.miedificio.cl'); }
+    if (u.protocol !== 'https:' || !u.hostname.includes('.')) throw new Fallo('La dirección pública debe ser https://tu-dominio');
+    t.direccion = u.origin;
+  }
+  t.modo = modo; CFG.tunel = t; guardarCfg(); tunel.espera = 15000; iniciarTunel();
+}
+
 // Cada 5 minutos: plazos de estacionamiento. Una vez al día, a la hora elegida: plazos de conservación
 // y respaldos. Mientras se respalda, la base de datos no atiende otras consultas.
 const diaLocal = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -433,6 +479,12 @@ async function api(req, res, url) {
   if (ruta.startsWith('/api/rpc/')) { const r = await llamar(uid, decodeURIComponent(ruta.slice('/api/rpc/'.length)), cuerpo); if (r.cambia) trasCambio(); return responder(res, 200, { data: r.dato }); }
   if (ruta === '/api/archivos/firmar') return responder(res, 200, { data: await firmar(uid, cuerpo.rutas, cuerpo.seg) });
   if (ruta === '/api/archivos/borrar') return responder(res, 200, { data: await borrar(uid, cuerpo.rutas) });
+  if (ruta.startsWith('/api/tunel/')) {   // solo administración
+    const adm = await como(uid, tx => tx.query(`select public.es_admin() as ok`)); if (!adm.rows[0]?.ok) throw new Fallo('Solo la administración puede gestionar el acceso desde internet', 403);
+    if (ruta === '/api/tunel/configurar') configurarTunel(cuerpo);
+    else if (ruta !== '/api/tunel/estado') throw new Fallo('No encontrado', 404);
+    return responder(res, 200, { data: estadoTunel() });
+  }
   if (ruta.startsWith('/api/respaldo/')) {   // solo administración
     const adm = await como(uid, tx => tx.query(`select public.es_admin() as ok`)); if (!adm.rows[0]?.ok) throw new Fallo('Solo la administración puede gestionar el respaldo', 403);
     if (ruta === '/api/respaldo/configurar') configurarRespaldo(cuerpo);
@@ -473,11 +525,12 @@ servidor.listen(PUERTO, () => {
   console.log(`  En este computador:   http://localhost:${PUERTO}`);
   ips.forEach(ip => console.log(`  En la red del edificio: http://${ip}:${PUERTO}`));
   console.log(`  Datos y respaldos en:  ${DATOS}`);
-  console.log(`  Para que entren desde fuera con HTTPS, ver "Acceso desde internet" en el README.`);
+  console.log(`  Para que entren desde fuera: Administración → Edificio → Acceso desde internet.`);
+  iniciarTunel();
 });
 // Al detenerlo deja un respaldo fresco de la base de datos
 let cerrando = false;
-const cerrar = async () => { if (cerrando) return; cerrando = true; servidor.close(); oyentes.forEach(r => r.end()); try { log('Respaldo al cerrar:', await respaldar()); await respaldarNube(); } catch (e) { log('respaldo:', e.message); } try { await db.close(); } catch {} fs.rmSync(path.join(DATOS, 'servidor.pid'), { force: true }); process.exit(0); };
+const cerrar = async () => { if (cerrando) return; cerrando = true; detenerTunel(); servidor.close(); oyentes.forEach(r => r.end()); try { log('Respaldo al cerrar:', await respaldar()); await respaldarNube(); } catch (e) { log('respaldo:', e.message); } try { await db.close(); } catch {} fs.rmSync(path.join(DATOS, 'servidor.pid'), { force: true }); process.exit(0); };
 process.on('SIGINT', cerrar); process.on('SIGTERM', cerrar);
 // En Windows no llegan esas señales: "lanzar.mjs detener" deja un archivo "detener" en la carpeta de datos
 const bandera = path.join(DATOS, 'detener'); fs.rmSync(bandera, { force: true });

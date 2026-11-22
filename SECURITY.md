@@ -14,6 +14,7 @@ No abras un issue público. Usa **Security → Report a vulnerability** en GitHu
   - La app solo puede nombrar tablas y funciones del esquema `public`; los nombres se validan y los valores van siempre como parámetros.
   - Las peticiones que cambian datos deben venir del mismo origen.
 - **Respaldo en la nube**: cada archivo sale del computador cifrado con AES-256-GCM, con una llave derivada (scrypt) de la contraseña del respaldo. La nube solo ve archivos cifrados y nombres de ruta sin datos personales.
+- **Acceso desde internet**: el servidor lanza `cloudflared` y le pasa el token del túnel por variable de entorno; el token se guarda en `local/datos/config.json` y nunca vuelve al navegador. Con el túnel activo, el tráfico pasa descifrado por Cloudflare, que termina el HTTPS.
 - **Archivos**: se guardan en disco y se entregan solo con un enlace firmado de 1 hora, que el servidor da a quien puede leer ese archivo (`puede_ver_archivo()`). Lo subido nunca se ejecuta: se sirve en modo aislado (`sandbox`) y, salvo imágenes y PDF, como descarga.
 - **Navegador**: todo dato se escapa antes de insertarse en el HTML y la página aplica una política CSP sin scripts en línea. En modo local no carga código de terceros.
 
@@ -33,7 +34,7 @@ No abras un issue público. Usa **Security → Report a vulnerability** en GitHu
 ## Lista de verificación para quien opera una instalación
 
 1. El computador: sistema actualizado, sesión con contraseña, sin uso compartido para navegar o instalar programas.
-2. Publica con HTTPS (ver "Acceso desde internet" en el README) y comparte solo esa dirección.
+2. Activa el acceso desde internet con una dirección fija y comparte solo esa dirección. La dirección temporal es para probar: cualquiera que la conozca llega a la pantalla de inicio de sesión, igual que con la fija.
 3. Ten al menos dos cuentas de administración.
 4. Configura el respaldo en la nube, guarda su contraseña fuera del computador y prueba una restauración. La llave del respaldo queda en `local/datos/config.json` para poder cifrar cada noche: quien acceda al computador puede leerla.
 5. No compartas `local/datos/config.json`.

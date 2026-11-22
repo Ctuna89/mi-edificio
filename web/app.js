@@ -315,10 +315,12 @@ VIEWS.inicio = function(){
   setMain(`<h1>Hola, ${esc(S.me.nombre.split(' ')[0])}</h1>
   ${setupPend?`<div class="note">Falta terminar la configuración inicial del edificio. <a href="#" id="bWizHome">Continuar con el asistente</a></div>`:''}
   ${PUSH_KEY&&pushOk()&&Notification.permission==='default'?`<div class="info">🔔 <a href="#perfil">Activa las notificaciones</a> para enterarte de encomiendas, mensajes y aprobaciones.</div>`:''}
-  <div id="homeResp"></div>
+  <div id="homeTun"></div><div id="homeResp"></div>
   <div class="grid">${mods.map(m=>`<a class="tile" href="#${m.id}" data-tile="${m.id}"><span class="ic">${m.ic}</span><b>${m.t}</b><small>${m.d||''}</small></a>`).join('')}</div>
   <h2>Últimos comunicados</h2><div id="homeCom" class="list"><div class="empty">Cargando…</div></div>`);
   $('#bWizHome')?.addEventListener('click',e=>{ e.preventDefault(); asistente(); });
+  if(CFG.LOCAL && realRole()==='admin') sb.local.tunel.estado().then(({data:e})=>{ const el=$('#homeTun'); if(!el||!e) return; S.dirPublica=e.estado==='conectado'&&e.direccion?e.direccion+'/':'';
+    el.innerHTML=e.modo==='apagado'?'<div class="note">La app solo se puede usar dentro del edificio. <a href="#admin">Activa el acceso desde internet</a>.</div>':e.estado==='error'||e.estado==='sin-programa'?'<div class="err">El acceso desde internet no está funcionando. <a href="#admin">Revisar</a>.</div>':''; });
   if(CFG.LOCAL && realRole()==='admin') sb.local.respaldo.estado().then(({data:e})=>{ const el=$('#homeResp'); if(!el||!e) return; const viejo=e.ultimo&&Date.now()-new Date(e.ultimo.fecha)>3*86400000;
     el.innerHTML=!e.configurado?'<div class="note">Los respaldos solo quedan en este computador. <a href="#admin">Configura el respaldo en la nube</a>.</div>':e.ultimo&&!e.ultimo.ok?'<div class="err">El último respaldo en la nube falló. <a href="#admin">Revisar</a>.</div>':viejo?'<div class="note">No hay un respaldo en la nube desde hace más de 3 días. <a href="#admin">Revisar</a>.</div>':''; });
   if(setupPend && !S._wiz){ S._wiz=true; asistente(); }   // una vez por sesión
@@ -973,6 +975,34 @@ function detalleOT(o){
   }catch(err){ toast('Error: '+errMsg(err)); } });
 }
 
+// ACCESO DESDE INTERNET (solo instalación local)
+// El servidor maneja un túnel de Cloudflare: una dirección temporal para probar, o una fija con el
+// dominio del edificio. Se usa en Administración y en el asistente.
+function tunelUI(el, alCambiar){
+  let sondeo=null;
+  const dibujar=e=>{ if(!document.body.contains(el)) return; S.dirPublica=e.estado==='conectado'&&e.direccion?e.direccion+'/':'';
+    const estado=e.estado==='conectado'?`<div class="info">La app está publicada en <b>${esc(e.direccion||'la dirección definida en Cloudflare')}</b>${e.direccion?` <button type="button" class="btn sec sm" data-copiar="${esc(e.direccion)}">Copiar</button>`:''}</div>${e.modo==='prueba'?'<div class="note">Es una dirección temporal: cambia cada vez que se reinicia el servidor o el computador, y Cloudflare no garantiza que esté siempre disponible. Sirve para probar; para el uso diario configura una dirección fija.</div>':''}`
+      :e.estado==='iniciando'?'<div class="info">Conectando con Cloudflare…</div>'
+      :e.estado==='sin-programa'?'<div class="err">Falta el programa <code>cloudflared</code> en este computador. En Windows viene con el instalador de Mi Edificio; en Mac o Linux instálalo desde developers.cloudflare.com y vuelve a intentarlo.</div>'
+      :e.estado==='error'?`<div class="err">No se pudo conectar: ${esc(e.error||'error desconocido')} Se reintenta automáticamente; revisa que este computador tenga internet.</div>`
+      :'<div class="note">Hoy la app solo funciona en este computador y en la red del edificio. Para que residentes y conserjes entren desde sus teléfonos, y para usar la cámara y las notificaciones, necesita una dirección de internet.</div>';
+    el.innerHTML=`${estado}
+      ${e.modo==='prueba'?'':`<div class="row wrap" style="margin-bottom:10px"><button type="button" class="btn ${e.modo==='fijo'?'sec':''}" data-tun="prueba">Probar con una dirección temporal</button><span class="small muted">Sin cuenta ni dominio. Lista en unos segundos.</span></div>`}
+      <details ${e.modo==='fijo'?'open':''}><summary>Dirección fija con el dominio del edificio (recomendada)</summary>
+      <ol class="small" style="padding-left:20px;line-height:1.7"><li>Crea una cuenta gratuita en <b>cloudflare.com</b> y agrega tu dominio (comprarlo cuesta unos US$10 al año).</li><li>En el panel, entra a <b>Zero Trust → Networks → Tunnels</b> y crea un túnel de tipo <b>Cloudflared</b>.</li><li>Cloudflare muestra un comando con un token largo que empieza con <code>eyJ</code>. Cópialo y pégalo abajo; no hace falta ejecutarlo.</li><li>En <b>Public Hostname</b> elige la dirección (por ejemplo <code>app.miedificio.cl</code>) y como servicio <code>http://localhost:${e.puerto}</code>.</li></ol>
+      <label class="f"><span>Token del túnel${e.tieneToken?' (ya guardado; vacío = mantener)':''}</span><input type="password" name="tk" autocomplete="off" placeholder="eyJ…  o el comando completo"></label>
+      <label class="f"><span>Dirección pública que elegiste</span><input type="text" name="dir" value="${esc(e.direccionFija)}" placeholder="https://app.miedificio.cl" autocomplete="off" spellcheck="false"></label>
+      <button type="button" class="btn ${e.modo==='fijo'?'sec':''}" data-tun="fijo">${e.modo==='fijo'?'Volver a conectar':'Conectar dirección fija'}</button></details>
+      ${e.modo!=='apagado'?'<div style="margin-top:12px"><button type="button" class="btn sec sm" data-tun="apagado">Desactivar el acceso desde internet</button></div>':''}`;
+    alCambiar?.(e); clearTimeout(sondeo); if(e.estado==='iniciando') sondeo=setTimeout(cargar,2000); };
+  const cargar=()=>q(sb.local.tunel.estado()).then(dibujar,err=>{ if(document.body.contains(el)) el.innerHTML=`<div class="err">${esc(errMsg(err))}</div>`; });
+  if(!el._tun){ el._tun=true; el.addEventListener('click', async ev=>{ const c=ev.target.closest('[data-copiar]'), b=ev.target.closest('[data-tun]');
+    if(c){ try{ await navigator.clipboard.writeText(c.dataset.copiar); toast('Dirección copiada'); }catch(e){ toast(c.dataset.copiar); } return; } if(!b) return;
+    if(b.dataset.tun==='apagado' && !await confirmBox('Nadie podrá entrar desde fuera del edificio hasta que lo vuelvas a activar. ¿Desactivar?')) return;
+    busy(b,true,'Un momento…'); try{ dibujar(await q(sb.local.tunel.configurar({modo:b.dataset.tun, token:$('[name=tk]',el)?.value||'', direccion:$('[name=dir]',el)?.value||''}))); }catch(err){ toast(errMsg(err)); busy(b,false); } }); }
+  cargar();
+}
+
 // RESPALDO EN LA NUBE (solo instalación local)
 // El servidor deja cada día una copia cifrada en una carpeta del computador; si esa carpeta es de
 // OneDrive, Google Drive u otra nube, su app la sube sola. Se usa en Administración y en el asistente.
@@ -1006,7 +1036,7 @@ const ESPACIOS_EJ=[
 const leerUnidades = txt => txt.split('\n').map(l=>l.trim()).filter(Boolean).map(l=>{ const [d,a,p]=l.split(/[;\t]/.test(l)?/[;\t]/:','); return d&&d.trim()?{edificio_id:S.me.edificio_id, depto:d.trim(), alicuota:Number(String(a||'0').trim().replace(',','.'))||0, prop:(p||'').trim()}:null; }).filter(Boolean);   // con ; o tabulador, la coma es decimal (39,5)
 function asistente(i=0){
   const c=S.cfg||{}; const upd=p=>q(T('edificios').update({...p, actualizado:now()}).eq('id',c.id));
-  const inv=location.origin+location.pathname;
+  const inv=S.dirPublica||location.origin+location.pathname;   // con acceso desde internet, se invita con esa dirección
   const nUn=Object.keys(S.unidades).length, suma=Object.values(S.unidades).reduce((a,u)=>a+(Number(u.alicuota)||0),0), nEst=Object.keys(S.estac).length;
   const PASOS=[
     {t:'Tu edificio', d:'Estos datos aparecen en la app y en los documentos que se exportan.',
@@ -1036,6 +1066,8 @@ function asistente(i=0){
       h:()=>`<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 12px">${RETENCION.map(([k,t])=>`<label class="f"><span>${t}</span><input type="number" name="ret_${k}" min="1" max="240" placeholder="Indefinido" value="${Number(c.retencion?.[k])||''}"></label>`).join('')}</div>
         <label class="f"><span>Aviso de privacidad (vacío = texto por defecto)</span><textarea name="privacidad" placeholder="Quién es responsable de los datos, para qué se usan, por cuánto tiempo se guardan y cómo ejercer los derechos de acceso, rectificación y eliminación.">${esc(c.privacidad||'')}</textarea></label>`,
       g:d=>{ const retencion={}; RETENCION.forEach(([k])=>{ const x=Math.floor(Number(d['ret_'+k])); if(x>0) retencion[k]=x; }); return upd({retencion, privacidad:d.privacidad.trim()}); }},
+    ...(CFG.LOCAL?[{t:'Acceso desde internet', d:'Para que tu comunidad entre desde sus teléfonos, la app necesita una dirección de internet. Puedes probar ahora con una temporal y dejar la definitiva para después, en Administración → Edificio.',
+      h:()=>'<div id="wTun" class="small muted">Consultando…</div>', ini:m=>tunelUI($('#wTun',m)), g:()=>{}}]:[]),
     ...(CFG.LOCAL?[{t:'Respaldo en la nube', d:'Todo lo de tu edificio vive en este computador. Para no perderlo si falla, deja una copia en una nube. Puedes saltar este paso y hacerlo después en Administración → Edificio.',
       h:()=>'<div id="wResp" class="small muted">Buscando carpetas de nube en este computador…</div>',
       ini:async m=>{ try{ const e=await q(sb.local.respaldo.estado()); m._resp=e; const el=$('#wResp',m); if(!el) return; el.className=''; el.innerHTML=(e.configurado?respaldoEstado(e):'')+respaldoCampos(e); respaldoEventos(el); }catch(err){ const el=$('#wResp',m); if(el) el.innerHTML=`<div class="err">${esc(errMsg(err))}</div>`; } },
@@ -1079,6 +1111,7 @@ ADMIN.edificio = function(el){
   <label class="f"><span>Aviso de privacidad (se muestra al registrarse y en Mi cuenta; vacío = texto por defecto)</span><textarea name="privacidad" placeholder="Quién es responsable de los datos, para qué se usan, por cuánto tiempo se guardan y cómo ejercer los derechos de acceso, rectificación y eliminación.">${esc(c.privacidad||'')}</textarea></label>
   <label class="f"><span>Color principal</span><input type="color" name="color" value="${esc(c.color||'#1e5eff')}" style="width:60px;height:36px;padding:2px;border:1px solid var(--bd);border-radius:8px"></label>
   <button class="btn">Guardar cambios</button></form></div>
+  ${CFG.LOCAL?'<div class="card"><h3>Acceso desde internet</h3><div id="tunBody" class="small muted">Consultando…</div></div>':''}
   ${CFG.LOCAL?'<div class="card"><h3>Respaldo en la nube</h3><div id="respBody" class="small muted">Cargando…</div></div>':''}
   <div class="card"><h3>Conservación de datos</h3><p class="small muted">Define por cuántos meses se guarda cada tipo de dato. Lo que supere el plazo se borra en forma definitiva, cada día. Vacío = se conserva indefinidamente.</p>
   <form id="fRet"><div class="grid2">${RETENCION.map(([k,t,d])=>`<label class="f"><span>${t}</span><input type="number" name="${k}" min="1" max="240" placeholder="Indefinido" value="${Number(c.retencion?.[k])||''}"><span style="font-weight:400;margin-top:4px">${d}</span></label>`).join('')}</div>
@@ -1088,7 +1121,7 @@ ADMIN.edificio = function(el){
   $('#fRet',el).addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); const retencion={}; RETENCION.forEach(([k])=>{ const n=Math.floor(Number(d[k])); if(n>0) retencion[k]=n; }); try{ await q(T('edificios').update({retencion}).eq('id',S.cfg.id)); toast('Plazos guardados'); }catch(err){ toast('Error: '+errMsg(err)); } });
   $('#bDep',el).addEventListener('click', async e=>{ if(!await confirmBox('Se borrarán en forma definitiva los datos que superen los plazos guardados. ¿Continuar?')) return; try{ const r=await q(sb.rpc('depurar_ahora'))||{}; const n=Object.values(r).reduce((a,b)=>a+Number(b),0); toast(n?(n===1?'Se borró 1 registro':`Se borraron ${n} registros`):'No había datos fuera de plazo'); limpiarArchivos(); }catch(err){ toast('Error: '+errMsg(err)); } });
   $('#bWiz',el).addEventListener('click',()=>asistente());
-  if(CFG.LOCAL) tarjetaRespaldo();
+  if(CFG.LOCAL){ tarjetaRespaldo(); tunelUI($('#tunBody',el), ()=>{ const i=$('#invUrl',el); if(i) i.value=S.dirPublica||location.origin+location.pathname; }); }
   let newLogo=null;
   $('#bLogo',el).addEventListener('click',()=>$('#logoIn',el).click());
   $('#logoIn',el).addEventListener('change', async e=>{ const f=e.target.files[0]; if(!f) return; try{ toast('Subiendo logo…'); newLogo=await uploadImage(f,'logo'); $('#logoPrev',el).innerHTML=`<img data-f="${esc(newLogo)}">`; toast('Logo listo, guarda los cambios'); }catch(err){ toast('Error: '+errMsg(err)); } });
