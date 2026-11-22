@@ -39,7 +39,7 @@ Cosas que conviene saber:
 - Si el Firewall pregunta por el acceso a la red, permítelo en redes privadas para que otros equipos del edificio puedan entrar.
 - Quedan en el menú Inicio **Abrir Mi Edificio**, **Detener Mi Edificio** y **Desinstalar**. El servidor corre en segundo plano, sin ventana.
 - "Iniciar junto con Windows" lo arranca cuando **ese usuario inicia sesión**. Si el computador se reinicia y nadie entra a la sesión, la app no parte: configura el inicio de sesión automático o deja la sesión abierta.
-- Los datos quedan en `%LOCALAPPDATA%\MiEdificio\datos`. **Actualizar** es instalar la versión nueva encima; **desinstalar** no borra los datos.
+- Los datos quedan en `%LOCALAPPDATA%\MiEdificio\datos`. **Desinstalar** no borra los datos. Para actualizar, ver "Actualizar" más abajo.
 
 ### Mac o Linux
 
@@ -100,6 +100,24 @@ Todo lo de tu edificio está en la carpeta de datos: `%LOCALAPPDATA%\MiEdificio\
 | `archivos/` | Fotos y documentos subidos |
 | `respaldos/` | Copia local de la base de datos de cada día (últimos 14), a la hora del respaldo, y una al detener el servidor |
 | `config.json` | Claves propias de esta instalación (no lo compartas) |
+
+### Actualizar
+
+La app revisa una vez al día si hay una versión nueva y le avisa a la administración en Inicio y en **Administración → Edificio → Versión y actualizaciones**.
+
+- **Windows (con el instalador)**: botón **Actualizar ahora**. Descarga el instalador de la versión nueva, comprueba su suma de verificación, detiene el servidor, reemplaza el programa y lo vuelve a iniciar. La app deja de responder unos minutos. También sirve instalar la versión nueva encima, a mano.
+- **Mac o Linux**: detén el servidor, reemplaza los archivos del repositorio por los de la versión nueva (sin tocar `local/datos`) e inícialo.
+
+Cómo se protegen los datos, en cualquier sistema:
+
+1. **Copia previa**: antes de que una versión distinta toque la base de datos, se guarda una copia completa en `respaldos/antes-de-actualizar-…` (se conservan las 5 últimas).
+2. **Todo o nada**: los cambios de la base de datos se aplican en una sola operación. Si algo falla, se deshacen completos y los datos quedan exactamente como estaban.
+3. **Si falla, la app no arranca a medias**: muestra una página de mantención que, abierta en el computador del edificio, explica qué pasó y qué versión volver a instalar para seguir funcionando como antes. Desde fuera solo se ve un aviso general.
+4. **No se puede retroceder por accidente**: la base recuerda qué versión la actualizó. Un programa más antiguo no la abre; indica qué versión instalar.
+
+Para volver a una versión anterior después de una actualización que sí funcionó, hay que restaurar la copia previa (se pierde lo hecho desde entonces): detén el servidor, mueve la carpeta `db/`, instala la versión anterior e inicia con `--restaurar` y esa copia.
+
+Límite: la actualización con un clic confía en lo publicado en GitHub. La suma de verificación detecta descargas dañadas, no una publicación maliciosa; el instalador no está firmado.
 
 ### Respaldo en la nube
 
@@ -246,13 +264,13 @@ Este modo comparte el esquema y sus pruebas con el modo local, pero **nunca se h
 
 ## Pruebas
 
-- **Permisos y reglas** (`supabase/tests/run.sh`): aplica el esquema en un Postgres y verifica instalación nueva, re-ejecución, permisos por rol y unidad, pagos y convenios, encuestas, avisos, archivos y migración desde versiones anteriores.
+- **Permisos, reglas y actualizaciones** (`supabase/tests/run.sh`): aplica el esquema en un Postgres y verifica instalación nueva, re-ejecución, permisos por rol y unidad, pagos y convenios, encuestas, avisos y archivos. Además actualiza desde el esquema de **cada versión publicada** (`supabase/tests/versiones/`), con datos, y comprueba que no se pierde nada.
 
   ```bash
   PGHOST=localhost PGUSER=postgres supabase/tests/run.sh
   ```
 
-- **Servidor local** (`local/test.mjs`): levanta el servidor con datos temporales y lo usa por HTTP: cuentas, consultas, permisos, archivos, avisos de cambios y persistencia.
+- **Servidor local** (`local/test.mjs`): levanta el servidor con datos temporales y lo usa por HTTP: cuentas, consultas, permisos, archivos, avisos de cambios, respaldo, persistencia, y que una actualización fallida no toque los datos.
 
   ```bash
   cd local && npm install && npm test

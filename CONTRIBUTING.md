@@ -32,6 +32,23 @@ Abre `http://localhost:8080`. Los datos quedan en `local/datos` (fuera del repos
 3. En el PR indica qué roles probaste (residente, conserje, comité, admin, mantención) y, si tocaste `schema.sql`, que lo ejecutaste dos veces seguidas sin errores.
 4. La CI verifica la sintaxis de los archivos JS y ejecuta las pruebas del esquema y del servidor local; debe pasar.
 
+## Cambios en la base de datos
+
+Las instalaciones se actualizan solas al arrancar una versión nueva, así que todo cambio de `schema.sql` tiene que poder aplicarse sobre los datos de cualquier versión ya publicada:
+
+- Agrega, no reemplaces: columnas nuevas con valor por defecto, `create … if not exists`, `alter table … add column if not exists`. Si hay que transformar datos, hazlo en un bloque `do $$ … $$` que detecte si ya se hizo.
+- No borres ni renombres columnas con datos sin migrarlos antes en el mismo script.
+- El script se ejecuta dentro de una transacción: no uses nada que no pueda ir en una (`create index concurrently`, `vacuum`).
+- `supabase/tests/run.sh` actualiza desde el esquema congelado de cada versión publicada. Si tu cambio afecta datos existentes, agrega el caso a `supabase/tests/versiones/datos-<versión>.sql` y `revisar-<versión>.sql`.
+
+**Al publicar una versión**, en el mismo commit que sube `VERSION`:
+
+```bash
+supabase/tests/congelar.sh
+```
+
+Guarda el esquema de esa versión en `supabase/tests/versiones/`, para que las versiones futuras se prueben contra ella.
+
 ## Pruebas
 
 Si tocas `supabase/schema.sql`, ejecuta las pruebas en un Postgres local (16 o superior) y agrega casos a `supabase/tests/rls.sql` para los permisos nuevos:

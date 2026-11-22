@@ -28,6 +28,7 @@ No abras un issue público. Usa **Security → Report a vulnerability** en GitHu
 - **Los Documentos los lee todo residente del edificio** (no las empresas de mantención).
 - **El historial de incidencias y órdenes lo escribe el navegador** de quien tiene permiso de edición; no es un registro de auditoría inalterable.
 - **Comité y conserjería ven nombre, unidad y teléfono de todos los usuarios.**
+- **Las actualizaciones confían en GitHub.** La actualización con un clic descarga el instalador solo desde las publicaciones del repositorio y comprueba su suma, lo que detecta descargas dañadas pero no una publicación hecha por alguien que tomara control del repositorio.
 - **El instalador de Windows no está firmado.** Windows advierte al abrirlo y no hay forma automática de comprobar que no fue alterado: descárgalo solo desde Releases de este repositorio.
 - PGlite, la base de datos embebida, es un proyecto joven.
 
