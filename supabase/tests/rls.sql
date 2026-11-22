@@ -1,4 +1,4 @@
--- Pruebas de aislamiento entre edificios, encuestas y notificaciones.
+-- Pruebas de permisos por rol y unidad, pagos, encuestas, avisos y archivos.
 -- Requiere stubs.sql + schema.sql ya aplicados en una base vacía. Falla con error si algo no calza.
 \set ON_ERROR_STOP on
 \set a1 '00000000-0000-0000-0000-0000000000a1'
@@ -6,7 +6,6 @@
 \set a3 '00000000-0000-0000-0000-0000000000a3'
 \set a4 '00000000-0000-0000-0000-0000000000a4'
 \set b1 '00000000-0000-0000-0000-0000000000b1'
-\set b2 '00000000-0000-0000-0000-0000000000b2'
 
 create schema if not exists t;
 grant usage on schema t to authenticated, anon;
@@ -23,7 +22,7 @@ create or replace function t.soy(u uuid) returns void language sql as $$
   select set_config('request.jwt.claim.sub', u::text, false), set_config('role', 'authenticated', false)
 $$;
 
-insert into auth.users (id) values (:'a1'),(:'a2'),(:'a3'),(:'a4'),(:'b1'),(:'b2');
+insert into auth.users (id) values (:'a1'),(:'a2'),(:'a3'),(:'a4'),(:'b1');   -- b1: cuenta sin perfil
 
 -- ---------- creación de edificios ----------
 select t.soy(:'a1');
@@ -32,20 +31,16 @@ select public.crear_edificio('Torre A', 'Ana Admin') as ea \gset
 select t.ok((select rol = 'admin' and estado = 'activo' from usuarios where id = :'a1'), 'quien crea el edificio es admin activo');
 select t.ok((select configurado_at is null from edificios), 'un edificio nuevo parte con el asistente pendiente');
 select t.soy(:'b1');
-select t.ok(not public.puede_crear_edificio(), 'el segundo edificio está cerrado por defecto');
-select t.falla($$select public.crear_edificio('Torre B','Beto')$$, 'crear edificio con creación cerrada');
-select t.ok((select count(*) = 1 from public.buscar_edificio()), 'con un solo edificio se encuentra sin código');
+select t.ok(not public.puede_crear_edificio(), 'solo se puede crear un edificio por instalación');
+select t.falla($$select public.crear_edificio('Torre B','Beto')$$, 'crear un segundo edificio');
+select t.ok((select nombre = 'Torre A' from public.buscar_edificio()), 'una cuenta nueva encuentra el edificio para pedir acceso');
+select t.ok((select count(*) = 0 from usuarios) and (select count(*) = 0 from edificios) and (select count(*) = 0 from unidades), 'una cuenta sin perfil no ve nada');
 reset role;
-update plataforma set creacion_abierta = true, push_url = 'https://ejemplo.test/push', push_secret = 's3creto';
-select t.soy(:'b1');
-select public.crear_edificio('Torre B', 'Beto Admin') as eb \gset
-reset role;
-select codigo as ca from edificios where id = :'ea' \gset
+select t.falla($$insert into edificios (nombre) values ('Otro')$$, 'la base de datos no admite un segundo edificio');
+update plataforma set push_url = 'https://ejemplo.test/push', push_secret = 's3creto';
 
--- ---------- unirse con código ----------
+-- ---------- pedir acceso ----------
 select t.soy(:'a2');
-select t.ok((select count(*) = 0 from public.buscar_edificio()), 'con dos edificios hace falta código');
-select t.ok((select nombre = 'Torre A' from public.buscar_edificio(lower(:'ca'))), 'buscar por código');
 insert into usuarios (id, edificio_id, nombre, depto, rol, estado) values (:'a2', :'ea', 'Rita Residente', '101', 'admin', 'activo');
 select t.ok((select rol = 'residente' and estado = 'pendiente' from usuarios where id = :'a2'), 'quien se une queda residente pendiente');
 select t.ok((select count(*) = 1 from edificios), 'pendiente ve solo su edificio');
@@ -54,29 +49,19 @@ update usuarios set estado = 'activo', rol = 'admin' where id = auth.uid();
 select t.ok((select estado = 'pendiente' and rol = 'residente' from usuarios where id = :'a2'), 'no puede auto-activarse ni subirse el rol');
 select t.soy(:'a3'); insert into usuarios (id, edificio_id, nombre, depto, rol) values (:'a3', :'ea', 'Pedro Propietario', '102', 'propietario');
 select t.soy(:'a4'); insert into usuarios (id, edificio_id, nombre, rol) values (:'a4', :'ea', 'Carla Conserje', 'conserje');
-select t.soy(:'b2'); insert into usuarios (id, edificio_id, nombre, depto, rol) values (:'b2', :'eb', 'Bruno Residente', '101', 'residente');
 
 select t.soy(:'a1');
-select t.ok((select count(*) = 4 from usuarios), 'admin A ve solo usuarios de A');
+select t.ok((select count(*) = 4 from usuarios), 'la administración ve a todos los usuarios');
 update usuarios set estado = 'activo' where id in (:'a2', :'a3', :'a4');
-select t.falla(format($$update usuarios set estado = 'activo' where id = %L returning 1$$, :'b2'), 'admin A activa usuario de B');
-update usuarios set edificio_id = :'eb' where id = :'a2';
-select t.ok((select edificio_id = :'ea' from usuarios where id = :'a2'), 'nadie cambia de edificio desde la app');
-select t.falla(format($$update edificios set nombre = 'x' where id = %L returning 1$$, :'eb'), 'admin A edita edificio B');
-select t.soy(:'b1'); update usuarios set estado = 'activo' where id = :'b2';
 
--- ---------- gastos comunes: mismo depto y período en dos edificios ----------
+-- ---------- gastos comunes ----------
 select t.soy(:'a1');
 insert into unidades (depto, alicuota) values ('101', 60), ('102', 40);
 insert into gastos (periodo, total, publicado) values ('2026-11', 1000, true);
 select public.recalcular_prorrateo('2026-11');
 select t.soy(:'b1');
-insert into unidades (depto, alicuota) values ('101', 100);
-insert into gastos (periodo, total, publicado) values ('2026-11', 5000, true);
-select public.recalcular_prorrateo('2026-11');
-select t.ok((select count(*) = 1 and sum(monto) = 5000 from gasto_unidades), 'prorrateo de B no mezcla unidades de A');
-select t.ok((select count(*) = 1 from gastos) and (select count(*) = 1 from unidades), 'admin B ve solo lo suyo');
-select t.falla(format($$insert into unidades (edificio_id, depto, alicuota) values (%L, '999', 1)$$, :'ea'), 'admin B inserta unidad en A');
+select t.ok((select count(*) = 0 from gastos) and (select count(*) = 0 from gasto_unidades), 'una cuenta sin perfil no ve gastos');
+select t.falla(format($$insert into unidades (edificio_id, depto, alicuota) values (%L, '999', 1)$$, :'ea'), 'una cuenta sin perfil inserta una unidad');
 select t.soy(:'a2');
 select t.ok((select count(*) = 1 and sum(monto) = 600 from gasto_unidades), 'residente ve solo el cobro de su unidad');
 select t.ok((select count(*) = 2 from unidades), 'residente ve unidades de su edificio');
@@ -125,16 +110,17 @@ select t.ok((select string_agg(periodo || ':' || pagado_monto::int || ':' || (co
 insert into caja_movimientos (tipo, fecha, categoria, monto) values ('egreso', '2026-11-10', 'Remuneraciones', 300);
 select t.soy(:'a2'); select t.ok((select count(*) = 0 from caja_movimientos), 'un residente no ve la caja');
 select t.falla($$insert into caja_movimientos (tipo, categoria, monto) values ('ingreso', 'x', 1)$$, 'un residente registra movimientos de caja');
-select t.soy(:'b1'); select t.ok((select count(*) = 0 from pagos) and (select count(*) = 0 from convenios) and (select count(*) = 0 from caja_movimientos), 'otro edificio no ve pagos, convenios ni caja');
+select t.soy(:'b1'); select t.ok((select count(*) = 0 from pagos) and (select count(*) = 0 from convenios) and (select count(*) = 0 from caja_movimientos), 'una cuenta sin perfil no ve pagos, convenios ni caja');
 select t.soy(:'a2');
 
 -- ---------- mensajes ----------
 insert into conversaciones (id, canal, depto) values ('conserjeria_101', 'conserjeria', '101');
 insert into mensajes (conv_id, texto, uid, rol) values ('conserjeria_101', 'Hola desde A', :'a2', 'residente');
-select t.soy(:'b2');
-insert into conversaciones (id, canal, depto) values ('conserjeria_101', 'conserjeria', '101');
-select t.ok((select count(*) = 0 from mensajes), 'B no lee mensajes de A aunque la conversación se llame igual');
-select t.falla(format($$insert into mensajes (edificio_id, conv_id, texto, uid, rol) values (%L, 'conserjeria_101', 'intruso', %L, 'residente')$$, :'ea', :'b2'), 'B escribe en conversación de A');
+select t.soy(:'a3');
+select t.ok((select count(*) = 0 from mensajes), 'otra unidad no lee esa conversación');
+select t.falla(format($$insert into mensajes (conv_id, texto, uid, rol) values ('conserjeria_101', 'intruso', %L, 'propietario')$$, :'a3'), 'otra unidad escribe en esa conversación');
+select t.soy(:'b1');
+select t.falla(format($$insert into mensajes (edificio_id, conv_id, texto, uid, rol) values (%L, 'conserjeria_101', 'intruso', %L, 'residente')$$, :'ea', :'b1'), 'una cuenta sin perfil escribe mensajes');
 
 -- ---------- encuestas ----------
 select t.soy(:'a1');
@@ -153,9 +139,9 @@ select t.ok((select count(*) = 0 from votos), 'no se ve el voto de otra unidad')
 insert into votos (encuesta_id, depto, opcion, uid) values (:'encp', '102', 0, :'a3');
 select t.soy(:'a4');
 select t.falla(format($$insert into votos (encuesta_id, depto, opcion, uid) values (%L, '', 0, %L)$$, :'enc', :'a4'), 'conserje vota');
-select t.soy(:'b2');
-select t.ok((select count(*) = 0 from encuestas), 'B no ve encuestas de A');
-select t.falla(format($$insert into votos (edificio_id, encuesta_id, depto, opcion, uid) values (%L, %L, '101', 0, %L)$$, :'ea', :'enc', :'b2'), 'B vota encuesta de A');
+select t.soy(:'b1');
+select t.ok((select count(*) = 0 from encuestas), 'una cuenta sin perfil no ve encuestas');
+select t.falla(format($$insert into votos (edificio_id, encuesta_id, depto, opcion, uid) values (%L, %L, '101', 0, %L)$$, :'ea', :'enc', :'b1'), 'una cuenta sin perfil vota');
 select t.soy(:'a1');
 select t.ok((select sum(n) = 1 from public.resultados_encuestas() where encuesta_id = :'enc'), 'el comité/admin ve resultados');
 update encuestas set estado = 'cerrada' where id = :'enc';
@@ -171,9 +157,6 @@ reset role; truncate net.llamadas;
 select t.soy(:'a4'); insert into encomiendas (depto, descripcion, courier, recibido_por) values ('101', 'Caja', 'Correos', :'a4');
 reset role;
 select t.ok((select count(*) = 1 and bool_and(body->'uids' = to_jsonb(array[:'a2'::uuid]) and headers->>'x-push-secret' = 's3creto') from net.llamadas), 'encomienda avisa solo al residente del depto, con el secreto');
-select t.soy(:'b1'); insert into encomiendas (depto, descripcion) values ('101', 'Sobre');
-reset role;
-select t.ok((select count(*) = 1 from net.llamadas), 'encomienda del depto 101 de B no avisa al 101 de A');
 select t.soy(:'a1'); select public.guardar_push('https://fcm.googleapis.com/fcm/send/a1', 'k', 'a');
 update edificios set espacios = '[{"id":"quincho","nombre":"Quincho","aprobacion":true},{"id":"gym","nombre":"Gimnasio","aprobacion":false}]' where id = :'ea';
 select t.soy(:'a2');
@@ -244,7 +227,7 @@ select t.ok((select count(*) = 1 from visitas where codigo = (select codigo from
 update visitas set estado = 'ingreso', ingreso_at = now() where id = :'vis';
 reset role;
 select t.ok((select count(*) = 1 and bool_and(body->>'titulo' = '🚪 Llegó tu visita' and body->'uids' = to_jsonb(array[:'a2'::uuid])) from net.llamadas), 'el ingreso avisa al residente');
-select t.soy(:'b1'); select t.ok((select count(*) = 0 from visitas where id = :'vis'), 'otro edificio no ve la visita');
+select t.soy(:'b1'); select t.ok((select count(*) = 0 from visitas where id = :'vis'), 'una cuenta sin perfil no ve la visita');
 
 -- ---------- estacionamientos de visita ----------
 select t.soy(:'a1');
@@ -261,7 +244,7 @@ select t.ok((select est_nombre = 'V1' and patente = 'ABCD12' and inicio > now() 
 select t.falla(format($$insert into estacionamiento_usos (estacionamiento_id, depto) values (%L, '102')$$, :'e1'), 'ocupar un estacionamiento ya ocupado');
 select t.ok(public.revisar_estacionamientos() = 0, 'dentro del plazo no hay avisos');
 select t.soy(:'a2'); select t.ok((select count(*) = 1 from estacionamiento_usos), 'el residente ve el uso de su visita');
-select t.soy(:'b1'); select t.ok((select count(*) = 0 from estacionamiento_usos) and (select count(*) = 0 from estacionamientos), 'otro edificio no ve nada');
+select t.soy(:'b1'); select t.ok((select count(*) = 0 from estacionamiento_usos) and (select count(*) = 0 from estacionamientos), 'una cuenta sin perfil no ve estacionamientos');
 reset role;
 select t.ok((select body->>'titulo' = '🅿️ Tu visita ocupa el estacionamiento V1' and body->>'cuerpo' = 'ABCD12 · Tiempo máximo: 2 h' from net.llamadas), 'aviso al residente al ocupar, con el tiempo máximo');
 truncate net.llamadas;
@@ -283,7 +266,7 @@ select t.ok((select count(*) = 2 from estacionamiento_usos), 'liberado, se puede
 
 -- ---------- conservación de datos ----------
 reset role;
-insert into visitas (edificio_id, depto, nombre, rut, fecha) values (:'ea', '101', 'Visita antigua', '1-9', current_date - 400), (:'ea', '101', 'Visita reciente', '', current_date - 5), (:'eb', '101', 'Visita antigua de B', '', current_date - 400);
+insert into visitas (edificio_id, depto, nombre, rut, fecha) values (:'ea', '101', 'Visita antigua', '1-9', current_date - 400), (:'ea', '101', 'Visita reciente', '', current_date - 5);
 insert into encomiendas (edificio_id, depto, descripcion, foto, entregado, entregado_at) values (:'ea', '101', 'Vieja', :'ea' || '/encomiendas/vieja.jpg', true, now() - interval '400 days'), (:'ea', '101', 'Vieja sin retirar', '', false, null);
 update encomiendas set ts = now() - interval '400 days' where descripcion like 'Vieja%';
 select t.soy(:'a2'); select t.falla($$select public.depurar_ahora()$$, 'un residente ejecuta el borrado');
@@ -293,22 +276,22 @@ update edificios set retencion = '{"visitas": 12, "encomiendas": 6, "mensajes": 
 select t.ok(public.depurar_ahora() = '{"visitas": 1, "encomiendas": 1}'::jsonb, 'borra solo lo que supera el plazo del edificio');
 select t.ok((select count(*) = 1 from archivos_por_borrar where path like '%/encomiendas/vieja.jpg'), 'la foto queda en cola para borrarse del bucket');
 reset role;
-select t.ok((select count(*) = 1 from visitas where nombre = 'Visita reciente') and (select count(*) = 1 from visitas where edificio_id = :'eb') and (select count(*) = 1 from encomiendas where descripcion = 'Vieja sin retirar'), 'se conserva lo reciente, lo no entregado y lo de otros edificios');
-update edificios set retencion = '{"visitas": 1}' where id = :'eb';
+select t.ok((select count(*) = 1 from visitas where nombre = 'Visita reciente') and (select count(*) = 1 from encomiendas where descripcion = 'Vieja sin retirar'), 'se conserva lo reciente y lo no entregado');
+insert into visitas (edificio_id, depto, nombre, fecha) values (:'ea', '101', 'Otra antigua', current_date - 400);
 select privado.depurar();
-select t.ok((select count(*) = 0 from visitas where edificio_id = :'eb'), 'la tarea diaria recorre todos los edificios');
+select t.ok((select count(*) = 0 from visitas where nombre = 'Otra antigua'), 'la tarea diaria aplica los plazos');
 
 -- ---------- storage ----------
 select t.soy(:'a2');
 insert into storage.objects (bucket_id, name) values ('fotos', :'ea' || '/incidencias/2026-11-20/x.jpg');
-select t.falla(format($$insert into storage.objects (bucket_id, name) values ('fotos', %L)$$, :'eb' || '/incidencias/x.jpg'), 'subir a la carpeta de otro edificio');
+select t.falla(format($$insert into storage.objects (bucket_id, name) values ('fotos', %L)$$, '11111111-1111-1111-1111-111111111111/incidencias/x.jpg'), 'subir fuera de la carpeta del edificio');
 -- bucket privado: cada archivo se lee según la fila que lo referencia
 reset role; select set_config('request.jwt.claim.sub', '', false);
 select t.ok((select not public from storage.buckets where id = 'fotos'), 'el bucket es privado');
 insert into storage.objects (bucket_id, name) values
   ('fotos', :'ea' || '/encomiendas/d/e101.jpg'), ('fotos', :'ea' || '/encomiendas/d/e102.jpg'), ('fotos', :'ea' || '/rondas/d/r.jpg'),
   ('fotos', :'ea' || '/documentos/d/acta.pdf'), ('fotos', :'ea' || '/incidencias/d/i101.jpg'), ('fotos', :'ea' || '/incidencias/d/nota.jpg'),
-  ('fotos', :'ea' || '/incidencias/d/i102.jpg'), ('fotos', :'ea' || '/ot/d/despues.jpg'), ('fotos', :'ea' || '/ot/d/otra.jpg'), ('fotos', :'eb' || '/documentos/d/b.pdf');
+  ('fotos', :'ea' || '/incidencias/d/i102.jpg'), ('fotos', :'ea' || '/ot/d/despues.jpg'), ('fotos', :'ea' || '/ot/d/otra.jpg'), ('fotos', '11111111-1111-1111-1111-111111111111/documentos/d/b.pdf');
 insert into encomiendas (edificio_id, depto, descripcion, foto) values (:'ea', '101', 'Con foto', :'ea' || '/encomiendas/d/e101.jpg'), (:'ea', '102', 'Con foto', :'ea' || '/encomiendas/d/e102.jpg');
 insert into incidencias (edificio_id, titulo, descripcion, depto, uid, fotos, historial) values
   (:'ea', 'Mía', 'x', '101', :'a2', array[:'ea' || '/incidencias/d/i101.jpg'], jsonb_build_array(jsonb_build_object('accion', 'Nota', 'fotos', jsonb_build_array(:'ea' || '/incidencias/d/nota.jpg')))),
@@ -318,8 +301,8 @@ create or replace function t.veo() returns text language sql as $$ select coales
 select t.soy(:'a2'); select t.ok(t.veo() = 'documentos/d/acta.pdf encomiendas/d/e101.jpg incidencias/d/i101.jpg incidencias/d/nota.jpg', 'residente: documentos y solo las fotos de su unidad (' || t.veo() || ')');
 select t.soy(:'a4'); select t.ok(t.veo() like '%encomiendas/d/e102.jpg%' and t.veo() like '%rondas/d/r.jpg%' and t.veo() not like '%ot/%', 'conserjería: encomiendas, rondas e incidencias, no órdenes de trabajo');
 select t.soy('00000000-0000-0000-0000-0000000000a5'); select t.ok(t.veo() = 'incidencias/d/i102.jpg ot/d/despues.jpg', 'empresa: solo las fotos de sus órdenes (' || t.veo() || ')');
-select t.soy(:'a1'); select t.ok((select count(*) = 10 from storage.objects), 'administración ve todos los archivos de su edificio');
-select t.soy(:'b2'); select t.ok(t.veo() = 'documentos/d/b.pdf', 'otro edificio no ve esos archivos');
+select t.soy(:'a1'); select t.ok((select count(*) = 10 from storage.objects), 'administración ve todos los archivos del edificio');
+select t.soy(:'b1'); select t.ok(t.veo() = '', 'una cuenta sin perfil no ve archivos');
 select t.soy(:'a3'); select t.ok(t.veo() = '', 'una cuenta eliminada no ve archivos');
 set role anon; select t.ok((select count(*) = 0 from storage.objects), 'sin sesión no se ve ningún archivo');
 reset role;

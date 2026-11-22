@@ -4,19 +4,25 @@ Este archivo resume el contexto del proyecto para que otra persona (o un asisten
 
 ## Qué es
 
-App web para la comunidad de un edificio: residentes, conserjería, comité, administración y empresas de mantención. Una instalación puede alojar varios edificios; cada usuario pertenece a uno solo.
+App web para la comunidad de un edificio: residentes, conserjería, comité, administración y empresas de mantención. Se instala en un computador del propio edificio; una instalación = un edificio.
 
 ## Stack y por qué
 
 - **Frontend**: HTML + JS vanilla, sin framework ni build (dos librerías de QR copiadas en `web/vendor/`). `web/app.js` contiene todas las vistas; `web/xlsx.js` genera Excel sin dependencias; `web/sw.js` es el service worker de notificaciones. Decisión: simplicidad de despliegue (se sube una carpeta) y cero dependencias que mantener.
-- **Backend**: Supabase. Auth por email/contraseña, Postgres con Row Level Security, Storage (bucket `fotos`), Realtime, y una Edge Function opcional (`supabase/functions/push`).
+- **Backend local** (`local/`): un programa Node que sirve `web/`, guarda la base de datos en una carpeta con Postgres embebido (PGlite) y reemplaza lo que entregaba Supabase: cuentas y sesiones (cookie HttpOnly), consultas (`/api/db`, traducidas a SQL con `jsonb_populate_record`), funciones (`/api/rpc`), archivos en disco con enlaces firmados, avisos de cambios por SSE, tareas programadas, push y respaldos. Aplica `base.sql` y `supabase/schema.sql` en cada arranque. `local/cliente.js` implementa en el navegador la parte de la interfaz de `supabase-js` que usa `app.js`.
+- **Backend alternativo**: un proyecto Supabase con el mismo `schema.sql` (Auth, Storage, Realtime y la Edge Function `push`). Nunca se ha desplegado.
 - **Seguridad**: toda en RLS (`supabase/schema.sql`). El frontend solo decide qué mostrar; lo que cada rol puede leer/escribir lo decide la base de datos.
 - **Roles** (`usuarios.rol`): residente, propietario, conserje, comite, admin, mantencion. Estado: pendiente / activo / bloqueado. Quien crea un edificio (`crear_edificio()`) queda como su admin; los demás quedan pendientes (trigger `usuarios_antes_insert`).
 
 ## Decisiones tomadas
 
-- **Multi-edificio por columna**: todas las tablas llevan `edificio_id` (por defecto `mi_edificio()`), y el helper `_pol` de `schema.sql` antepone `edificio_id = mi_edificio()` a cada política. `mi_edificio()` solo responde para usuarios activos. Claves compuestas donde el identificador se repite entre edificios: `unidades (edificio_id, depto)`, `gastos (edificio_id, periodo)`, `gasto_unidades`, `conversaciones (edificio_id, id)`.
-- **Alta de edificios**: el primero es libre; los siguientes requieren `plataforma.creacion_abierta = true` (tabla de ajustes sin políticas RLS, editable solo desde el SQL Editor). Unirse: código/enlace de invitación (`edificios.codigo`, `buscar_edificio()`).
+- **Local primero**: el feedback fue que mantener una cuenta en la nube era el mismo problema que pagar un servicio. Se probó que `schema.sql` corre sin cambios en PGlite (pasa `tests/rls.sql` completo), así que el modo local reutiliza todas las reglas en vez de reescribirlas.
+- **Un solo edificio**: se eliminó el soporte multi-edificio (códigos de invitación, apertura de creación). Un índice único impide un segundo edificio. Las tablas conservan la columna `edificio_id` y las políticas la siguen comparando con `mi_edificio()`: es un vestigio interno que se podría retirar.
+- **Respaldo en la nube sin integraciones**: en vez de OAuth con Google o Microsoft (que exige registrar la aplicación), el servidor escribe una copia cifrada (`base/*.meb` + espejo `archivos/*.enc`, AES-256-GCM, llave por scrypt) en una carpeta que la app de escritorio de la nube sincroniza. `pareceNube()` solo mira el nombre de la ruta para advertir. Restauración con `--restaurar-nube`.
+- **Actualizaciones seguras**: la base guarda la versión que la dejó como está (`sistema.instalacion`). Al arrancar una versión distinta, `server.mjs` guarda una copia (`antes-de-actualizar-…`), aplica `base.sql` + `schema.sql` en **una transacción** y, si falla o si el programa es más antiguo que la base, entra en `modoMantencion()` (página 503 con instrucciones; nunca corre la app sobre un esquema a medias). `buscarActualizacion()` consulta la última publicación de GitHub; en Windows instalado, `actualizarAhora()` descarga el instalador, verifica su `.sha256` y lo ejecuta en silencio (él detiene, reemplaza y reinicia). `supabase/tests/versiones/` guarda el esquema de cada versión publicada y `run.sh` actualiza desde todas.
+- **Acceso desde internet**: `server.mjs` administra un proceso `cloudflared` (`tunnel run` con `TUNNEL_TOKEN`, para un túnel con dominio creado en la cuenta Cloudflare del edificio). A propósito no se ofrecen los túneles temporales `trycloudflare.com`: la gente los usaría como definitivos y fallan. Marca "conectado" al ver `Registered tunnel connection`, reintenta con espera creciente y expone el estado en `/api/tunel/*`. Las pruebas usan un cloudflared simulado.
+- **Instalador de Windows** (`instalador/`): NSIS, se construye en Linux con `construir.sh` e incluye Node.js y cloudflared para Windows (sumas verificadas) y las dependencias. Su primera página (`PaginaDonde`) pregunta si va en este computador o en la nube; con "nube" abre la guía de Supabase y sale sin instalar (en modo silencioso `/S` no pregunta e instala local). Instala por usuario sin permisos de administrador; programa en `%LOCALAPPDATA%\Programs\Mi Edificio`, datos en `%LOCALAPPDATA%\MiEdificio\datos`. Los accesos directos ejecutan `.vbs` que llaman a `local/lanzar.mjs` sin ventana. El servidor se detiene con un archivo bandera (`detener`) porque en Windows no hay SIGTERM, y avisa su cierre real borrando `servidor.pid`. El workflow `Release` lo adjunta a cada versión.
+- **Sin correo**: en local no hay verificación ni recuperación por correo; la administración restablece contraseñas (`/api/auth/restablecer`).
 - **Encuestas**: un voto por unidad (`votos` con PK `encuesta_id, depto`). El voto individual solo lo ve su unidad; los totales salen de `resultados_encuestas()` (SECURITY DEFINER). Los plazos se evalúan en hora de Chile (`hoy()`).
 - **Exportación** de gastos: `.xlsx` generado en el navegador y PDF mediante impresión (`@media print` + `#printArea`). Sin librerías.
 - **Push**: triggers en el esquema `privado` (no expuesto por la API) calculan destinatarios y llaman con `pg_net` a la Edge Function, autenticada con `plataforma.push_secret`. Si `push_url` está vacío no hacen nada; un fallo de envío nunca bloquea la operación.
@@ -32,23 +38,27 @@ App web para la comunidad de un edificio: residentes, conserjería, comité, adm
 
 ## Modelo de datos (resumen)
 
-`edificios` (nombre, logo, dirección, color, datos bancarios, `espacios` jsonb, `codigo` de invitación) · `plataforma` (ajustes de la instalación) · `usuarios` · `unidades` (depto, alícuota %) · `gastos` + `gasto_unidades` (prorrateo por período) · `pagos` · `convenios` + `convenio_cuotas` · `caja_movimientos` · `reservas` · `incidencias` (fotos[], historial jsonb) · `conversaciones` + `mensajes` (un hilo por depto y canal) · `comunicados` · `encuestas` + `votos` · `documentos` · `encomiendas` · `visitas` · `estacionamientos` + `estacionamiento_usos` · `activos` (nfc_tag, requisitos jsonb, plan preventivo) · `registros` (rondas) · `ot` · `empresas` · `push_subs`.
+`edificios` (nombre, logo, dirección, color, datos bancarios, `espacios` jsonb, plazos y ajustes) · `plataforma` (ajustes de la instalación) · `usuarios` · `unidades` (depto, alícuota %) · `gastos` + `gasto_unidades` (prorrateo por período) · `pagos` · `convenios` + `convenio_cuotas` · `caja_movimientos` · `reservas` · `incidencias` (fotos[], historial jsonb) · `conversaciones` + `mensajes` (un hilo por depto y canal) · `comunicados` · `encuestas` + `votos` · `documentos` · `encomiendas` · `visitas` · `estacionamientos` + `estacionamiento_usos` · `activos` (nfc_tag, requisitos jsonb, plan preventivo) · `registros` (rondas) · `ot` · `empresas` · `push_subs`.
 
 Funciones RPC: `crear_edificio`, `buscar_edificio`, `puede_crear_edificio`, `recalcular_prorrateo(periodo)`, `resultados_encuestas`, `guardar_push`.
 
 ## Estado
 
-- `schema.sql` probado en Postgres 16 local con `supabase/tests/run.sh`: instalación nueva, idempotencia, aislamiento entre edificios por rol, encuestas, disparo de avisos y migración desde la versión de un solo edificio.
-- Frontend probado con una prueba de humo en Chromium contra un cliente Supabase simulado (crear edificio, invitación, gastos y exportaciones, encuestas, tarjeta de notificaciones).
-- **No ha sido desplegado aún en un proyecto Supabase real.** En particular, la Edge Function `push` y el envío real de notificaciones no se han ejecutado nunca: es lo primero que hay que validar.
+- `schema.sql` probado con `supabase/tests/run.sh` en Postgres 16 y, manualmente, sobre PGlite: instalación nueva, re-ejecución, permisos por rol y unidad, pagos y convenios, encuestas, avisos, archivos y migración.
+- Servidor local probado con `local/test.mjs` (por HTTP) y con una prueba en Chromium de punta a punta contra el servidor real: cuentas, asistente, gastos, pago, incidencia con foto, visita con QR, avisos en vivo, restablecer contraseña, reinicio. También respaldo al cerrar y restauración.
+- La prueba en navegador y las de interfaz con cliente simulado no están en el repositorio.
+- Actualización con un clic probada con Wine de 0.1.1 a 0.1.2 contra un servidor de publicaciones local: descarga, suma, reemplazo, reinicio, copia previa y datos intactos; y rechazo de un instalador con suma alterada. No se ha probado contra GitHub real.
+- Instalador y servidor probados con Wine (Node para Windows): instalación silenciosa, accesos directos, arranque por `iniciar.vbs`, archivos, respaldo en una carpeta OneDrive, detener, actualizar encima y desinstalar. Las páginas del asistente se revisaron por captura.
+- **Sin probar**: un Windows real (SmartScreen, Firewall, antivirus, inicio con la sesión), un túnel de Cloudflare conectado de verdad (el entorno de desarrollo bloqueaba esa red), envío de notificaciones push a teléfonos, y cualquier uso en un edificio real. La instalación en Supabase nunca se ha desplegado.
 
 ## Pendientes sugeridos (en orden)
 
-1. Desplegar y probar end-to-end (auth, subida de fotos, realtime, push en Android/iOS/escritorio).
-2. Cuentas con varios edificios (administradoras): tabla de membresías y selector de edificio.
-3. Pagos en línea mediante Edge Function.
-4. Avisos push para comunicados y encuestas.
+1. Usarla en un edificio real con túnel y teléfonos.
+2. Probar el instalador en Windows real; firmarlo; arranque como servicio.
+3. Respaldo automático fuera del computador.
+4. Retirar la columna `edificio_id`.
+5. Pagos en línea e intereses por mora.
 
 ## Prompt para pegar en Claude (o similar)
 
-> Adjunto el proyecto "Mi Edificio" (carpeta `web/` con un frontend estático en JS vanilla y `supabase/schema.sql` con el backend). Lee primero `HANDOFF.md` y `README.md`. Es una app para residentes, conserjería, comité, administración y empresas de mantención de un edificio, sobre Supabase con RLS y soporte para varios edificios. Mantén el estilo actual: sin frameworks, sin build, toda la seguridad en políticas RLS, UI en español de Chile. Antes de cambiar el schema, recuerda que `schema.sql` es idempotente y debe seguir siéndolo, y que `supabase/tests/run.sh` debe seguir pasando. Mi primera tarea es: [describe aquí].
+> Adjunto el proyecto "Mi Edificio" (carpeta `web/` con un frontend estático en JS vanilla y `supabase/schema.sql` con el backend). Lee primero `HANDOFF.md` y `README.md`. Es una app para residentes, conserjería, comité, administración y empresas de mantención de un edificio, que se instala en un computador del edificio (`local/`) y cuyas reglas viven en políticas RLS de Postgres. Mantén el estilo actual: sin frameworks, sin build, toda la seguridad en políticas RLS, UI en español de Chile. Antes de cambiar el schema, recuerda que `schema.sql` es idempotente y debe seguir siéndolo, y que `supabase/tests/run.sh` y `npm test` en `local/` deben seguir pasando. Mi primera tarea es: [describe aquí].

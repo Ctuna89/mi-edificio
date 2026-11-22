@@ -22,3 +22,15 @@ if [ -f tests/schema_v1.sql ]; then
   q -d mi_edificio_mig -f schema.sql
   q -d mi_edificio_mig -f tests/migracion_check.sql
 fi
+
+# Actualización desde cada versión publicada: su esquema congelado está en tests/versiones/.
+# Con datos (si hay tests/versiones/datos-<v>.sql) se comprueba además que no se pierde nada.
+for viejo in tests/versiones/schema-*.sql; do
+  v="$(basename "$viejo" .sql)"; v="${v#schema-}"
+  nueva mi_edificio_mig
+  q -d mi_edificio_mig -f "$viejo"
+  if [ -f "tests/versiones/datos-$v.sql" ]; then q -d mi_edificio_mig -f "tests/versiones/datos-$v.sql"; fi
+  q -d mi_edificio_mig -f schema.sql
+  q -d mi_edificio_mig -f schema.sql
+  if [ -f "tests/versiones/revisar-$v.sql" ]; then q -d mi_edificio_mig -f "tests/versiones/revisar-$v.sql"; else echo "OK: actualización desde $v (base vacía)"; fi
+done

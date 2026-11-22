@@ -17,7 +17,7 @@ jobs:
           node-version: 22
       - name: Sintaxis JS
         run: |
-          for f in web/*.js; do node --check "$f"; done
+          for f in web/*.js local/*.js local/*.mjs instalador/*.mjs; do node --check "$f"; done
       - name: Generador de Excel
         run: node -e "const u=require('./web/xlsx.js').build([{name:'A',rows:[['x',1]]}]); if(u[0]!==0x50||u[1]!==0x4b) process.exit(1)"
       - name: JSON del manifest
@@ -47,3 +47,34 @@ jobs:
       - uses: actions/checkout@v4
       - name: schema.sql (instalación nueva, idempotencia, RLS, migración)
         run: supabase/tests/run.sh
+
+  servidor-local:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Dependencias
+        run: npm ci
+        working-directory: local
+      - name: Pruebas del servidor local
+        run: npm test
+        working-directory: local
+
+  instalador-windows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Construir el instalador
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq nsis
+          ./instalador/construir.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: instalador-windows
+          path: dist/*.exe
+          retention-days: 14

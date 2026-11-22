@@ -1,0 +1,16 @@
+{
+  "name": "mi-edificio-local",
+  "private": true,
+  "description": "Servidor local de Mi Edificio: la app, la base de datos y los archivos en un solo programa.",
+  "type": "module",
+  "license": "MIT",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test test.mjs"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "0.5.17",
+    "web-push": "3.6.7"
+  }
+}

@@ -1,5 +1,15 @@
 # Cambios
 
+## 0.2.0 — 2026-11-22
+
+- **Instalación local**: un solo programa (`local/`) sirve la app y guarda la base de datos y los archivos en una carpeta del computador del edificio, sin servicios en la nube. Incluye cuentas, permisos, archivos con enlaces firmados, avisos en vivo, notificaciones, tareas programadas y respaldo diario. Supabase queda como instalación alternativa.
+- **Un solo edificio por instalación**: se elimina el soporte multi-edificio y los códigos de invitación. La primera cuenta crea el edificio; las siguientes piden acceso.
+- **Actualizaciones seguras**: copia automática antes de actualizar, cambios de la base de datos "todo o nada", página de mantención con instrucciones si algo falla, y bloqueo de versiones antiguas sobre datos más nuevos. La app avisa cuando hay una versión nueva y, en Windows, se actualiza con un clic.
+- **Acceso desde internet integrado**: desde la app se conecta una dirección fija con el dominio del edificio, pegando el token de un túnel de Cloudflare. El servidor maneja el túnel y lo reconecta solo.
+- **Instalador para Windows**: asistente que instala todo (incluye Node.js), incluye el programa del túnel, crea accesos para abrir y detener, y puede dejarlo iniciando con Windows. Su primer paso pregunta si la app va a funcionar en este computador (simple, debe quedar encendido) o en la nube (más complejo; muestra la guía y no instala nada). Se adjunta a cada versión publicada.
+- En local, la administración restablece las contraseñas olvidadas.
+- **Respaldo en la nube**: copia diaria cifrada de base de datos y archivos en una carpeta de OneDrive, Google Drive u otra nube, con advertencia si la carpeta no parece sincronizada, hora del respaldo elegida por la administración, paso propio en el asistente y restauración en un computador nuevo.
+
 ## 0.1.1 — 2026-11-22
 
 - Finanzas: pagos registrados por la administración (con abonos parciales y anulación), convenios de pago para unidades morosas con aceptación del residente, panel de estado económico y flujo de caja mensual y anual con exportación a Excel.

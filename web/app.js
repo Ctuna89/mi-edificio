@@ -1,7 +1,7 @@
 /* =====================================================================
    Mi Edificio — frontend (vanilla JS) sobre Supabase
    Auth (email/clave) · Postgres con RLS · Storage (bucket "fotos") · Realtime
-   Varios edificios por instalación: RLS limita cada consulta al edificio del usuario.
+   Una instalación = un edificio. RLS decide qué ve y qué puede hacer cada rol.
    ===================================================================== */
 (function(){
 'use strict';
@@ -42,7 +42,9 @@ function imprimir(titulo, html){ $('#printArea')?.remove(); const d=document.cre
 
 // ---------- Supabase ----------
 const CFG = window.APP_CONFIG||{};
-if(!CFG.SUPABASE_URL || CFG.SUPABASE_URL.includes('TU-PROYECTO')){ document.getElementById('app').innerHTML='<div class="auth"><div class="card"><h3>Falta configurar Supabase</h3><p>Edita <code>config.js</code> con la URL y la anon key de tu proyecto (Project Settings → API).</p></div></div>'; return; }
+// Dos formas de instalar: servidor local (local/server.mjs, CFG.LOCAL) o un proyecto Supabase.
+// En ambas la app usa la misma interfaz: en local la provee local/cliente.js.
+if(!CFG.LOCAL && (!CFG.SUPABASE_URL || CFG.SUPABASE_URL.includes('TU-PROYECTO'))){ document.getElementById('app').innerHTML='<div class="auth"><div class="card"><h3>Falta configurar Supabase</h3><p>Edita <code>config.js</code> con la URL y la anon key de tu proyecto (Project Settings → API).</p></div></div>'; return; }
 const sb = window.supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON_KEY);
 async function q(p){ const {data,error}=await p; if(error) throw error; return data; }
 const T = t => sb.from(t);
@@ -173,7 +175,6 @@ function render(html){ applyColor(); $('#app').innerHTML=html; }
 const applyColor=()=>{ const c=S.cfg?.color; if(c){ document.documentElement.style.setProperty('--p',c); document.documentElement.style.setProperty('--p2',c+'22'); } };
 
 async function boot(){
-  const cod=new URLSearchParams(location.search).get('e'); if(cod){ lsSet('codigo',cod.trim().toUpperCase()); history.replaceState(null,'',location.pathname+location.hash); }
   if('serviceWorker' in navigator){ navigator.serviceWorker.register('sw.js').catch(e=>console.warn('sw',e)); navigator.serviceWorker.addEventListener('message',e=>{ if(e.data?.ir) location.hash=e.data.ir; }); }
   const {data:{session}} = await sb.auth.getSession();
   sb.auth.onAuthStateChange((ev,sess)=>{ const was=S.uid; S.session=sess; S.uid=sess?.user?.id||null; if(was!==S.uid){ teardown(); S.uid? start() : viewAuth(); } });
@@ -189,9 +190,10 @@ function viewAuth(mode='login', msg=''){
   <div class="card">${msg?`<div class="info">${esc(msg)}</div>`:''}<div id="authErr"></div>
   ${mode==='login'?`<h3>Iniciar sesión</h3><form id="fAuth"><label class="f"><span>Correo</span><input type="email" name="email" required autocomplete="username"></label><label class="f"><span>Contraseña</span><input type="password" name="pass" required autocomplete="current-password"></label><button class="btn full">Entrar</button></form><div class="links"><a href="#" data-m="registro">Crear cuenta</a><a href="#" data-m="reset">Olvidé mi contraseña</a></div>`
   : mode==='registro'?`<h3>Crear cuenta</h3><p class="small muted">Luego de crear la cuenta completarás tus datos y la administración aprobará tu acceso.</p><form id="fAuth"><label class="f"><span>Correo</span><input type="email" name="email" required autocomplete="username"></label><label class="f"><span>Contraseña (mín. 8)</span><input type="password" name="pass" required minlength="8" autocomplete="new-password"></label><button class="btn full">Crear cuenta</button></form><div class="links"><a href="#" data-m="login">Ya tengo cuenta</a></div>`
+  : CFG.LOCAL?`<h3>Recuperar contraseña</h3><p>Pide a la administración del edificio que restablezca tu contraseña: lo hace desde Administración → Usuarios y te entrega una nueva, que podrás cambiar en Mi cuenta.</p><div class="links"><a href="#" data-m="login">Volver</a></div>`
   : `<h3>Recuperar contraseña</h3><form id="fAuth"><label class="f"><span>Correo</span><input type="email" name="email" required></label><button class="btn full">Enviar enlace</button></form><div class="links"><a href="#" data-m="login">Volver</a></div>`}</div></div>`);
   $$('[data-m]').forEach(a=>a.addEventListener('click',e=>{e.preventDefault(); viewAuth(a.dataset.m);}));
-  $('#fAuth').addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); const b=$('button',e.target); busy(b,true,'Un momento…'); $('#authErr').innerHTML=''; try{
+  $('#fAuth')?.addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); const b=$('button',e.target); busy(b,true,'Un momento…'); $('#authErr').innerHTML=''; try{
     if(mode==='login'){ await q(sb.auth.signInWithPassword({email:d.email.trim(), password:d.pass})); }
     else if(mode==='registro'){ const r=await q(sb.auth.signUp({email:d.email.trim(), password:d.pass, options:{emailRedirectTo:location.origin+location.pathname}})); if(!r.session){ viewAuth('login','Cuenta creada. Revisa tu correo para confirmarla y luego inicia sesión.'); return; } }
     else { await q(sb.auth.resetPasswordForEmail(d.email.trim(),{redirectTo:location.origin+location.pathname+'#perfil'})); viewAuth('login','Si el correo existe, recibirás un enlace para cambiar la contraseña.'); return; }
@@ -262,38 +264,30 @@ function renderShell(){
 }
 function setMain(html){ $('#main').innerHTML=html; }
 
-// Cuenta sin perfil: unirse a un edificio (por enlace/código de invitación, o directo si la
-// instalación tiene uno solo) o crear uno nuevo y quedar como su administrador.
+// Cuenta sin perfil: si la instalación ya tiene edificio, pedir acceso; si no, crearlo y
+// quedar como su administrador.
 async function viewCrearPerfil(){
-  render(shellLess(`<div class="loading"><div class="spin"></div>Buscando tu edificio…</div>`));
-  let edif=null, puede=false, aviso='';
-  const buscar=async cod=>(await q(sb.rpc('buscar_edificio',{p_codigo:cod||null})))[0]||null;
-  try{ const cod=lsGet('codigo'); [edif,puede]=await Promise.all([buscar(cod), q(sb.rpc('puede_crear_edificio'))]);
-    if(cod&&!edif){ aviso='El código de invitación no corresponde a ningún edificio.'; lsSet('codigo',null); edif=await buscar(null); }
-  }catch(e){ aviso='No se pudo consultar el edificio: '+errMsg(e); }
+  render(shellLess(`<div class="loading"><div class="spin"></div>Un momento…</div>`));
+  let edif=null, aviso='';
+  try{ edif=(await q(sb.rpc('buscar_edificio')))[0]||null; }catch(e){ aviso='No se pudo consultar el edificio: '+errMsg(e); }
   if(S.me) return;
   const err=m=>{ $('#pErr').innerHTML=m?`<div class="err">${esc(m)}</div>`:''; };
-  const listo=()=>{ lsSet('codigo',null); S.usersW?.reload(); };
-  const draw=()=>{
-    const pie=`<div class="links" style="margin-top:10px"><a href="#" id="out">Cerrar sesión</a>${edif?'<a href="#" id="otro">Mi edificio es otro</a>':''}</div>`;
-    render(shellLess(edif?`<div class="card"><h3>Únete a ${esc(edif.nombre)}</h3><p class="small muted">La administración del edificio aprobará tu acceso.</p><div id="pErr"></div>
-      <form id="fAcc"><label class="f"><span>Nombre completo</span><input type="text" name="nombre" required></label>
-      <label class="f"><span>Departamento / unidad</span><input type="text" name="depto" placeholder="Ej: 1204 (vacío si eres conserje o empresa)"></label>
-      <label class="f"><span>Teléfono</span><input type="tel" name="telefono"></label>
-      <label class="f"><span>Soy</span><select name="rol"><option value="residente">Residente (arrendatario)</option><option value="propietario">Propietario</option><option value="conserje">Conserje</option><option value="mantencion">Empresa de mantención</option></select></label>
-      <details style="margin-bottom:10px"><summary>Aviso de privacidad</summary><p class="small" style="white-space:pre-wrap">${esc(avisoPriv(edif))}</p></details>
-      <label class="sw" style="margin-bottom:12px"><input type="checkbox" name="acepto" required> Leí el aviso de privacidad</label>
-      <button class="btn full">Enviar solicitud</button></form>${pie}</div>`
-    :`<div id="pErr"></div><div class="card"><h3>Unirme a mi edificio</h3><p class="small muted">Pide a la administración de tu edificio el enlace o el código de invitación.</p><form id="fCod" class="row"><input type="text" name="codigo" class="grow" placeholder="Código de invitación" required autocapitalize="characters" autocomplete="off"><button class="btn">Buscar</button></form></div>
-      ${puede?`<div class="card"><h3>Crear un edificio nuevo</h3><p class="small muted">Quedarás como administrador y podrás invitar a tu comunidad.</p><form id="fNew"><label class="f"><span>Nombre del edificio o condominio</span><input type="text" name="edificio" required></label><label class="f"><span>Tu nombre completo</span><input type="text" name="nombre" required></label><label class="f"><span>Teléfono</span><input type="tel" name="telefono"></label><button class="btn full">Crear edificio</button></form></div>`:''}${pie}`));
-    err(aviso); aviso='';
-    $('#out').addEventListener('click',e=>{e.preventDefault(); salir();});
-    $('#otro')?.addEventListener('click',e=>{e.preventDefault(); lsSet('codigo',null); edif=null; draw();});
-    $('#fAcc')?.addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); const b=$('button',e.target); busy(b,true); try{ await q(T('usuarios').insert({id:S.uid, edificio_id:edif.id, nombre:d.nombre.trim(), depto:d.depto.trim(), telefono:d.telefono.trim(), rol:d.rol})); listo(); }catch(ex){ err(errMsg(ex)); busy(b,false); } });
-    $('#fCod')?.addEventListener('submit', async e=>{ e.preventDefault(); const cod=formData(e.target).codigo.trim().toUpperCase(); const b=$('button',e.target); busy(b,true,'Buscando…'); try{ const x=await buscar(cod); if(x){ edif=x; lsSet('codigo',cod); draw(); } else { err('No existe un edificio con ese código.'); busy(b,false); } }catch(ex){ err(errMsg(ex)); busy(b,false); } });
-    $('#fNew')?.addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); const b=$('button',e.target); busy(b,true,'Creando…'); try{ await q(sb.rpc('crear_edificio',{p_edificio:d.edificio.trim(), p_nombre:d.nombre.trim(), p_telefono:d.telefono.trim()})); listo(); }catch(ex){ err(errMsg(ex)); busy(b,false); } });
-  };
-  draw();
+  const listo=()=>S.usersW?.reload();
+  const pie=`<div class="links" style="margin-top:10px"><a href="#" id="out">Cerrar sesión</a></div>`;
+  render(shellLess(edif?`<div class="card"><h3>Únete a ${esc(edif.nombre)}</h3><p class="small muted">La administración del edificio aprobará tu acceso.</p><div id="pErr"></div>
+    <form id="fAcc"><label class="f"><span>Nombre completo</span><input type="text" name="nombre" required></label>
+    <label class="f"><span>Departamento / unidad</span><input type="text" name="depto" placeholder="Ej: 1204 (vacío si eres conserje o empresa)"></label>
+    <label class="f"><span>Teléfono</span><input type="tel" name="telefono"></label>
+    <label class="f"><span>Soy</span><select name="rol"><option value="residente">Residente (arrendatario)</option><option value="propietario">Propietario</option><option value="conserje">Conserje</option><option value="mantencion">Empresa de mantención</option></select></label>
+    <details style="margin-bottom:10px"><summary>Aviso de privacidad</summary><p class="small" style="white-space:pre-wrap">${esc(avisoPriv(edif))}</p></details>
+    <label class="sw" style="margin-bottom:12px"><input type="checkbox" name="acepto" required> Leí el aviso de privacidad</label>
+    <button class="btn full">Enviar solicitud</button></form>${pie}</div>`
+  :`<div class="card"><h3>Configura tu edificio</h3><p class="small muted">Eres la primera persona en entrar: crea el edificio y quedarás como su administrador. Después podrás invitar a tu comunidad.</p><div id="pErr"></div>
+    <form id="fNew"><label class="f"><span>Nombre del edificio o condominio</span><input type="text" name="edificio" required></label><label class="f"><span>Tu nombre completo</span><input type="text" name="nombre" required></label><label class="f"><span>Teléfono</span><input type="tel" name="telefono"></label><button class="btn full">Crear edificio</button></form>${pie}</div>`));
+  err(aviso);
+  $('#out').addEventListener('click',e=>{e.preventDefault(); salir();});
+  $('#fAcc')?.addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); const b=$('button',e.target); busy(b,true); try{ await q(T('usuarios').insert({id:S.uid, edificio_id:edif.id, nombre:d.nombre.trim(), depto:d.depto.trim(), telefono:d.telefono.trim(), rol:d.rol})); listo(); }catch(ex){ err(errMsg(ex)); busy(b,false); } });
+  $('#fNew')?.addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); const b=$('button',e.target); busy(b,true,'Creando…'); try{ await q(sb.rpc('crear_edificio',{p_edificio:d.edificio.trim(), p_nombre:d.nombre.trim(), p_telefono:d.telefono.trim()})); listo(); }catch(ex){ err(errMsg(ex)); busy(b,false); } });
 }
 
 // ---------- VISTAS ----------
@@ -321,9 +315,15 @@ VIEWS.inicio = function(){
   setMain(`<h1>Hola, ${esc(S.me.nombre.split(' ')[0])}</h1>
   ${setupPend?`<div class="note">Falta terminar la configuración inicial del edificio. <a href="#" id="bWizHome">Continuar con el asistente</a></div>`:''}
   ${PUSH_KEY&&pushOk()&&Notification.permission==='default'?`<div class="info">🔔 <a href="#perfil">Activa las notificaciones</a> para enterarte de encomiendas, mensajes y aprobaciones.</div>`:''}
+  <div id="homeVer"></div><div id="homeTun"></div><div id="homeResp"></div>
   <div class="grid">${mods.map(m=>`<a class="tile" href="#${m.id}" data-tile="${m.id}"><span class="ic">${m.ic}</span><b>${m.t}</b><small>${m.d||''}</small></a>`).join('')}</div>
   <h2>Últimos comunicados</h2><div id="homeCom" class="list"><div class="empty">Cargando…</div></div>`);
   $('#bWizHome')?.addEventListener('click',e=>{ e.preventDefault(); asistente(); });
+  if(CFG.LOCAL && realRole()==='admin') sb.local.sistema.estado().then(({data:e})=>{ const el=$('#homeVer'); if(el&&e&&e.hayNueva) el.innerHTML=`<div class="info">Hay una versión nueva de Mi Edificio (${esc(e.ultima.version)}). <a href="#admin">Ver y actualizar</a>.</div>`; });
+  if(CFG.LOCAL && realRole()==='admin') sb.local.tunel.estado().then(({data:e})=>{ const el=$('#homeTun'); if(!el||!e) return; S.dirPublica=e.estado==='conectado'&&e.direccion?e.direccion+'/':'';
+    el.innerHTML=e.modo==='apagado'?'<div class="note">La app solo se puede usar dentro del edificio. <a href="#admin">Activa el acceso desde internet</a>.</div>':e.estado==='error'||e.estado==='sin-programa'?'<div class="err">El acceso desde internet no está funcionando. <a href="#admin">Revisar</a>.</div>':''; });
+  if(CFG.LOCAL && realRole()==='admin') sb.local.respaldo.estado().then(({data:e})=>{ const el=$('#homeResp'); if(!el||!e) return; const viejo=e.ultimo&&Date.now()-new Date(e.ultimo.fecha)>3*86400000;
+    el.innerHTML=!e.configurado?'<div class="note">Los respaldos solo quedan en este computador. <a href="#admin">Configura el respaldo en la nube</a>.</div>':e.ultimo&&!e.ultimo.ok?'<div class="err">El último respaldo en la nube falló. <a href="#admin">Revisar</a>.</div>':viejo?'<div class="note">No hay un respaldo en la nube desde hace más de 3 días. <a href="#admin">Revisar</a>.</div>':''; });
   if(setupPend && !S._wiz){ S._wiz=true; asistente(); }   // una vez por sesión
   watch('comunicados', ()=>q(T('comunicados').select('*').order('ts',{ascending:false}).limit(3)), rows=>{ const el=$('#homeCom'); if(!el) return; el.innerHTML = rows.length? rows.map(c=>`<div class="item static"><div class="hd"><b>${esc(c.titulo)}</b><span class="muted small">${fmtDate(c.ts)}</span></div><div class="small" style="margin-top:4px">${esc(c.cuerpo).slice(0,160)}${c.cuerpo.length>160?'…':''}</div></div>`).join('') : '<div class="empty">Sin comunicados aún</div>'; });
   const badge=(id,n)=>{ const t=$(`[data-tile="${id}"]`); if(!t) return; let b=$('.badge',t); if(n>0){ if(!b){b=document.createElement('span');b.className='badge';t.appendChild(b);} b.textContent=n; } else b?.remove(); };
@@ -976,6 +976,71 @@ function detalleOT(o){
   }catch(err){ toast('Error: '+errMsg(err)); } });
 }
 
+// VERSIÓN Y ACTUALIZACIONES (solo instalación local)
+async function tarjetaVersion(){ const el=$('#verBody'); if(!el) return; let e; try{ e=await q(sb.local.sistema.estado()); }catch(err){ el.innerHTML=`<div class="err">${esc(errMsg(err))}</div>`; return; } if(!$('#verBody')) return;
+  el.innerHTML=`<p style="margin:0 0 8px">Versión instalada: <b>${esc(e.version)}</b>${e.hayNueva?'':' · es la más reciente'}${e.revisado?` <span class="muted">(revisado ${fmtDate(e.revisado)})</span>`:''}</p>
+    ${e.hayNueva?`<div class="info">Hay una versión nueva: <b>${esc(e.ultima.version)}</b>. <a href="${esc(e.ultima.pagina)}" target="_blank" rel="noopener">Ver qué cambia</a></div>
+      ${e.autoinstalable?'<p>Al actualizar, la app deja de responder unos minutos. Antes de tocar nada se guarda una copia de los datos, y si la actualización falla los datos quedan como estaban.</p><button class="btn" id="bActualizar">Actualizar ahora</button>':'<p>Para actualizar, descarga la versión nueva desde ese enlace e instálala encima (en Windows), o reemplaza los archivos y reinicia el servidor (en Mac o Linux). Tus datos se conservan, y antes de aplicar cambios se guarda una copia.</p>'}`:''}
+    ${e.error?`<div class="note">${esc(e.error)}</div>`:''}
+    <div class="row wrap" style="margin-top:8px"><button class="btn sec sm" id="bBuscarVer">Buscar actualizaciones</button></div>
+    ${e.historial.length?`<details style="margin-top:10px"><summary>Historial de versiones</summary><div class="small muted" style="margin-top:6px">${e.historial.slice().reverse().map(x=>`${fmtDate(x.fecha)} · ${x.de?esc(x.de)+' → ':'instalación de la '}${esc(x.a)}`).join('<br>')}</div></details>`:''}`;
+  $('#bBuscarVer').addEventListener('click', async ev=>{ busy(ev.target,true,'Buscando…'); try{ await q(sb.local.sistema.buscar()); }catch(err){ toast(errMsg(err)); } tarjetaVersion(); });
+  $('#bActualizar')?.addEventListener('click', async ev=>{ if(!await confirmBox(`Se instalará la versión ${e.ultima.version}. La app dejará de responder unos minutos para todos. ¿Actualizar ahora?`)) return;
+    busy($('#bActualizar'),true,'Descargando…'); try{ await q(sb.local.sistema.actualizar()); }catch(err){ toast(errMsg(err)); tarjetaVersion(); return; }
+    modal(`<h3>Actualizando Mi Edificio</h3><div class="loading"><div class="spin"></div><span id="actMsg">Instalando la versión ${esc(e.ultima.version)}. No cierres esta página: se recargará sola.</span></div>`);
+    const t0=Date.now(); const ver=async()=>{ let j=null; try{ j=await (await fetch('/api/auth/sesion',{cache:'no-store'})).json(); }catch(x){}
+      if(j&&j.mantencion){ $('#actMsg').textContent='La actualización no se pudo aplicar. Los datos no cambiaron. Abre Mi Edificio en el computador del edificio para ver qué hacer.'; return; }
+      if(j&&Date.now()-t0>20000){ try{ const s=await q(sb.local.sistema.estado()); if(s.version!==e.version){ location.reload(); return; } }catch(x){} }
+      if(Date.now()-t0>15*60000){ $('#actMsg').textContent='Está tardando más de lo esperado. Revisa el computador del edificio.'; return; } setTimeout(ver,4000); }; setTimeout(ver,8000); }); }
+
+// ACCESO DESDE INTERNET (solo instalación local)
+// El servidor maneja un túnel de Cloudflare hacia una dirección fija con el dominio del edificio.
+// Se usa en Administración y en el asistente.
+function tunelUI(el, alCambiar){
+  let sondeo=null;
+  const dibujar=e=>{ if(!document.body.contains(el)) return; S.dirPublica=e.estado==='conectado'&&e.direccion?e.direccion+'/':'';
+    const estado=e.estado==='conectado'?`<div class="info">La app está publicada en <b>${esc(e.direccion)}</b> <button type="button" class="btn sec sm" data-copiar="${esc(e.direccion)}">Copiar</button></div>`
+      :e.estado==='iniciando'?'<div class="info">Conectando con Cloudflare…</div>'
+      :e.estado==='sin-programa'?'<div class="err">Falta el programa <code>cloudflared</code> en este computador. En Windows viene con el instalador de Mi Edificio; en Mac o Linux instálalo desde developers.cloudflare.com y vuelve a intentarlo.</div>'
+      :e.estado==='error'?`<div class="err">No se pudo conectar: ${esc(e.error||'error desconocido')} Se reintenta automáticamente.</div>`
+      :'<div class="note">Hoy la app solo funciona en este computador y en la red del edificio. Para que residentes y conserjes entren desde sus teléfonos, y para usar la cámara y las notificaciones, necesita una dirección de internet.</div>';
+    el.innerHTML=`${estado}
+      <p class="small muted">Se usa un túnel de Cloudflare con el dominio del edificio, por ejemplo <code>app.miedificio.cl</code>. Los datos siguen en este computador; el túnel solo los transporta. Se configura una vez:</p>
+      <ol class="small" style="padding-left:20px;line-height:1.7"><li>Crea una cuenta gratuita en <b>cloudflare.com</b> y agrega tu dominio (comprarlo cuesta unos US$10 al año).</li><li>En el panel, entra a <b>Zero Trust → Networks → Tunnels</b> y crea un túnel de tipo <b>Cloudflared</b>.</li><li>Cloudflare muestra un comando con un token largo que empieza con <code>eyJ</code>. Cópialo y pégalo abajo; no hace falta ejecutarlo.</li><li>En <b>Public Hostname</b> elige la dirección y, como servicio, <code>http://localhost:${e.puerto}</code>.</li></ol>
+      <label class="f"><span>Token del túnel${e.tieneToken?' (ya guardado; vacío = mantener)':''}</span><input type="password" name="tk" autocomplete="off" placeholder="eyJ…  o el comando completo"></label>
+      <label class="f"><span>Dirección que elegiste en Cloudflare</span><input type="text" name="dir" value="${esc(e.direccionFija)}" placeholder="https://app.miedificio.cl" autocomplete="off" spellcheck="false"></label>
+      <div class="row wrap"><button type="button" class="btn" data-tun="fijo">${e.modo==='fijo'?'Volver a conectar':'Conectar'}</button>${e.modo==='fijo'?'<button type="button" class="btn sec" data-tun="apagado">Desactivar el acceso desde internet</button>':''}</div>`;
+    alCambiar?.(e); clearTimeout(sondeo); if(e.estado==='iniciando') sondeo=setTimeout(cargar,2000); };
+  const cargar=()=>q(sb.local.tunel.estado()).then(dibujar,err=>{ if(document.body.contains(el)) el.innerHTML=`<div class="err">${esc(errMsg(err))}</div>`; });
+  if(!el._tun){ el._tun=true; el.addEventListener('click', async ev=>{ const c=ev.target.closest('[data-copiar]'), b=ev.target.closest('[data-tun]');
+    if(c){ try{ await navigator.clipboard.writeText(c.dataset.copiar); toast('Dirección copiada'); }catch(e){ toast(c.dataset.copiar); } return; } if(!b) return;
+    const modo=b.dataset.tun; if(modo==='apagado' && !await confirmBox('Nadie podrá entrar desde fuera del edificio hasta que lo vuelvas a activar. ¿Desactivar?')) return;
+    busy(b,true,'Un momento…'); try{ dibujar(await q(sb.local.tunel.configurar({modo, token:$('[name=tk]',el)?.value||'', direccion:$('[name=dir]',el)?.value||''}))); }catch(err){ toast(errMsg(err)); busy(b,false); } }); }
+  cargar();
+}
+
+// RESPALDO EN LA NUBE (solo instalación local)
+// El servidor deja cada día una copia cifrada en una carpeta del computador; si esa carpeta es de
+// OneDrive, Google Drive u otra nube, su app la sube sola. Se usa en Administración y en el asistente.
+const RE_NUBE=/onedrive|google\s?drive|googledrive|my drive|mi unidad|dropbox|icloud|clouddocs|cloudstorage|nextcloud|pcloud|megasync|box sync|sync\.com/i;
+const AVISO_NO_NUBE='Esta carpeta no parece estar dentro de OneDrive, Google Drive u otra nube. Si no se sincroniza, el respaldo quedará solo en este computador y se perderá junto con él.';
+function respaldoCampos(e){ return `<p class="small muted">Instala en este computador la app de OneDrive, Google Drive u otra nube e inicia sesión en ella. Después elige una carpeta de esa nube: cada día Mi Edificio dejará ahí una copia cifrada de todo (base de datos, fotos y documentos) y la nube la subirá sola.</p>
+  ${e.sugerencias.length?`<div class="small" style="margin-bottom:10px">Carpetas de nube encontradas en este computador:<br>${e.sugerencias.map(s=>`<a href="#" data-sug="${esc(s)}">${esc(s)}</a>`).join('<br>')}</div>`:'<div class="info">No se encontró una carpeta de OneDrive, Google Drive, Dropbox ni iCloud en este computador. Instala una de esas apps, o escribe la ruta a mano.</div>'}
+  <label class="f"><span>Carpeta del respaldo (ruta completa en el computador del edificio)</span><input type="text" name="carpeta" value="${esc(e.carpeta)}" placeholder="C:\\Users\\Conserjeria\\OneDrive\\Respaldo Mi Edificio" autocomplete="off" spellcheck="false"></label><div id="rAviso"></div>
+  <div class="row"><label class="f grow"><span>${e.configurado?'Nueva contraseña (vacío = mantener)':'Contraseña del respaldo'}</span><input type="password" name="clave" minlength="8" autocomplete="new-password"></label><label class="f grow"><span>Repítela</span><input type="password" name="clave2" autocomplete="new-password"></label></div>
+  <p class="small muted">Anota esta contraseña fuera del computador. Sin ella el respaldo no se puede recuperar, y nadie puede restablecerla.</p>
+  <label class="f"><span>Hora del respaldo diario</span><select name="hora" style="width:auto">${Array.from({length:24},(_,h)=>`<option value="${h}" ${h===(e.hora??3)?'selected':''}>${pad(h)}:00</option>`).join('')}</select></label>
+  <p class="small muted">Mientras se hace el respaldo, la app puede dejar de responder por unos minutos. Elige una hora en que casi nadie la use, idealmente de madrugada. Es la hora del reloj de este computador, que debe estar encendido a esa hora.</p>`; }
+function respaldoEventos(raiz){ const inp=$('[name=carpeta]',raiz); const av=()=>{ $('#rAviso',raiz).innerHTML=inp.value.trim()&&!RE_NUBE.test(inp.value)?`<div class="note">${AVISO_NO_NUBE}</div>`:''; };
+  inp.addEventListener('input',av); raiz.addEventListener('click',e=>{ const s=e.target.closest('[data-sug]'); if(s){ e.preventDefault(); inp.value=s.dataset.sug; av(); } }); av(); }
+async function respaldoGuardar(d, e){ if(d.clave!==d.clave2) throw new Error('Las dos contraseñas no coinciden.'); if(!d.clave&&!e.configurado) throw new Error('Define una contraseña para el respaldo.'); return q(sb.local.respaldo.configurar({carpeta:d.carpeta.trim(), clave:d.clave, hora:Number(d.hora)})); }
+const respaldoEstado=e=>!e.configurado?'<div class="note">Hoy los respaldos solo quedan en este computador. Si falla, se pierde todo.</div>'
+  :(e.pareceNube?'':`<div class="note">${AVISO_NO_NUBE}</div>`)+(!e.ultimo?`<div class="info">Carpeta configurada. El primer respaldo se hará a las ${pad(e.hora??3)}:00, o ahora con "Respaldar ahora".</div>`:e.ultimo.ok?`<div class="info">Último respaldo: ${fmtDate(e.ultimo.fecha)} · ${e.ultimo.archivos} ${e.ultimo.archivos===1?'archivo':'archivos'}, cifrado. Se repite cada día a las ${pad(e.hora??3)}:00.</div>`:`<div class="err">El último respaldo (${fmtDate(e.ultimo.fecha)}) falló: ${esc(e.ultimo.error)}</div>`);
+async function tarjetaRespaldo(){ const el=$('#respBody'); if(!el) return; let e; try{ e=await q(sb.local.respaldo.estado()); }catch(err){ el.innerHTML=`<div class="err">${esc(errMsg(err))}</div>`; return; } if(!$('#respBody')) return;
+  el.innerHTML=`${respaldoEstado(e)}<form id="fResp">${respaldoCampos(e)}<div class="row wrap"><button class="btn">Guardar</button>${e.configurado?'<button type="button" class="btn sec" id="bRespYa">Respaldar ahora</button>':''}</div></form>`; respaldoEventos(el);
+  $('#fResp',el).addEventListener('submit', async ev=>{ ev.preventDefault(); const b=$('button',ev.target); busy(b,true); try{ await respaldoGuardar(formData(ev.target), e); toast('Respaldo configurado'); tarjetaRespaldo(); }catch(err){ toast(errMsg(err)); busy(b,false); } });
+  $('#bRespYa',el)?.addEventListener('click', async ev=>{ if(!await confirmBox('Mientras se hace el respaldo, la app puede dejar de responder por unos minutos para todos. ¿Respaldar ahora?')) return; busy($('#bRespYa'),true,'Respaldando…'); try{ const r=await q(sb.local.respaldo.ahora()); toast(r.ultimo?.ok?'Respaldo listo':'El respaldo falló'); }catch(err){ toast(errMsg(err)); } tarjetaRespaldo(); }); }
+
 // ASISTENTE DE CONFIGURACIÓN INICIAL
 // Ventana por pasos para dejar operativo un edificio nuevo. Cada paso guarda al avanzar, así
 // que se puede abandonar y retomar; al terminar se marca edificios.configurado_at.
@@ -987,7 +1052,7 @@ const ESPACIOS_EJ=[
 const leerUnidades = txt => txt.split('\n').map(l=>l.trim()).filter(Boolean).map(l=>{ const [d,a,p]=l.split(/[;\t]/.test(l)?/[;\t]/:','); return d&&d.trim()?{edificio_id:S.me.edificio_id, depto:d.trim(), alicuota:Number(String(a||'0').trim().replace(',','.'))||0, prop:(p||'').trim()}:null; }).filter(Boolean);   // con ; o tabulador, la coma es decimal (39,5)
 function asistente(i=0){
   const c=S.cfg||{}; const upd=p=>q(T('edificios').update({...p, actualizado:now()}).eq('id',c.id));
-  const inv=location.origin+location.pathname+'?e='+(c.codigo||'');
+  const inv=S.dirPublica||location.origin+location.pathname;   // con acceso desde internet, se invita con esa dirección
   const nUn=Object.keys(S.unidades).length, suma=Object.values(S.unidades).reduce((a,u)=>a+(Number(u.alicuota)||0),0), nEst=Object.keys(S.estac).length;
   const PASOS=[
     {t:'Tu edificio', d:'Estos datos aparecen en la app y en los documentos que se exportan.',
@@ -1017,8 +1082,14 @@ function asistente(i=0){
       h:()=>`<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 12px">${RETENCION.map(([k,t])=>`<label class="f"><span>${t}</span><input type="number" name="ret_${k}" min="1" max="240" placeholder="Indefinido" value="${Number(c.retencion?.[k])||''}"></label>`).join('')}</div>
         <label class="f"><span>Aviso de privacidad (vacío = texto por defecto)</span><textarea name="privacidad" placeholder="Quién es responsable de los datos, para qué se usan, por cuánto tiempo se guardan y cómo ejercer los derechos de acceso, rectificación y eliminación.">${esc(c.privacidad||'')}</textarea></label>`,
       g:d=>{ const retencion={}; RETENCION.forEach(([k])=>{ const x=Math.floor(Number(d['ret_'+k])); if(x>0) retencion[k]=x; }); return upd({retencion, privacidad:d.privacidad.trim()}); }},
+    ...(CFG.LOCAL?[{t:'Acceso desde internet', d:'Para que tu comunidad entre desde sus teléfonos, la app necesita una dirección de internet. Requiere un dominio y una cuenta gratuita en Cloudflare; si aún no los tienes, sigue y complétalo después en Administración → Edificio.',
+      h:()=>'<div id="wTun" class="small muted">Consultando…</div>', ini:m=>tunelUI($('#wTun',m)), g:()=>{}}]:[]),
+    ...(CFG.LOCAL?[{t:'Respaldo en la nube', d:'Todo lo de tu edificio vive en este computador. Para no perderlo si falla, deja una copia en una nube. Puedes saltar este paso y hacerlo después en Administración → Edificio.',
+      h:()=>'<div id="wResp" class="small muted">Buscando carpetas de nube en este computador…</div>',
+      ini:async m=>{ try{ const e=await q(sb.local.respaldo.estado()); m._resp=e; const el=$('#wResp',m); if(!el) return; el.className=''; el.innerHTML=(e.configurado?respaldoEstado(e):'')+respaldoCampos(e); respaldoEventos(el); }catch(err){ const el=$('#wResp',m); if(el) el.innerHTML=`<div class="err">${esc(errMsg(err))}</div>`; } },
+      g:async(d,m)=>{ if(!d.carpeta||!d.carpeta.trim()) return; await respaldoGuardar(d, m._resp||{}); sb.local.respaldo.ahora().then(()=>{},()=>{}); }}]:[]),
     {t:'Invita a tu comunidad', d:'Comparte este enlace con residentes, conserjes y empresas. Al crear su cuenta quedarán pendientes hasta que los apruebes.',
-      h:()=>`<div class="row wrap"><input type="text" id="wInv" class="grow" readonly value="${esc(inv)}"><button type="button" class="btn sec" id="wCopiar">Copiar enlace</button></div><p class="small muted" style="margin:8px 0 14px">Código de invitación: <code>${esc(c.codigo||'')}</code></p>
+      h:()=>`<div class="row wrap"><input type="text" id="wInv" class="grow" readonly value="${esc(inv)}"><button type="button" class="btn sec" id="wCopiar">Copiar enlace</button></div><div style="height:14px"></div>
         <div class="small"><b>Lo que sigue</b><ol style="margin:6px 0 0;padding-left:20px;line-height:1.7"><li>Aprueba a quienes se registren en Administración → Usuarios, asignándoles depto y rol.</li><li>Publica el primer período en Gastos comunes.</li><li>Activa tus notificaciones en Mi cuenta.</li></ol></div>`,
       g:()=>upd({configurado_at:now()})},
   ];
@@ -1026,6 +1097,7 @@ function asistente(i=0){
   const m=modal(`<div class="small muted">Configuración inicial · paso ${i+1} de ${n}</div><div class="bar" style="margin:6px 0 14px"><i style="width:${Math.round((i+1)/n*100)}%;background:var(--p)"></i></div>
     <h3>${p.t}</h3><p class="small muted" style="margin-top:-6px">${p.d}</p><form id="fW">${p.h()}<div id="wErr" style="margin-top:10px"></div>
     <div class="row" style="margin-top:6px">${i?'<button type="button" class="btn sec" id="wAtras">Atrás</button>':''}<span class="grow"></span>${ult?'':'<button type="button" class="btn sec" id="wLuego">Seguir después</button>'}<button class="btn" id="wSig">${ult?'Terminar':'Guardar y seguir'}</button></div></form>`);
+  p.ini?.(m);
   $('#wAtras',m)?.addEventListener('click',()=>asistente(i-1));
   $('#wLuego',m)?.addEventListener('click',()=>{ closeModal(); routeNow(); });
   $('#wCopiar',m)?.addEventListener('click', async()=>{ const x=$('#wInv',m); try{ await navigator.clipboard.writeText(x.value); toast('Enlace copiado'); }catch(e){ x.select(); toast('Copia el enlace seleccionado'); } });
@@ -1055,14 +1127,18 @@ ADMIN.edificio = function(el){
   <label class="f"><span>Aviso de privacidad (se muestra al registrarse y en Mi cuenta; vacío = texto por defecto)</span><textarea name="privacidad" placeholder="Quién es responsable de los datos, para qué se usan, por cuánto tiempo se guardan y cómo ejercer los derechos de acceso, rectificación y eliminación.">${esc(c.privacidad||'')}</textarea></label>
   <label class="f"><span>Color principal</span><input type="color" name="color" value="${esc(c.color||'#1e5eff')}" style="width:60px;height:36px;padding:2px;border:1px solid var(--bd);border-radius:8px"></label>
   <button class="btn">Guardar cambios</button></form></div>
+  ${CFG.LOCAL?'<div class="card"><h3>Versión y actualizaciones</h3><div id="verBody" class="small muted">Consultando…</div></div>':''}
+  ${CFG.LOCAL?'<div class="card"><h3>Acceso desde internet</h3><div id="tunBody" class="small muted">Consultando…</div></div>':''}
+  ${CFG.LOCAL?'<div class="card"><h3>Respaldo en la nube</h3><div id="respBody" class="small muted">Cargando…</div></div>':''}
   <div class="card"><h3>Conservación de datos</h3><p class="small muted">Define por cuántos meses se guarda cada tipo de dato. Lo que supere el plazo se borra en forma definitiva, cada día. Vacío = se conserva indefinidamente.</p>
   <form id="fRet"><div class="grid2">${RETENCION.map(([k,t,d])=>`<label class="f"><span>${t}</span><input type="number" name="${k}" min="1" max="240" placeholder="Indefinido" value="${Number(c.retencion?.[k])||''}"><span style="font-weight:400;margin-top:4px">${d}</span></label>`).join('')}</div>
   <div class="row wrap"><button class="btn">Guardar plazos</button><button type="button" class="btn sec" id="bDep">Aplicar ahora</button></div></form></div>
-  <div class="card"><h3>Invitar a la comunidad</h3><p class="small muted">Comparte este enlace con residentes, conserjes y empresas. Al crear su cuenta quedarán asociados a este edificio y pendientes de tu aprobación en Usuarios.</p><div class="row wrap"><input type="text" id="invUrl" class="grow" readonly value="${esc(location.origin+location.pathname+'?e='+(c.codigo||''))}"><button type="button" class="btn sec" id="bInv">Copiar enlace</button></div><p class="small muted" style="margin:8px 0 0">Código de invitación: <code>${esc(c.codigo||'')}</code></p></div>`;
+  <div class="card"><h3>Invitar a la comunidad</h3><p class="small muted">Comparte este enlace con residentes, conserjes y empresas. Al crear su cuenta quedarán asociados a este edificio y pendientes de tu aprobación en Usuarios.</p><div class="row wrap"><input type="text" id="invUrl" class="grow" readonly value="${esc(location.origin+location.pathname)}"><button type="button" class="btn sec" id="bInv">Copiar enlace</button></div></div>`;
   $('#bInv',el).addEventListener('click', async()=>{ const i=$('#invUrl',el); try{ await navigator.clipboard.writeText(i.value); toast('Enlace copiado'); }catch(e){ i.select(); toast('Copia el enlace seleccionado'); } });
   $('#fRet',el).addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); const retencion={}; RETENCION.forEach(([k])=>{ const n=Math.floor(Number(d[k])); if(n>0) retencion[k]=n; }); try{ await q(T('edificios').update({retencion}).eq('id',S.cfg.id)); toast('Plazos guardados'); }catch(err){ toast('Error: '+errMsg(err)); } });
   $('#bDep',el).addEventListener('click', async e=>{ if(!await confirmBox('Se borrarán en forma definitiva los datos que superen los plazos guardados. ¿Continuar?')) return; try{ const r=await q(sb.rpc('depurar_ahora'))||{}; const n=Object.values(r).reduce((a,b)=>a+Number(b),0); toast(n?(n===1?'Se borró 1 registro':`Se borraron ${n} registros`):'No había datos fuera de plazo'); limpiarArchivos(); }catch(err){ toast('Error: '+errMsg(err)); } });
   $('#bWiz',el).addEventListener('click',()=>asistente());
+  if(CFG.LOCAL){ tarjetaVersion(); tarjetaRespaldo(); tunelUI($('#tunBody',el), ()=>{ const i=$('#invUrl',el); if(i) i.value=S.dirPublica||location.origin+location.pathname; }); }
   let newLogo=null;
   $('#bLogo',el).addEventListener('click',()=>$('#logoIn',el).click());
   $('#logoIn',el).addEventListener('change', async e=>{ const f=e.target.files[0]; if(!f) return; try{ toast('Subiendo logo…'); newLogo=await uploadImage(f,'logo'); $('#logoPrev',el).innerHTML=`<img data-f="${esc(newLogo)}">`; toast('Logo listo, guarda los cambios'); }catch(err){ toast('Error: '+errMsg(err)); } });
@@ -1071,9 +1147,11 @@ ADMIN.edificio = function(el){
 };
 ADMIN.usuarios = function(el){
   const us=Object.values(S.users); const pend=us.filter(u=>u.estado==='pendiente'); const act=us.filter(u=>u.estado!=='pendiente');
-  const row=u=>`<tr><td><b>${esc(u.nombre)}</b><br><span class="muted small">${esc(u.telefono||'')}${u.id===S.uid?' · (tú)':''}</span></td><td><input type="text" value="${esc(u.depto||'')}" data-dep="${u.id}" style="width:90px;padding:5px 7px" list="dlu"></td><td><select data-rol="${u.id}" style="width:auto;padding:5px 7px" ${u.id===S.uid?'disabled':''}>${Object.entries(ROLES).map(([k,v])=>`<option value="${k}" ${u.rol===k?'selected':''}>${v}</option>`).join('')}</select>${u.rol==='mantencion'?`<br><select data-emp="${u.id}" style="width:auto;padding:5px 7px;margin-top:4px"><option value="">— empresa —</option>${Object.values(S.empresas).map(e=>`<option value="${e.id}" ${u.empresa_id===e.id?'selected':''}>${esc(e.nombre)}</option>`).join('')}</select>`:''}</td><td><select data-est="${u.id}" style="width:auto;padding:5px 7px" ${u.id===S.uid?'disabled':''}><option value="activo" ${u.estado==='activo'?'selected':''}>Activo</option><option value="pendiente" ${u.estado==='pendiente'?'selected':''}>Pendiente</option><option value="bloqueado" ${u.estado==='bloqueado'?'selected':''}>Bloqueado</option></select></td></tr>`;
+  const row=u=>`<tr><td><b>${esc(u.nombre)}</b><br><span class="muted small">${esc(u.telefono||'')}${u.id===S.uid?' · (tú)':''}</span></td><td><input type="text" value="${esc(u.depto||'')}" data-dep="${u.id}" style="width:90px;padding:5px 7px" list="dlu"></td><td><select data-rol="${u.id}" style="width:auto;padding:5px 7px" ${u.id===S.uid?'disabled':''}>${Object.entries(ROLES).map(([k,v])=>`<option value="${k}" ${u.rol===k?'selected':''}>${v}</option>`).join('')}</select>${u.rol==='mantencion'?`<br><select data-emp="${u.id}" style="width:auto;padding:5px 7px;margin-top:4px"><option value="">— empresa —</option>${Object.values(S.empresas).map(e=>`<option value="${e.id}" ${u.empresa_id===e.id?'selected':''}>${esc(e.nombre)}</option>`).join('')}</select>`:''}</td><td><select data-est="${u.id}" style="width:auto;padding:5px 7px" ${u.id===S.uid?'disabled':''}><option value="activo" ${u.estado==='activo'?'selected':''}>Activo</option><option value="pendiente" ${u.estado==='pendiente'?'selected':''}>Pendiente</option><option value="bloqueado" ${u.estado==='bloqueado'?'selected':''}>Bloqueado</option></select>${CFG.LOCAL&&u.id!==S.uid?`<br><a href="#" class="small" data-clave="${u.id}">Nueva contraseña</a>`:''}</td></tr>`;
   el.innerHTML=`<datalist id="dlu">${Object.keys(S.unidades).map(d=>`<option value="${esc(d)}">`).join('')}</datalist>${pend.length?`<div class="card"><h3>Solicitudes pendientes (${pend.length})</h3><table><thead><tr><th>Nombre</th><th>Depto</th><th>Rol</th><th>Estado</th></tr></thead><tbody>${pend.map(row).join('')}</tbody></table></div>`:''}
   <div class="card"><h3>Usuarios (${act.length})</h3><div style="overflow:auto"><table><thead><tr><th>Nombre</th><th>Depto</th><th>Rol</th><th>Estado</th></tr></thead><tbody>${act.map(row).join('')||'<tr><td colspan="4" class="muted">Sin usuarios</td></tr>'}</tbody></table></div><p class="small muted">Los usuarios se registran solos desde la pantalla de inicio de sesión ("Crear cuenta") y aparecen aquí como pendientes. Asigna depto y rol, y actívalos.</p></div>`;
+  el.addEventListener('click', async e=>{ const a=e.target.closest('[data-clave]'); if(!a) return; e.preventDefault(); const u=S.users[a.dataset.clave]; const clave=await askText('Nueva contraseña para '+(u?.nombre||'el usuario')+' (mínimo 8 caracteres)'); if(clave===null) return;
+    if(clave.length<8){ toast('La contraseña debe tener al menos 8 caracteres'); return; } try{ await q(sb.local.restablecer(a.dataset.clave, clave)); toast('Contraseña restablecida. Entrégasela a la persona.'); }catch(err){ toast('Error: '+errMsg(err)); } });
   el.addEventListener('change', async e=>{ const t=e.target; const id=t.dataset.rol||t.dataset.est||t.dataset.dep||t.dataset.emp; if(!id) return; const up={}; if(t.dataset.rol) up.rol=t.value; if(t.dataset.est) up.estado=t.value; if(t.dataset.dep) up.depto=t.value.trim(); if(t.dataset.emp) up.empresa_id=t.value||null; try{ await q(T('usuarios').update(up).eq('id',id)); toast('Usuario actualizado'); }catch(err){ toast('Error: '+errMsg(err)); } });
 };
 ADMIN.unidades = function(el){

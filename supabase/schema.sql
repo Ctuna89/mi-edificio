@@ -19,11 +19,11 @@ exception when duplicate_object then null; end $$;
 -- ---------------------------------------------------------------------
 -- Tablas
 -- ---------------------------------------------------------------------
--- Cada instalación puede alojar varios edificios. Todas las tablas llevan edificio_id
--- y las políticas RLS lo comparan con el edificio del usuario (public.mi_edificio()).
+-- Una instalación = un edificio. La fila única de esta tabla guarda su configuración.
+-- (Las tablas conservan la columna edificio_id y las políticas la comparan con
+-- public.mi_edificio(); es un detalle interno: la base de datos no admite un segundo edificio.)
 create table if not exists public.edificios (
   id            uuid primary key default gen_random_uuid(),
-  codigo        text not null unique default upper(substr(replace(gen_random_uuid()::text,'-',''),1,10)), -- código de invitación
   nombre        text not null default 'Mi Edificio',
   direccion     text default '',
   comuna        text default '',
@@ -44,6 +44,15 @@ create table if not exists public.edificios (
   actualizado   timestamptz default now()
 );
 alter table public.edificios add column if not exists privacidad text default '';
+alter table public.edificios drop column if exists codigo;   -- los códigos de invitación eran de la versión multi-edificio
+-- Un solo edificio por instalación
+do $$ begin
+  if (select count(*) from public.edificios) > 1 then
+    raise notice 'Esta instalación tiene más de un edificio (versión anterior). Se conservan, pero no se podrán crear más.';
+  else
+    create unique index if not exists edificios_unico on public.edificios ((true));
+  end if;
+end $$;
 -- Asistente de configuración inicial: los edificios que ya existían se dan por configurados
 do $$ begin
   if not exists (select 1 from information_schema.columns where table_schema = 'public' and table_name = 'edificios' and column_name = 'configurado_at') then
@@ -64,10 +73,10 @@ alter table public.edificios add column if not exists retencion jsonb not null d
 -- Ajustes de la instalación (1 fila). Sin políticas RLS: solo se edita desde el SQL Editor.
 create table if not exists public.plataforma (
   id               int primary key default 1 check (id = 1),
-  creacion_abierta boolean not null default false,  -- true: cualquier cuenta nueva puede crear otro edificio
   push_url         text default '',                 -- URL de la Edge Function "push"
   push_secret      text default ''                  -- mismo valor que el secreto PUSH_SECRET de la función
 );
+alter table public.plataforma drop column if exists creacion_abierta;
 insert into public.plataforma (id) values (1) on conflict do nothing;
 alter table public.plataforma enable row level security;
 
@@ -571,37 +580,31 @@ begin
   end loop;
 end $$;
 
--- ¿Puede esta cuenta crear un edificio? Siempre el primero; los siguientes solo si
--- plataforma.creacion_abierta = true.
+-- ¿Puede esta cuenta crear el edificio? Solo si la instalación aún no tiene uno.
 create or replace function public.puede_crear_edificio() returns boolean
 language sql stable security definer set search_path = public as $$
-  select auth.uid() is not null
-     and (not exists (select 1 from public.edificios)
-          or coalesce((select creacion_abierta from public.plataforma where id = 1), false))
+  select auth.uid() is not null and not exists (select 1 from public.edificios)
 $$;
 
--- Busca un edificio por código de invitación. Sin código, devuelve el edificio solo si
--- la instalación tiene exactamente uno (caso típico: un edificio, se comparte la URL).
+-- El edificio de la instalación, para que una cuenta nueva pueda pedir acceso
 drop function if exists public.buscar_edificio(text);
-create or replace function public.buscar_edificio(p_codigo text default null)
+create or replace function public.buscar_edificio()
 returns table (id uuid, nombre text, logo text, color text, email text, privacidad text)
 language sql stable security definer set search_path = public as $$
   select e.id, e.nombre, e.logo, e.color, e.email, e.privacidad
   from public.edificios e
   where auth.uid() is not null
-    and case when coalesce(trim(p_codigo), '') <> ''
-             then e.codigo = upper(trim(p_codigo))
-             else (select count(*) from public.edificios) = 1 end
+  order by e.creado, e.id limit 1
 $$;
 
--- Crea un edificio y deja a quien lo crea como su administrador activo.
+-- Crea el edificio de la instalación y deja a quien lo crea como su administrador activo.
 create or replace function public.crear_edificio(p_edificio text, p_nombre text, p_telefono text default '') returns uuid
 language plpgsql security definer set search_path = public as $$
 declare eid uuid;
 begin
   if auth.uid() is null then raise exception 'Debes iniciar sesión'; end if;
   if exists (select 1 from public.usuarios where id = auth.uid()) then raise exception 'Tu cuenta ya pertenece a un edificio'; end if;
-  if not public.puede_crear_edificio() then raise exception 'La creación de edificios está cerrada en esta instalación'; end if;
+  if not public.puede_crear_edificio() then raise exception 'Esta instalación ya tiene su edificio'; end if;
   if coalesce(trim(p_edificio), '') = '' or coalesce(trim(p_nombre), '') = '' then raise exception 'Faltan el nombre del edificio o tu nombre'; end if;
   insert into public.edificios (nombre, creado_por) values (trim(p_edificio), auth.uid()) returning id into eid;
   insert into public.usuarios (id, edificio_id, nombre, telefono, rol, estado)

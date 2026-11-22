@@ -2,64 +2,160 @@
 
 [![CI](https://github.com/Ctuna89/mi-edificio/actions/workflows/ci.yml/badge.svg)](https://github.com/Ctuna89/mi-edificio/actions/workflows/ci.yml) [![Licencia: MIT](https://img.shields.io/badge/licencia-MIT-blue.svg)](LICENSE)
 
-App web para residentes, conserjería, comité, administración y empresas de mantención de un edificio.
-Frontend estático (HTML/JS, sin build) + Supabase (Auth, Postgres con RLS, Storage, Realtime).
-Una misma instalación puede alojar varios edificios, aislados entre sí por las políticas RLS.
+App web para residentes, conserjería, comité, administración y empresas de mantención de un edificio. Gratis y de código abierto.
+
+Se instala **en un computador del propio edificio**: un solo programa sirve la app, guarda la base de datos y los archivos en una carpeta, y no depende de ningún servicio en la nube. Una instalación = un edificio.
 
 ```
 mi-edificio/
-├── web/                 ← sitio estático (súbelo tal cual a Vercel / Netlify / Cloudflare Pages)
-│   ├── index.html
-│   ├── app.js           ← todas las vistas
-│   ├── xlsx.js          ← generador de Excel sin dependencias
-│   ├── sw.js            ← service worker (notificaciones push)
-│   ├── vendor/          ← librerías de QR de terceros (ver vendor/README.md)
-│   ├── config.js        ← URL y anon key de tu proyecto Supabase (+ clave VAPID opcional)
-│   ├── manifest.webmanifest
-│   └── icon.svg
+├── instalador/          ← instalador de Windows (se construye con construir.sh)
+├── local/               ← servidor local: lo único que hay que ejecutar
+│   ├── server.mjs       ← sirve la app, la base de datos, las cuentas y los archivos
+│   ├── cliente.js       ← conexión del navegador con el servidor
+│   ├── base.sql         ← cuentas, archivos y cola de avisos
+│   ├── lanzar.mjs       ← lo inicia en segundo plano, lo abre o lo detiene
+│   ├── iniciar.bat / iniciar.sh
+│   └── datos/           ← se crea al iniciar: base de datos, archivos, respaldos (no va al repositorio)
+├── web/                 ← la app (HTML y JS sin build)
 └── supabase/
-    ├── schema.sql       ← tablas, políticas RLS, bucket de fotos, realtime y triggers
-    ├── functions/push/  ← Edge Function que envía las notificaciones push (opcional)
-    └── tests/           ← pruebas del esquema en un Postgres local
+    ├── schema.sql       ← tablas, permisos por rol y reglas de negocio (se aplica solo al iniciar)
+    ├── functions/push/  ← solo para la instalación alternativa en Supabase
+    └── tests/           ← pruebas de permisos
 ```
 
-## 1. Crear el proyecto Supabase (10 min)
+## 1. Instalar en un computador del edificio
 
-1. Entra a https://supabase.com → **New project** (región: South America / São Paulo es la más cercana a Chile).
-2. **SQL Editor → New query** → pega el contenido completo de `supabase/schema.sql` → **Run**.
-   El script es idempotente: puedes volver a correrlo si cambias algo.
-3. **Authentication → Providers → Email**: deja habilitado *Email*.
-   - Para pruebas rápidas desactiva **Confirm email** (los usuarios entran de inmediato).
-   - En producción déjalo activado y configura un SMTP propio en *Authentication → SMTP Settings* (el SMTP de Supabase tiene límite de ~3 correos/hora).
-4. **Authentication → URL Configuration**: en *Site URL* pon la URL donde quedará la app (p. ej. `https://miedificio.vercel.app`) y agrégala también en *Redirect URLs*.
-5. **Project Settings → API**: copia **Project URL** y **anon public key** y pégalos en `web/config.js`.
+Elige un computador que quede encendido, como el de conserjería o administración.
 
-## 2. Publicar el sitio
+### Windows
 
-Cualquier hosting de archivos estáticos sirve. Opciones sin costo:
+1. Descarga `MiEdificio-Instalar-<versión>.exe` desde [Releases](https://github.com/Ctuna89/mi-edificio/releases/latest).
+2. Ábrelo y sigue el asistente. Lo primero que pregunta es **dónde va a funcionar**: *en este computador* (lo simple y recomendado; el computador debe quedar encendido) o *en la nube* (más complejo: el instalador no lo hace, abre la [guía de Supabase](#instalación-alternativa-supabase) y termina sin instalar nada). Eligiendo este computador: aceptar la licencia, elegir si parte junto con Windows (recomendado) y si quieres el ícono en el escritorio, e instalar. No pide permisos de administrador ni instalar nada más: trae incluidos Node.js y el programa para el acceso desde internet.
+3. Al terminar se abre la app en el navegador, en `http://localhost:8080`.
 
-- **Vercel**: `vercel deploy web/` o arrastra la carpeta `web` en vercel.com/new.
-- **Netlify**: arrastra la carpeta `web` en app.netlify.com/drop.
-- **Cloudflare Pages**: crea un proyecto "Direct upload" y sube `web`.
-- **GitHub Pages**: sube `web/` a un repo y activa Pages.
+Cosas que conviene saber:
 
-No hay paso de build. Si cambias `config.js` solo vuelve a subir la carpeta.
+- **Windows mostrará una advertencia** ("Windows protegió su PC" o "editor desconocido") porque el instalador no está firmado digitalmente. Hay que elegir *Más información → Ejecutar de todas formas*. Descárgalo solo desde este repositorio.
+- Si el Firewall pregunta por el acceso a la red, permítelo en redes privadas para que otros equipos del edificio puedan entrar.
+- Quedan en el menú Inicio **Abrir Mi Edificio**, **Detener Mi Edificio** y **Desinstalar**. El servidor corre en segundo plano, sin ventana.
+- "Iniciar junto con Windows" lo arranca cuando **ese usuario inicia sesión**. Si el computador se reinicia y nadie entra a la sesión, la app no parte: configura el inicio de sesión automático o deja la sesión abierta.
+- Los datos quedan en `%LOCALAPPDATA%\MiEdificio\datos`. **Desinstalar** no borra los datos. Para actualizar, ver "Actualizar" más abajo.
+
+### Mac o Linux
+
+Con [Node.js](https://nodejs.org) 20 o superior instalado, descarga este repositorio (**Code → Download ZIP** o `git clone`) y ejecuta:
+
+```bash
+./local/iniciar.sh
+```
+
+La primera vez descarga sus dependencias (necesita internet) y crea la carpeta `local/datos`. Abre la dirección que muestra, por ejemplo `http://localhost:8080`. Para dejarlo en segundo plano: `node local/lanzar.mjs iniciar` (y `detener` para pararlo).
+
+### En ambos casos
+
+La app ya funciona en ese computador y, por la dirección de red que muestra el servidor, en los equipos conectados a la red del edificio. Para que residentes y conserjes entren desde sus teléfonos, sigue con el paso 2.
+
+Para cambiar el puerto, crea un archivo `puerto.txt` con el número en la carpeta de datos (o define la variable `PUERTO`) y reinicia.
+
+## 2. Acceso desde internet
+
+Los residentes entran desde fuera del edificio, y la cámara (QR de visitas) y las notificaciones exigen una dirección **HTTPS**. Mi Edificio lo resuelve con un túnel de [Cloudflare](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/): un programa (`cloudflared`) que publica el servidor en una dirección segura sin abrir puertos del router. Los datos siguen en tu computador; el túnel solo los transporta.
+
+Necesitas un **dominio** propio (comprarlo cuesta unos US$10 al año) y una **cuenta gratuita en Cloudflare**. Se configura una vez, desde la app, en el asistente inicial (paso "Acceso desde internet") o en **Administración → Edificio → Acceso desde internet**:
+
+1. Crea la cuenta en Cloudflare y agrega tu dominio.
+2. En el panel, entra a *Zero Trust → Networks → Tunnels* y crea un túnel de tipo *Cloudflared*.
+3. Cloudflare muestra un comando con un token largo que empieza con `eyJ`. Cópialo y pégalo en la app; no hace falta ejecutarlo.
+4. En *Public Hostname* elige la dirección, por ejemplo `app.miedificio.cl`, y como servicio `http://localhost:8080`.
+5. Escribe esa dirección en la app y pulsa **Conectar**.
+
+El servidor inicia el túnel solo cada vez que arranca, lo reconecta si se cae, y avisa en Inicio si deja de funcionar. Con el acceso activo, el enlace para invitar a la comunidad usa esa dirección.
+
+La app no ofrece las direcciones temporales gratuitas de Cloudflare (`trycloudflare.com`): cambian en cada reinicio y no tienen garantía de disponibilidad, así que no sirven para una comunidad.
+
+- **Windows**: `cloudflared` viene incluido en el instalador.
+- **Mac o Linux**: instálalo aparte (ver la documentación de Cloudflare) y déjalo en el `PATH`.
+
+Los nombres de las secciones del panel de Cloudflare pueden cambiar. La conexión real con Cloudflare **no está probada por el proyecto**: se probó cómo el servidor maneja el programa (arranque, token, errores, reconexión), no un túnel funcionando. Si lo configuras, cuéntanos cómo te fue.
+
+Cualquier otro túnel o proxy inverso con HTTPS también sirve, siempre que reenvíe la cabecera `X-Forwarded-Proto`. Abrir un puerto del router rara vez es opción: muchos proveedores no entregan una IP pública propia.
 
 ## 3. Primer uso
 
-1. Abre la app → **Crear cuenta** con tu correo → **Crear un edificio nuevo** (nombre del edificio y tu nombre).
-   Quien crea el edificio queda como su **Administrador activo**.
-2. Se abre el **asistente de configuración**, una ventana de 7 pasos: datos del edificio, unidades y alícuotas, datos bancarios, espacios comunes, visitas y estacionamientos, datos personales (plazos de conservación y aviso de privacidad) e invitación a la comunidad. Cada paso se guarda al avanzar, así que puedes dejarlo y retomarlo desde Inicio o desde Administración → Edificio.
+1. Abre la app → **Crear cuenta** → **Configura tu edificio**. La primera cuenta crea el edificio y queda como su **administrador**.
+2. Se abre el **asistente de configuración**, 9 pasos: datos del edificio, unidades y alícuotas, datos bancarios, espacios comunes, visitas y estacionamientos, datos personales, acceso desde internet, respaldo en la nube e invitación. Se guarda al avanzar. Puedes dejarlo y retomarlo desde Inicio o Administración → Edificio.
+3. Comparte la dirección de la app (la de internet, si la activaste) con residentes y conserjes. Cada persona crea su cuenta y queda **pendiente**: aparece en Administración → Usuarios, donde le asignas depto y rol y la activas.
 
-Todo lo que configura el asistente también se puede ajustar a mano después:
+Como administrador tienes el selector **"Ver como"** para revisar la interfaz de cada rol (solo cambia la vista, no tus permisos).
 
-1. **Administración → Edificio**: logo, dirección, color, datos bancarios. Ahí mismo está el **enlace de invitación** del edificio.
-2. **Unidades**: carga los departamentos con su alícuota (hay carga masiva pegando `depto;alícuota;propietario` por línea; la alícuota admite coma decimal). La suma debe dar 100 %.
-3. **Espacios**: botón "Cargar ejemplos" crea quincho, salón, gimnasio y sala de juegos; edita reglas (horario, máx. horas, anticipación, si requiere aprobación).
-4. **Empresas** y **Activos** (para rondas NFC y mantención preventiva).
-5. Comparte el enlace de invitación con residentes y conserjes. Cuando se registren, aparecerán en **Administración → Usuarios** como pendientes: asígnales depto y rol y actívalos.
+**Contraseñas olvidadas.** No hay correo de recuperación: la administración fija una nueva en Administración → Usuarios → "Nueva contraseña" y se la entrega a la persona, que después la cambia en Mi cuenta. Si quien la olvida es el único administrador, no hay forma de recuperarla desde la app: conviene tener dos.
 
-Como administrador tienes el selector **"Ver como"** para revisar la interfaz de cada rol (sigues teniendo permisos de admin en la base de datos; solo cambia la vista).
+## 4. Respaldos y mantención
+
+Todo lo de tu edificio está en la carpeta de datos: `%LOCALAPPDATA%\MiEdificio\datos` si usaste el instalador de Windows, o `local/datos` en los demás casos.
+
+| Carpeta | Contenido |
+|---|---|
+| `db/` | Base de datos |
+| `archivos/` | Fotos y documentos subidos |
+| `respaldos/` | Copia local de la base de datos de cada día (últimos 14), a la hora del respaldo, y una al detener el servidor |
+| `config.json` | Claves propias de esta instalación (no lo compartas) |
+
+### Actualizar
+
+La app revisa una vez al día si hay una versión nueva y le avisa a la administración en Inicio y en **Administración → Edificio → Versión y actualizaciones**.
+
+- **Windows (con el instalador)**: botón **Actualizar ahora**. Descarga el instalador de la versión nueva, comprueba su suma de verificación, detiene el servidor, reemplaza el programa y lo vuelve a iniciar. La app deja de responder unos minutos. También sirve instalar la versión nueva encima, a mano.
+- **Mac o Linux**: detén el servidor, reemplaza los archivos del repositorio por los de la versión nueva (sin tocar `local/datos`) e inícialo.
+
+Cómo se protegen los datos, en cualquier sistema:
+
+1. **Copia previa**: antes de que una versión distinta toque la base de datos, se guarda una copia completa en `respaldos/antes-de-actualizar-…` (se conservan las 5 últimas).
+2. **Todo o nada**: los cambios de la base de datos se aplican en una sola operación. Si algo falla, se deshacen completos y los datos quedan exactamente como estaban.
+3. **Si falla, la app no arranca a medias**: muestra una página de mantención que, abierta en el computador del edificio, explica qué pasó y qué versión volver a instalar para seguir funcionando como antes. Desde fuera solo se ve un aviso general.
+4. **No se puede retroceder por accidente**: la base recuerda qué versión la actualizó. Un programa más antiguo no la abre; indica qué versión instalar.
+
+Para volver a una versión anterior después de una actualización que sí funcionó, hay que restaurar la copia previa (se pierde lo hecho desde entonces): detén el servidor, mueve la carpeta `db/`, instala la versión anterior e inicia con `--restaurar` y esa copia.
+
+Límite: la actualización con un clic confía en lo publicado en GitHub. La suma de verificación detecta descargas dañadas, no una publicación maliciosa; el instalador no está firmado.
+
+### Respaldo en la nube
+
+Para que una falla del computador no se lleve todo, Mi Edificio deja cada día una copia **cifrada** de la base de datos, las fotos y los documentos en una carpeta que tú eliges. Si esa carpeta pertenece a una nube, su aplicación la sube sola:
+
+1. Instala en el computador del edificio la app de **OneDrive**, **Google Drive**, Dropbox o iCloud e inicia sesión en ella.
+2. En el asistente inicial (paso "Respaldo en la nube") o en **Administración → Edificio → Respaldo en la nube**, elige la carpeta. La app propone las carpetas de nube que encuentra en el computador; también puedes escribir la ruta, por ejemplo `C:\Users\Conserjeria\OneDrive\Respaldo Mi Edificio`.
+3. Define la **contraseña del respaldo** y anótala fuera del computador. Sin ella el respaldo no se puede abrir, y nadie puede restablecerla.
+4. Elige la **hora del respaldo diario** (por defecto 03:00, según el reloj del computador). Mientras se respalda, la app puede dejar de responder unos minutos, así que conviene una hora de poco uso. Si el computador está apagado a esa hora, el respaldo se hace cuando vuelva a encenderse ese mismo día.
+
+Si la carpeta no parece estar dentro de una nube, la app lo advierte: el respaldo se haría igual, pero quedaría solo en ese computador. La advertencia se basa en el nombre de la ruta, así que confirma en la app de tu nube que la carpeta realmente se está sincronizando. Inicio avisa a la administración si no hay respaldo configurado, si el último falló o si lleva más de 3 días sin hacerse.
+
+**Restaurar en un computador nuevo**: instala Mi Edificio y la app de tu nube, espera a que baje la carpeta y ejecuta
+
+```bash
+./local/iniciar.sh --restaurar-nube "/ruta/a/Respaldo Mi Edificio"
+```
+
+En Windows con el instalador, abre una ventana de comandos y ejecuta:
+
+```bat
+"%LOCALAPPDATA%\Programs\Mi Edificio\node.exe" "%LOCALAPPDATA%\Programs\Mi Edificio\local\server.mjs" --restaurar-nube "C:\ruta\Respaldo Mi Edificio"
+```
+
+(define antes `set MI_EDIFICIO_DATOS=%LOCALAPPDATA%\MiEdificio\datos`). Este comando en Windows no está probado. Pide la contraseña del respaldo y recupera cuentas, datos y archivos. Después vuelve a configurar el respaldo en Administración.
+
+### Otras tareas
+
+- **Copia manual**: con el servidor detenido, la carpeta `local/datos` completa es un respaldo sin cifrar.
+- **Restaurar solo la base de datos** desde una copia diaria local: con la carpeta `db/` vacía,
+
+  ```bash
+  ./local/iniciar.sh --restaurar local/datos/respaldos/mi-edificio-AAAA-MM-DD.tar.gz
+  ```
+
+- **Si el computador se apaga** o se corta internet, la app deja de responder hasta que vuelva. Conviene configurar que el servidor parta al encender el equipo.
+
+Límites: está pensada para un edificio. La base de datos atiende una consulta a la vez, lo que alcanza de sobra para ese tamaño, y usa PGlite, un Postgres embebido todavía joven.
 
 ## Módulos
 
@@ -78,33 +174,9 @@ Como administrador tienes el selector **"Ver como"** para revisar la interfaz de
 | Estacionamientos de visita | ve el de su visita | ocupa / libera | ve, recibe excesos | define, ocupa / libera, recibe excesos | – |
 | Rondas NFC y bitácora (cumplimiento diario) | – | registra | ve | registra, ve | – |
 | Mantención: activos, plan preventivo, OT | – | – | ve | crea, aprueba | acepta, agenda, ejecuta, cierra |
-| Administración (edificio, usuarios, unidades, espacios, activos, empresas) | – | – | – | ✔ | – |
+| Administración (edificio, usuarios, unidades, espacios, estacionamientos, activos, empresas) | – | – | – | ✔ | – |
 
-La seguridad está en la base de datos (políticas RLS en `schema.sql`), no en el frontend: aunque alguien modifique el JS, solo puede leer y escribir lo que su rol permite, y solo dentro de su edificio.
-
-## Varios edificios
-
-- Cada tabla lleva `edificio_id` y toda política RLS exige que coincida con el edificio del usuario. Un usuario pertenece a un solo edificio.
-- **Unirse**: cada edificio tiene un enlace y un código de invitación (Administración → Edificio). Si la instalación tiene un solo edificio, quien se registra lo encuentra sin código, como antes.
-- **Crear más edificios**: por seguridad, solo el primer edificio se puede crear libremente. Para permitir que cuentas nuevas creen otros edificios, ejecuta en el SQL Editor:
-
-  ```sql
-  update public.plataforma set creacion_abierta = true;
-  ```
-
-  Vuelve a ponerlo en `false` cuando termines si no quieres que cualquiera con la URL cree edificios.
-- Las fotos y documentos de cada edificio se guardan bajo la carpeta `<edificio_id>/` del bucket.
-
-## Encuestas
-
-El comité o la administración publican una pregunta con opciones, plazo opcional y, si corresponde, restringida a propietarios. Cada **unidad** emite un voto y puede cambiarlo mientras la encuesta esté abierta. Nadie ve el voto de otra unidad: la app solo muestra totales (cantidad de votos y suma de alícuotas por opción). Los residentes ven los resultados cuando su unidad ya votó o la encuesta terminó.
-
-## Exportar gastos comunes
-
-- **Comité / administración**: en el detalle de un período, botones **PDF** y **Excel** con los ítems y el prorrateo por unidad (alícuota, monto, estado de pago).
-- **Residentes**: descargan su aviso de cobro del período vigente en PDF o Excel.
-
-El Excel es un `.xlsx` real generado en el navegador (`web/xlsx.js`, sin dependencias). El PDF usa el diálogo de impresión del navegador: elige "Guardar como PDF".
+La seguridad está en la base de datos (permisos por rol y reglas en `schema.sql`), no en el navegador: aunque alguien modifique el JS, solo puede leer y escribir lo que su rol permite.
 
 ## Pagos, convenios y flujo de caja
 
@@ -112,148 +184,115 @@ El Excel es un `.xlsx` real generado en el navegador (`web/xlsx.js`, sin depende
 
 **Convenios de pago.** Para una unidad morosa, la administración elige los cobros atrasados, el número de cuotas mensuales y la fecha de la primera. El convenio queda *propuesto* hasta que alguien de la unidad lo acepta en la app (o la administración registra la aceptación, si se firmó en papel). Mientras está vigente y al día, esos cobros no cuentan como vencidos. Lo que se abona al convenio salda las cuotas en orden y los períodos del más antiguo al más nuevo. Si se anula, lo abonado se conserva y el resto vuelve a ser deuda corriente. El total es la deuda de los cobros incluidos: no calcula intereses ni multas.
 
-**Estado económico.** La administración y el comité ven en Finanzas → Estado lo por cobrar, lo vencido, lo que está en convenio, cuántas unidades están morosas, lo recaudado en el mes y la lista de unidades con deuda. Cada residente ve en Gastos comunes el estado de cuenta de su unidad: saldo, cobros pendientes, convenios y pagos registrados.
+**Estado económico.** La administración y el comité ven en Finanzas → Estado lo por cobrar, lo vencido, lo que está en convenio, cuántas unidades están morosas, lo recaudado en el mes y la lista de unidades con deuda. Cada residente ve en Gastos comunes el estado de cuenta de su unidad.
 
-**Flujo de caja.** Finanzas → Flujo de caja muestra, por mes y con totales del año, los ingresos por gastos comunes (tomados de los pagos registrados, en el mes en que se recibieron), otros ingresos, egresos, flujo neto y saldo acumulado; se exporta a Excel. Los egresos y otros ingresos los anota la administración; para partir con la caja real, anota un ingreso de categoría "Saldo inicial". Los ítems de un período de gastos comunes son lo que se cobra, no egresos: no entran solos al flujo.
+**Flujo de caja.** Finanzas → Flujo de caja muestra, por mes y con totales del año, los ingresos por gastos comunes (tomados de los pagos registrados), otros ingresos, egresos, flujo neto y saldo acumulado; se exporta a Excel. Los egresos y otros ingresos los anota la administración; para partir con la caja real, anota un ingreso de categoría "Saldo inicial". Los ítems de un período de gastos comunes son lo que se cobra, no egresos: no entran solos al flujo.
 
-Al actualizar una instalación anterior, los cobros que estaban marcados como pagados se convierten en pagos con esa fecha.
+## Visitas con QR
 
-## Notificaciones push (opcional)
+Al anunciar una visita, el residente obtiene un QR (con el nombre del edificio, la fecha y un código) que comparte como imagen, por ejemplo por WhatsApp. En conserjería se escanea con **Escanear QR**, o se escribe el código de 8 caracteres, y se abre la ficha de la visita para registrar el ingreso; al salir se escanea de nuevo para registrar la salida.
 
-Avisos en el teléfono o computador cuando llega una encomienda o una visita, hay un mensaje nuevo o algo queda por aprobar o se resuelve (reservas, solicitudes de acceso, órdenes de trabajo). Sin esta configuración la app funciona igual, solo que sin avisos.
+Al anunciar la visita se puede marcar que **necesita estacionamiento**. En Administración → Edificio se decide si en ese caso la patente es obligatoria, pensado para accesos con lectura automática de patentes (LPR). La patente se guarda normalizada (mayúsculas, sin espacios ni guiones). La app no se conecta a ningún sistema LPR: deja el dato disponible en la tabla `visitas`.
 
-1. Genera un par de claves VAPID:
+El QR no contiene datos personales, solo un código aleatorio. La lectura usa el lector de códigos del navegador cuando existe (Chrome en Android) y, si no (iPhone, Firefox), una librería incluida en `web/vendor/`. La cámara requiere HTTPS (paso 2).
 
-   ```bash
-   npx web-push generate-vapid-keys
-   ```
+## Estacionamientos de visita
 
-2. Pon la clave **pública** en `web/config.js` (`VAPID_PUBLIC_KEY`) y vuelve a publicar el sitio.
-3. Despliega la función con la [CLI de Supabase](https://supabase.com/docs/guides/cli) y define sus secretos (inventa un `PUSH_SECRET` largo y aleatorio):
+- **Administración → Estacionamientos**: se crean los estacionamientos de visita (por ejemplo V1…V6), se indica cuáles están reservados (discapacidad, carga y descarga, etc.) y se configuran dos tiempos en minutos.
+- **Conserjería** ve el tablero en el módulo Estacionamientos: toca uno libre para marcarlo ocupado y uno ocupado para liberarlo. Cada casilla muestra cuánto tiempo lleva y cambia de color al superar cada tiempo. Si una visita anunciada con estacionamiento registra su ingreso, la app lleva directo a elegirle un lugar.
+- **Avisos**: al ocupar se avisa al residente con el tiempo máximo; al cumplirse el primer tiempo recibe una alerta; al cumplirse el segundo se informa a administración y comité, y el uso queda en la pestaña **Excedidos** como respaldo para cursar una multa según el reglamento. La app no calcula ni cobra multas.
 
-   ```bash
-   supabase functions deploy push --no-verify-jwt --project-ref TU-PROYECTO
-   ```
+La hora de inicio y de término las pone el servidor, no el teléfono de conserjería. Los tiempos se revisan cada 5 minutos.
 
-   ```bash
-   supabase secrets set VAPID_PUBLIC_KEY=... VAPID_PRIVATE_KEY=... VAPID_SUBJECT=mailto:tu@correo.cl PUSH_SECRET=... --project-ref TU-PROYECTO
-   ```
+## Encuestas
 
-4. En el SQL Editor, indica a la base de datos dónde está la función (mismo `PUSH_SECRET`):
+El comité o la administración publican una pregunta con opciones, plazo opcional y, si corresponde, restringida a propietarios. Cada **unidad** emite un voto y puede cambiarlo mientras la encuesta esté abierta. Nadie ve el voto de otra unidad: la app solo muestra totales (cantidad de votos y suma de alícuotas por opción).
 
-   ```sql
-   update public.plataforma
-   set push_url = 'https://TU-PROYECTO.supabase.co/functions/v1/push', push_secret = 'EL_MISMO_PUSH_SECRET';
-   ```
+## Notificaciones
 
-5. Cada persona activa los avisos en **Mi cuenta → Notificaciones**, en cada dispositivo.
+Avisos en el teléfono o computador cuando llega una encomienda o una visita, hay un mensaje nuevo, se registra un pago o algo queda por aprobar. Cada persona las activa en **Mi cuenta → Notificaciones**, en cada dispositivo. El servidor genera sus claves solo; no hay nada que configurar.
 
-Cómo funciona: triggers de `schema.sql` deciden a quién avisar y llaman a la función con la extensión `pg_net` (si `schema.sql` avisó que no pudo activarla, habilítala en *Database → Extensions*). La función solo acepta llamadas con el secreto y envía a los servicios de push de los navegadores. La clave privada VAPID y el secreto nunca van en el repositorio ni en `config.js`.
+Requieren que la app esté publicada con HTTPS (paso 2) y que el computador del edificio tenga internet. En iPhone/iPad solo funcionan con la app agregada a la pantalla de inicio (iOS 16.4 o superior). El envío real a teléfonos no está probado por el proyecto.
 
-Limitaciones: en iPhone/iPad las notificaciones web solo funcionan con la app agregada a la pantalla de inicio (iOS 16.4 o superior).
+## Fotos y archivos
+
+Se guardan en `local/datos/archivos`. Nadie puede abrirlos sin sesión: la app pide al servidor un enlace firmado que dura 1 hora, y el servidor solo lo entrega a quien puede leer ese archivo según su rol (por ejemplo, la foto de una encomienda la ven conserjería, administración y la unidad destinataria). Las imágenes se comprimen en el navegador a 1280 px antes de subir; el máximo por archivo es 15 MB.
+
+## NFC
+
+El escaneo de rondas usa **Web NFC**, disponible solo en Chrome para Android. Graba en cada tag un registro de texto con el código que pusiste en el activo (p. ej. `CHK-P12`). En otros dispositivos el conserje puede escribir el código o elegir el activo de la lista.
 
 ## Seguridad
 
-El modelo de seguridad, las limitaciones conocidas y una lista de verificación para configurar Supabase están en [`SECURITY.md`](SECURITY.md). Lo esencial: activa la confirmación de correo y el CAPTCHA en Supabase Auth, protege con MFA tu cuenta de Supabase, y limita quién tiene acceso al proyecto.
+El modelo de seguridad y sus limitaciones están en [`SECURITY.md`](SECURITY.md). Lo esencial: el computador que ejecuta el servidor guarda los datos de toda la comunidad, así que mantenlo actualizado, con contraseña y con acceso restringido, y respalda `local/datos`.
 
 ## Datos personales (Chile)
 
 La app trata datos personales de residentes, trabajadores y visitas: nombre, teléfono, correo, unidad, RUT y patente de visitas, fotos, mensajes, votos y estado de pago de gastos comunes. En Chile eso está regulado por la Ley 19.628, reformada por la **Ley 21.719** (crea la Agencia de Protección de Datos Personales y multas de hasta 20.000 UTM). Su entrada en vigencia estaba fijada para el 1 de diciembre de 2026 y a noviembre de 2026 se tramitaba una postergación a octubre de 2027: verifica la fecha vigente.
 
-Esto no es asesoría legal. Quién responde por qué:
-
-- **Responsable de los datos**: la comunidad de copropietarios (a través de su comité y administración), no este proyecto. Si operas la instalación para comunidades ajenas, actúas como encargado y conviene un contrato que lo regule.
-- **Supabase y el hosting** son proveedores que tratan los datos por cuenta del responsable, normalmente fuera de Chile (transferencia internacional): revisa sus condiciones de tratamiento de datos.
+Esto no es asesoría legal. El **responsable de los datos** es la comunidad de copropietarios (a través de su comité y administración), no este proyecto. Con la instalación local, los datos quedan en un equipo del edificio y no se entregan a un tercero.
 
 Lo que la app ya trae para cumplir:
 
 | Obligación | Cómo se cubre |
 |---|---|
-| Informar al titular | Aviso de privacidad por edificio (Administración → Edificio), mostrado y aceptado al registrarse y disponible en Mi cuenta. Se guarda la fecha de aceptación. |
+| Informar al titular | Aviso de privacidad del edificio (Administración → Edificio), mostrado y aceptado al registrarse y disponible en Mi cuenta. Se guarda la fecha de aceptación. |
 | Acceso y portabilidad | Mi cuenta → **Descargar mis datos** (JSON). |
 | Rectificación | Cada persona edita su nombre y teléfono; unidad y rol los corrige la administración. |
-| Supresión | Mi cuenta → **Eliminar mi cuenta**: borra nombre, teléfono y unidad y bloquea el acceso. El correo queda en Supabase Auth hasta que el operador elimine el usuario en *Authentication → Users*. |
-| Conservación limitada | Administración → Edificio → **Conservación de datos**: la administración fija cuántos meses se guardan visitas, rondas, encomiendas entregadas, mensajes, reservas, incidencias cerradas y uso de estacionamientos. Lo que supera el plazo se borra a diario. |
-| Seguridad y mínimo acceso | RLS por rol y por edificio; cada unidad ve solo sus cobros, encomiendas, visitas y voto. |
+| Supresión | Mi cuenta → **Eliminar mi cuenta**: borra nombre, teléfono y unidad y bloquea el acceso. |
+| Conservación limitada | Administración → Edificio → **Conservación de datos**: la administración fija cuántos meses se guardan visitas, rondas, encomiendas entregadas, mensajes, reservas, incidencias cerradas y uso de estacionamientos. Lo que supera el plazo se borra a diario, con sus fotos. |
+| Seguridad y mínimo acceso | Permisos por rol; cada unidad ve solo sus cobros, encomiendas, visitas y voto. |
 
 Lo que debe resolver cada comunidad (no lo hace el software):
 
-1. Redactar su aviso de privacidad: quién es el responsable y cómo contactarlo, para qué se usan los datos, a quién se comunican, por cuánto tiempo se guardan y cómo ejercer los derechos. El texto por defecto es genérico.
-2. Definir sus **plazos de conservación** en Administración → Edificio. Mientras no se definan, nada se borra: visitas (con RUT y patente de terceros), rondas, encomiendas y mensajes se acumulan indefinidamente. Gastos comunes, comunicados, documentos, encuestas y órdenes de trabajo no tienen borrado automático.
+1. Redactar su aviso de privacidad: quién es el responsable y cómo contactarlo, para qué se usan los datos, por cuánto tiempo se guardan y cómo ejercer los derechos. El texto por defecto es genérico.
+2. Definir sus **plazos de conservación**. Mientras no se definan, nada se borra. Gastos comunes, pagos, comunicados, documentos, encuestas y órdenes de trabajo no tienen borrado automático.
 3. Pedir a las visitas solo los datos necesarios; RUT y patente son opcionales en el formulario.
 4. Tener un procedimiento para responder solicitudes de los titulares y para avisar a la Agencia y a los afectados si hay una filtración.
-5. Decidir qué se sube a Documentos: todo residente del edificio puede leer lo que se publique ahí (listados de morosidad o contratos con RUT no deberían ir).
+5. Decidir qué se sube a Documentos: todo residente del edificio puede leer lo que se publique ahí.
+6. Cuidar el computador y los respaldos: quien tenga la carpeta `local/datos` tiene todos los datos. El respaldo en la nube va cifrado, pero queda en la cuenta personal o institucional de quien inició sesión en esa nube: decide de quién es esa cuenta.
 
-### Cómo funciona el borrado por plazo
+## Instalación alternativa: Supabase
 
-Una tarea diaria (`pg_cron`, 07:23 UTC) borra en cada edificio lo que supera sus plazos. Si al ejecutar `schema.sql` aparece el aviso de que `pg_cron` no está disponible, actívalo en *Database → Extensions* y vuelve a ejecutar el script; mientras tanto el borrado solo corre con el botón **Aplicar ahora**. El borrado es definitivo. Las fotos asociadas se eliminan del bucket la siguiente vez que alguien de la administración abre la app.
+La misma app puede funcionar sobre un proyecto de [Supabase](https://supabase.com) en vez del servidor local, para quien prefiera no mantener un computador encendido:
 
-## Fotos y archivos
+1. Crea un proyecto, ejecuta `supabase/schema.sql` completo en el SQL Editor y habilita el proveedor *Email* en Authentication.
+2. Copia *Project URL* y *anon public key* en `web/config.js` y sube la carpeta `web/` a un hosting estático (Vercel, Netlify, Cloudflare Pages).
+3. Para notificaciones push: genera claves VAPID (`npx web-push generate-vapid-keys`), pon la pública en `config.js`, despliega `supabase/functions/push` con sus secretos (`VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT`, `PUSH_SECRET`) e indica su URL y secreto en la tabla `plataforma` (`push_url`, `push_secret`). Activa las extensiones `pg_net` y `pg_cron`.
 
-Se guardan en el bucket privado `fotos` de Supabase Storage. Nadie puede abrirlos sin sesión: la app pide a Supabase una URL firmada que dura 1 hora, y Supabase solo la entrega a quien puede leer ese archivo según su rol (por ejemplo, la foto de una encomienda la ven conserjería, administración y la unidad destinataria; las fotos de una orden de trabajo, la administración y la empresa asignada). Solo se puede subir a la carpeta del propio edificio. Las imágenes se comprimen en el navegador a 1280 px antes de subir. El plan gratuito incluye 1 GB.
-
-## Visitas con QR
-
-Al anunciar una visita, el residente obtiene un QR (con el nombre del edificio, la fecha y un código) que comparte como imagen, por ejemplo por WhatsApp. En conserjería se escanea con **Escanear QR**, o se escribe el código de 8 caracteres, y se abre la ficha de la visita para registrar el ingreso; al salir se escanea de nuevo para registrar la salida. Si las notificaciones push están configuradas, el residente recibe un aviso cuando su visita ingresa.
-
-Al anunciar la visita se puede marcar que **necesita estacionamiento**. En Administración → Edificio, la administración decide si en ese caso la patente es obligatoria, pensado para accesos con lectura automática de patentes (LPR). La patente se guarda normalizada (mayúsculas, sin espacios ni guiones) para poder compararla con lo que lea la cámara. La app no se conecta a ningún sistema LPR: deja el dato disponible en la tabla `visitas`.
-
-El QR no contiene datos personales, solo un código aleatorio: para saber a qué visita corresponde hay que tener sesión de conserjería o administración en ese edificio. La lectura usa el lector de códigos del navegador cuando existe (Chrome en Android) y, si no (iPhone, Firefox), una librería incluida en `web/vendor/`. La cámara requiere que la app esté publicada con HTTPS.
-
-## Estacionamientos de visita
-
-- **Administración → Estacionamientos**: se crean los estacionamientos de visita (por ejemplo V1…V6), se indica cuáles están reservados (discapacidad, carga y descarga, etc.) y se configuran dos tiempos en minutos.
-- **Conserjería** ve el tablero en el módulo Estacionamientos: toca uno libre para marcarlo ocupado (departamento, patente y, si corresponde, la visita anunciada) y uno ocupado para liberarlo. Cada casilla muestra cuánto tiempo lleva y cambia de color al superar cada tiempo. Si una visita anunciada con estacionamiento registra su ingreso, la app lleva directo a elegirle un lugar.
-- **Avisos**: al ocupar se avisa al residente con el tiempo máximo; al cumplirse el primer tiempo recibe una alerta; al cumplirse el segundo se informa a administración y comité, y el uso queda en la pestaña **Excedidos** como respaldo para cursar una multa según el reglamento. La app no calcula ni cobra multas.
-- Los avisos al teléfono requieren las notificaciones push configuradas; sin ellas, los colores, la pestaña Excedidos y el aviso en la pantalla Visitas del residente funcionan igual.
-- Los tiempos los revisa una tarea cada 5 minutos (`pg_cron`). Sin esa extensión, se revisan solo mientras conserjería o administración tienen abierto el módulo.
-
-La hora de inicio y de término las pone la base de datos, no el teléfono de conserjería, y no se pueden editar desde la app.
-
-## NFC
-
-El escaneo usa **Web NFC**, disponible solo en Chrome para Android. Graba en cada tag un registro de texto con el código que pusiste en el activo (p. ej. `CHK-P12`). En otros dispositivos el conserje puede escribir el código o elegir el activo de la lista.
-
-## Pagos en línea
-
-No incluidos por decisión de alcance: los pagos se registran a mano (ver "Pagos, convenios y flujo de caja"). Si más adelante se agrega (Webpay, Khipu, Fintoc), lo correcto es hacerlo en una **Edge Function** de Supabase que reciba la confirmación del proveedor y inserte el pago en la tabla `pagos`, nunca desde el navegador.
-
-## Actualizar una instalación anterior (un solo edificio)
-
-Vuelve a ejecutar `supabase/schema.sql` completo en el SQL Editor y publica de nuevo la carpeta `web/`. El script migra solo: la fila de `config` pasa a ser el primer edificio (tabla `edificios`) y todos los datos existentes quedan asociados a él. Haz un respaldo antes (*Database → Backups*).
-
-Los archivos subidos antes de la actualización quedan fuera de la carpeta del edificio: se siguen viendo con las mismas reglas por rol, pero desde la app ya no se pueden borrar del bucket (sí desde el panel de Supabase). Si tu bucket `fotos` era público, el script lo deja privado: cualquier enlace directo a un archivo que se haya compartido antes deja de funcionar.
+Este modo comparte el esquema y sus pruebas con el modo local, pero **nunca se ha desplegado en un proyecto Supabase real**. Si tu Supabase es autoalojado, agrega su dominio en la política `connect-src` de `web/index.html`.
 
 ## Pruebas
 
-`supabase/tests/run.sh` aplica el esquema en un Postgres local (con sustitutos mínimos de `auth`, `storage` y `pg_net`) y verifica instalación nueva, idempotencia, aislamiento entre edificios, encuestas, avisos y la migración desde la versión de un solo edificio:
+- **Permisos, reglas y actualizaciones** (`supabase/tests/run.sh`): aplica el esquema en un Postgres y verifica instalación nueva, re-ejecución, permisos por rol y unidad, pagos y convenios, encuestas, avisos y archivos. Además actualiza desde el esquema de **cada versión publicada** (`supabase/tests/versiones/`), con datos, y comprueba que no se pierde nada.
 
-```bash
-PGHOST=localhost PGUSER=postgres supabase/tests/run.sh
-```
+  ```bash
+  PGHOST=localhost PGUSER=postgres supabase/tests/run.sh
+  ```
 
-La CI lo ejecuta en cada push junto con la verificación de sintaxis del frontend.
+- **Servidor local** (`local/test.mjs`): levanta el servidor con datos temporales y lo usa por HTTP: cuentas, consultas, permisos, archivos, avisos de cambios, respaldo, persistencia, y que una actualización fallida no toque los datos.
 
-## Costos estimados
+  ```bash
+  cd local && npm install && npm test
+  ```
 
-- Supabase Free: 500 MB base de datos, 1 GB storage, 50.000 usuarios auth. Suficiente para un edificio. Pro: US$25/mes.
-- Hosting estático: gratis en Vercel / Netlify / Cloudflare Pages.
-
-## Próximos pasos sugeridos
-
-1. Desplegar y probar de punta a punta en un proyecto Supabase real (en especial las notificaciones push).
-2. Administradoras con varios edificios: que una misma cuenta pueda pertenecer a más de un edificio y cambiar entre ellos.
-3. Pagos en línea mediante Edge Function.
-4. Avisos push para comunicados y encuestas nuevas.
+La CI ejecuta ambas en cada push y construye el instalador de Windows.
 
 ## Versiones
 
 La versión vigente está en el archivo [`VERSION`](VERSION) y los cambios de cada una en [`CHANGELOG.md`](CHANGELOG.md). Al fusionar una versión nueva en `main`, el workflow `Release` crea la etiqueta y el release en GitHub.
 
+## Próximos pasos sugeridos
+
+1. Probarla en un edificio real, con túnel y notificaciones en teléfonos.
+2. Firmar el instalador de Windows y dejar el servidor como servicio, para que parta sin iniciar sesión.
+3. Respaldo con inicio de sesión directo en Google Drive o OneDrive, sin instalar su aplicación.
+4. Pagos en línea e intereses por mora.
+
 ## Contribuir
 
-Mi Edificio es software libre: úsalo, adáptalo a tu comunidad y envía mejoras. Lee [`CONTRIBUTING.md`](CONTRIBUTING.md) para preparar el entorno y conocer las reglas del proyecto (sin frameworks, seguridad en RLS, `schema.sql` idempotente). Las vulnerabilidades se reportan en privado desde *Security → Report a vulnerability*.
+Mi Edificio es software libre: úsalo, adáptalo a tu comunidad y envía mejoras. Lee [`CONTRIBUTING.md`](CONTRIBUTING.md) para conocer las reglas del proyecto. Las vulnerabilidades se reportan en privado desde *Security → Report a vulnerability*.
 
 ## Licencia
 
-[MIT](LICENSE).
+[MIT](LICENSE). El código de terceros incluido está descrito en [`web/vendor/README.md`](web/vendor/README.md).

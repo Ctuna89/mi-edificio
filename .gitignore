@@ -8,3 +8,9 @@ supabase/.temp/
 supabase/.branches/
 # Configuración local con las claves de tu propio proyecto Supabase
 web/config.local.js
+# Datos del servidor local (base de datos, archivos, respaldos y claves)
+local/datos/
+# Construcción del instalador de Windows
+instalador/obra/
+instalador/cache/
+dist/
