@@ -78,7 +78,7 @@ Todo lo de tu edificio está en `local/datos`:
 |---|---|
 | `db/` | Base de datos |
 | `archivos/` | Fotos y documentos subidos |
-| `respaldos/` | Copia local de la base de datos de cada día (últimos 14) y una al detener el servidor |
+| `respaldos/` | Copia local de la base de datos de cada día (últimos 14), a la hora del respaldo, y una al detener el servidor |
 | `config.json` | Claves propias de esta instalación (no lo compartas) |
 
 ### Respaldo en la nube
@@ -88,6 +88,7 @@ Para que una falla del computador no se lleve todo, Mi Edificio deja cada día u
 1. Instala en el computador del edificio la app de **OneDrive**, **Google Drive**, Dropbox o iCloud e inicia sesión en ella.
 2. En el asistente inicial (paso "Respaldo en la nube") o en **Administración → Edificio → Respaldo en la nube**, elige la carpeta. La app propone las carpetas de nube que encuentra en el computador; también puedes escribir la ruta, por ejemplo `C:\Users\Conserjeria\OneDrive\Respaldo Mi Edificio`.
 3. Define la **contraseña del respaldo** y anótala fuera del computador. Sin ella el respaldo no se puede abrir, y nadie puede restablecerla.
+4. Elige la **hora del respaldo diario** (por defecto 03:00, según el reloj del computador). Mientras se respalda, la app puede dejar de responder unos minutos, así que conviene una hora de poco uso. Si el computador está apagado a esa hora, el respaldo se hace cuando vuelva a encenderse ese mismo día.
 
 Si la carpeta no parece estar dentro de una nube, la app lo advierte: el respaldo se haría igual, pero quedaría solo en ese computador. La advertencia se basa en el nombre de la ruta, así que confirma en la app de tu nube que la carpeta realmente se está sincronizando. Inicio avisa a la administración si no hay respaldo configurado, si el último falló o si lleva más de 3 días sin hacerse.
 

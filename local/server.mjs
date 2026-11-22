@@ -318,8 +318,11 @@ function carpetasDeNube() {
   if (process.platform === 'win32') for (const l of 'DEFGHIJKLMNOPQRSTUVWXYZ') ['My Drive', 'Mi unidad'].forEach(n => c.add(`${l}:\\${n}`));
   return [...c].filter(d => { try { return fs.statSync(d).isDirectory(); } catch { return false; } }).map(d => path.join(d, 'Respaldo Mi Edificio'));
 }
-const estadoRespaldo = () => { const r = CFG.respaldo || {}; return { configurado: !!(r.carpeta && r.llave), carpeta: r.carpeta || '', pareceNube: pareceNube(r.carpeta), ultimo: r.ultimo || null, sugerencias: carpetasDeNube() }; };
-function configurarRespaldo({ carpeta, clave }) {
+// Hora (del reloj de este computador) en que corren el respaldo y las tareas diarias. Por defecto, 03:00.
+const horaDiaria = () => Number.isInteger(CFG.respaldo?.hora) ? CFG.respaldo.hora : 3;
+const estadoRespaldo = () => { const r = CFG.respaldo || {}; return { configurado: !!(r.carpeta && r.llave), carpeta: r.carpeta || '', pareceNube: pareceNube(r.carpeta), hora: horaDiaria(), ultimo: r.ultimo || null, sugerencias: carpetasDeNube() }; };
+function configurarRespaldo({ carpeta, clave, hora }) {
+  if (hora !== undefined && hora !== null && hora !== '' && !(Number.isInteger(Number(hora)) && Number(hora) >= 0 && Number(hora) <= 23)) throw new Fallo('La hora del respaldo debe estar entre 0 y 23');
   carpeta = String(carpeta || '').trim();
   if (!carpeta || !path.isAbsolute(carpeta)) throw new Fallo('Escribe la ruta completa de la carpeta, por ejemplo C:\\Users\\Conserjeria\\OneDrive\\Respaldo Mi Edificio');
   carpeta = path.resolve(carpeta);
@@ -328,7 +331,8 @@ function configurarRespaldo({ carpeta, clave }) {
   const r = CFG.respaldo || {};
   if (clave) { if (typeof clave !== 'string' || clave.length < 8) throw new Fallo('La contraseña del respaldo debe tener al menos 8 caracteres'); const sal = crypto.randomBytes(16); r.sal = sal.toString('hex'); r.llave = derivar(clave, sal).toString('hex'); }
   else if (!r.llave) throw new Fallo('Define una contraseña para el respaldo');
-  r.carpeta = carpeta; delete r.ultimo; CFG.respaldo = r; guardarCfg();
+  if (r.carpeta !== carpeta || clave) delete r.ultimo;
+  r.carpeta = carpeta; if (hora !== undefined && hora !== null && hora !== '') r.hora = Number(hora); CFG.respaldo = r; guardarCfg();
 }
 let respaldandoNube = false;
 async function respaldarNube() {
@@ -353,15 +357,16 @@ async function respaldarNube() {
   return r.ultimo;
 }
 
-// Cada 5 minutos: plazos de estacionamiento. Una vez al día: plazos de conservación y respaldo.
-let diaHecho = '';
+// Cada 5 minutos: plazos de estacionamiento. Una vez al día, a la hora elegida: plazos de conservación
+// y respaldos. Mientras se respalda, la base de datos no atiende otras consultas.
+const diaLocal = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 async function tareas() {
   try {
     const r = await db.query(`select privado.revisar_estacionamientos() as n`); if (r.rows[0].n > 0) difundir();
     await db.query(`delete from auth.sesiones where expira < now()`);
-    const hoy = new Date(); const dia = hoy.toISOString().slice(0, 10);
-    if (dia !== diaHecho && hoy.getHours() >= 3) {
-      diaHecho = dia;
+    const hoy = new Date(); const dia = diaLocal(hoy);
+    if (dia !== CFG.diarioHecho && hoy.getHours() >= horaDiaria()) {
+      CFG.diarioHecho = dia; guardarCfg();   // se anota antes: si algo falla no se reintenta cada 5 minutos
       await db.query(`select privado.depurar()`);
       const pend = await db.query(`delete from public.archivos_por_borrar returning path`);
       for (const x of pend.rows) { if (rutaValida(x.path)) { fs.rmSync(enDisco(x.path), { force: true }); await db.query(`delete from storage.objects where name = $1`, [x.path]); } }

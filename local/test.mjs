@@ -133,7 +133,9 @@ test('respaldo cifrado en una carpeta, con aviso si no es de nube, y restauraci�
   assert.equal((await ana.pedir('/api/respaldo/configurar', { carpeta: 'relativa', clave: 'clave-del-respaldo' })).estado, 400);
   assert.equal((await ana.pedir('/api/respaldo/configurar', { carpeta: simple })).estado, 400, 'exige contraseña');
   assert.equal((await ana.pedir('/api/respaldo/configurar', { carpeta: path.join(DATOS, 'x'), clave: 'clave-del-respaldo' })).estado, 400, 'no dentro de los datos');
-  let e = (await ana.pedir('/api/respaldo/configurar', { carpeta: simple, clave: 'clave-del-respaldo' })).data;
+  assert.equal((await ana.pedir('/api/respaldo/estado')).data.hora, 3, 'por defecto, de madrugada');
+  assert.equal((await ana.pedir('/api/respaldo/configurar', { carpeta: simple, clave: 'clave-del-respaldo', hora: 25 })).estado, 400);
+  let e = (await ana.pedir('/api/respaldo/configurar', { carpeta: simple, clave: 'clave-del-respaldo', hora: 4 })).data; assert.equal(e.hora, 4);
   assert.equal(e.configurado, true); assert.equal(e.pareceNube, false, 'una carpeta cualquiera se marca como "no parece de nube"');
   e = (await ana.pedir('/api/respaldo/configurar', { carpeta: deNube })).data; assert.equal(e.pareceNube, true, 'una carpeta dentro de OneDrive sí');
   const ruta = `${eid}/documentos/2026-11-22/acta.pdf`; await ana.subir(ruta, 'TEXTO-SECRETO-DEL-ACTA');
