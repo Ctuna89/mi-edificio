@@ -443,21 +443,35 @@ create table if not exists public.caja_movimientos (
   ts          timestamptz default now()
 );
 
--- Lecturas de medidores individuales (agua caliente, calefacción, gas…) por período.
--- El consumo del período es actual − anterior. Con ellas se reparten los ítems "según consumo".
+-- Lecturas de medidores individuales (agua caliente, calefacción, gas…) por período. Cada mes se anota
+-- el número que marca el medidor; el consumo es la diferencia con la lectura del mes anterior.
+-- Si en el período se cambió el medidor, el consumo suma los dos tramos:
+--   (última lectura del medidor retirado − lectura del mes anterior) + (lectura actual − lectura inicial del nuevo)
+-- Con ellas se reparten los ítems "según consumo". El consumo nunca es negativo.
 create table if not exists public.lecturas (
   edificio_id uuid references public.edificios(id) on delete cascade,
   periodo     text not null,                -- 'YYYY-MM', el período de gastos comunes en que se cobra
   medidor     text not null,                -- id del tipo de medidor (edificios.medidores)
   depto       text not null,
-  anterior    numeric(14,3) not null,          -- si no se indica, la pone el trigger (última lectura o 0)
+  anterior    numeric(14,3) not null,       -- lectura del mes anterior: la pone el trigger (solo la primera se ingresa)
   actual      numeric(14,3) not null,
   nota        text default '',
   registrado_por uuid references public.usuarios(id),
   ts          timestamptz default now(),
-  primary key (edificio_id, periodo, medidor, depto),
-  check (actual >= anterior)
+  primary key (edificio_id, periodo, medidor, depto)
 );
+alter table public.lecturas add column if not exists cambio boolean not null default false;     -- se cambió el medidor en el período
+alter table public.lecturas add column if not exists final_retirado numeric(14,3);              -- última lectura del medidor retirado
+alter table public.lecturas add column if not exists inicial_nuevo numeric(14,3) not null default 0;  -- lectura del medidor nuevo al instalarlo
+alter table public.lecturas add column if not exists consumo numeric(14,3) generated always as (
+  case when cambio then (coalesce(final_retirado, anterior) - anterior) + (actual - inicial_nuevo) else actual - anterior end) stored;
+alter table public.lecturas drop constraint if exists lecturas_check;
+do $$ begin
+  if not exists (select 1 from pg_constraint where conname = 'lecturas_sin_negativos') then
+    alter table public.lecturas add constraint lecturas_sin_negativos check (
+      case when cambio then final_retirado is not null and final_retirado >= anterior and actual >= inicial_nuevo else actual >= anterior end);
+  end if;
+end $$;
 
 -- Fondos (reserva, mantención, otros). Se provisionan con ítems del gasto común marcados con items[].fondo
 -- (al publicar el período se anota el aporte) y se usan con movimientos registrados por la administración.
@@ -1108,7 +1122,7 @@ begin
     if coalesce(it.x->>'prorrateo', 'alicuota') = 'consumo' then
       select m into med from public.edificios ed, jsonb_array_elements(ed.medidores) m where ed.id = e and m->>'id' = it.x->>'medidor';
       if med is null then raise exception 'El ítem "%" usa un medidor que no existe', it.x->>'categoria'; end if;
-      select coalesce(sum(l.actual - l.anterior), 0) into c from public.lecturas l
+      select coalesce(sum(l.consumo), 0) into c from public.lecturas l
       where l.edificio_id = e and l.periodo = p_periodo and l.medidor = it.x->>'medidor'
         and exists (select 1 from public.unidades u where u.edificio_id = e and u.depto = l.depto);
       if c <= 0 and g.publicado and coalesce((it.x->>'fijo')::numeric, 0) < 100 and coalesce((it.x->>'monto')::numeric, 0) > 0 then
@@ -1130,7 +1144,7 @@ begin
                 least(greatest(coalesce((x->>'fijo')::numeric, 0), 0), 100) as fijo,
                 array(select jsonb_array_elements_text(coalesce(x->'deptos', '[]'::jsonb))) as deptos
          from jsonb_array_elements(its) with ordinality t(x, i)),
-  lec as (select medidor, depto, actual - anterior as c from public.lecturas where edificio_id = e and periodo = p_periodo),
+  lec as (select medidor, depto, consumo as c from public.lecturas where edificio_id = e and periodo = p_periodo),
   tot as (select l.medidor, sum(l.c) as c from lec l join u on u.depto = l.depto group by l.medidor),
   sel as (select itm.i, count(u.depto) as k from itm join u on u.depto = any(itm.deptos) group by itm.i),
   exacto as (
@@ -1345,6 +1359,7 @@ $$;
 -- el período, sus lecturas ya no cambian (para corregir, se despublica, se corrige y se recalcula).
 create or replace function public.lecturas_antes() returns trigger
 language plpgsql security definer set search_path = public as $$
+declare prev numeric;
 begin
   if tg_op in ('UPDATE', 'DELETE') and exists (select 1 from public.gastos where edificio_id = old.edificio_id and periodo = old.periodo and publicado) then
     raise exception 'El período % ya está publicado: para corregir una lectura, despublícalo primero', old.periodo;
@@ -1358,12 +1373,25 @@ begin
     raise exception 'Medidor no válido';
   end if;
   if not exists (select 1 from public.unidades where edificio_id = new.edificio_id and depto = new.depto) then raise exception 'La unidad % no existe', new.depto; end if;
-  if new.anterior is null then
-    new.anterior := coalesce((select l.actual from public.lecturas l where l.edificio_id = new.edificio_id and l.medidor = new.medidor
-                              and l.depto = new.depto and l.periodo < new.periodo order by l.periodo desc limit 1), 0);
-  end if;
-  if new.actual < new.anterior then
-    raise exception 'Unidad %: la lectura actual (%) es menor que la anterior (%). Si se cambió el medidor, pon 0 como anterior', new.depto, new.actual, new.anterior;
+  -- la lectura anterior es siempre la del último período con lectura; solo la primera de una unidad se ingresa a mano
+  select l.actual into prev from public.lecturas l where l.edificio_id = new.edificio_id and l.medidor = new.medidor
+    and l.depto = new.depto and l.periodo < new.periodo order by l.periodo desc limit 1;
+  if found then new.anterior := prev; else new.anterior := coalesce(new.anterior, 0); end if;
+  if new.anterior < 0 or new.actual < 0 then raise exception 'Unidad %: las lecturas no pueden ser negativas', new.depto; end if;
+  if new.cambio then
+    new.inicial_nuevo := coalesce(new.inicial_nuevo, 0);
+    if new.final_retirado is null then raise exception 'Unidad %: indica la última lectura del medidor retirado', new.depto; end if;
+    if new.final_retirado < new.anterior then
+      raise exception 'Unidad %: la última lectura del medidor retirado (%) es menor que la del mes anterior (%)', new.depto, new.final_retirado, new.anterior;
+    end if;
+    if new.actual < new.inicial_nuevo then
+      raise exception 'Unidad %: la lectura actual (%) es menor que la inicial del medidor nuevo (%)', new.depto, new.actual, new.inicial_nuevo;
+    end if;
+  else
+    new.final_retirado := null; new.inicial_nuevo := 0;
+    if new.actual < new.anterior then
+      raise exception 'Unidad %: la lectura actual (%) es menor que la del mes anterior (%). Si se cambió el medidor, márcalo como cambio de medidor', new.depto, new.actual, new.anterior;
+    end if;
   end if;
   new.registrado_por := auth.uid(); new.ts := now();
   return new;
@@ -1371,6 +1399,26 @@ end $$;
 drop trigger if exists lecturas_antes on public.lecturas;
 create trigger lecturas_antes before insert or update or delete on public.lecturas
 for each row execute function public.lecturas_antes();
+
+-- Si cambia o se borra una lectura, la del período siguiente (si aún no está publicado) toma la nueva
+-- lectura anterior. Si el siguiente ya está publicado, el cambio no se permite.
+create or replace function public.lecturas_despues() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare r public.lecturas; sig text;
+begin
+  r := coalesce(new, old);
+  if tg_op = 'UPDATE' and new.actual = old.actual then return null; end if;
+  select periodo into sig from public.lecturas where edificio_id = r.edificio_id and medidor = r.medidor and depto = r.depto and periodo > r.periodo order by periodo limit 1;
+  if sig is null then return null; end if;
+  if exists (select 1 from public.gastos where edificio_id = r.edificio_id and periodo = sig and publicado) then
+    raise exception 'Unidad %: la lectura de % ya se usó como anterior en el período publicado %', r.depto, r.periodo, sig;
+  end if;
+  update public.lecturas set anterior = anterior where edificio_id = r.edificio_id and medidor = r.medidor and depto = r.depto and periodo = sig;
+  return null;
+end $$;
+drop trigger if exists lecturas_despues on public.lecturas;
+create trigger lecturas_despues after insert or update or delete on public.lecturas
+for each row execute function public.lecturas_despues();
 
 -- Encuestas: ¿puede mi unidad votar esta opción ahora?
 create or replace function public.puede_votar(p_encuesta uuid, p_opcion int) returns boolean

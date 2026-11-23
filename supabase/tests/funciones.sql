@@ -104,6 +104,19 @@ select t.ok((select anterior = 110 from lecturas where periodo = '2030-02' and d
 select t.falla($$insert into lecturas (periodo, medidor, depto, actual) values ('2030-02', 'acs', '102', 40)$$, 'lectura actual menor que la anterior');
 select t.falla($$insert into lecturas (periodo, medidor, depto, actual) values ('2030-02', 'gas', '101', 1)$$, 'medidor que no existe');
 select t.falla($$insert into lecturas (periodo, medidor, depto, actual) values ('2030-02', 'acs', '999', 1)$$, 'unidad que no existe');
+insert into lecturas (periodo, medidor, depto, anterior, actual) values ('2030-02', 'acs', '103', 999, 7);
+select t.ok((select anterior = 5 and consumo = 2 from lecturas where periodo = '2030-02' and depto = '103'), 'la lectura anterior siempre es la del mes pasado, aunque se envíe otra');
+-- cambio de medidor en 102: el viejo marcaba 55 el mes pasado y 58 al retirarlo; el nuevo partió en 0 y hoy marca 4
+select t.falla($$insert into lecturas (periodo, medidor, depto, actual, cambio, inicial_nuevo) values ('2030-02', 'acs', '102', 4, true, 0)$$, 'cambio de medidor sin la última lectura del retirado');
+select t.falla($$insert into lecturas (periodo, medidor, depto, actual, cambio, final_retirado) values ('2030-02', 'acs', '102', 4, true, 50)$$, 'medidor retirado con lectura menor que la del mes pasado');
+select t.falla($$insert into lecturas (periodo, medidor, depto, actual, cambio, final_retirado, inicial_nuevo) values ('2030-02', 'acs', '102', 4, true, 58, 10)$$, 'medidor nuevo con lectura menor que la inicial');
+insert into lecturas (periodo, medidor, depto, actual, cambio, final_retirado, inicial_nuevo) values ('2030-02', 'acs', '102', 4, true, 58, 0);
+select t.ok((select consumo = 7 from lecturas where periodo = '2030-02' and depto = '102'), 'cambio de medidor: (58 − 55) + (4 − 0) = 7');
+insert into lecturas (periodo, medidor, depto, actual) values ('2030-03', 'acs', '102', 10);
+select t.ok((select anterior = 4 and consumo = 6 from lecturas where periodo = '2030-03' and depto = '102'), 'el mes siguiente parte de la lectura del medidor nuevo');
+update lecturas set actual = 5 where periodo = '2030-02' and depto = '102';
+select t.ok((select anterior = 5 and consumo = 5 from lecturas where periodo = '2030-03' and depto = '102'), 'corregir una lectura actualiza la anterior del mes siguiente');
+select t.falla($$update lecturas set cambio = false where periodo = '2030-02' and depto = '102'$$, 'quitar el cambio de medidor dejaría un consumo negativo');
 select t.soy(:'a2');
 select t.ok((select count(*) = 2 and bool_and(depto = '101') from lecturas), 'cada unidad ve solo sus lecturas');
 select t.falla($$insert into lecturas (periodo, medidor, depto, actual) values ('2030-03', 'acs', '101', 200)$$, 'un residente ingresa lecturas');

@@ -3,7 +3,7 @@
 ## Sin publicar
 
 - **Reparto por ítem**: cada ítem del gasto común se reparte por alícuota, en partes iguales, según consumo (con un % fijo opcional por alícuota) o solo entre algunas unidades. La suma cuadra al peso.
-- **Lecturas de medidores**: agua caliente, calefacción, gas u otros. Conserjería y administración las ingresan o pegan desde Excel; la app avisa consumos raros y faltantes, y bloquea las lecturas de un período publicado.
+- **Lecturas de medidores**: agua caliente, calefacción, gas u otros. Cada mes se anota lo que marca el medidor y el consumo es la diferencia con el mes anterior (nunca negativo). Cambio de medidor: consumo = (última del retirado − mes anterior) + (actual − inicial del nuevo). Conserjería y administración las ingresan o pegan desde Excel; la app avisa consumos raros y faltantes, y bloquea las lecturas de un período publicado.
 - **Fondos**: fondo de reserva, mantención y otros, con aporte sugerido en %, aportes automáticos al publicar el período, usos (con egreso en el flujo de caja) y ajustes. La comunidad ve los saldos.
 - **Cargos individuales**: multas, arriendo de espacios comunes y otros cobros que se suman al gasto común de la unidad. El arriendo se carga solo al aprobarse una reserva con costo. Rebajas y condonaciones con motivo.
 - El residente ve el desglose de su cobro con sus consumos y cargos; el Excel del período trae el prorrateo ítem por ítem.
