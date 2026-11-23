@@ -7,6 +7,9 @@
 - **Fondos**: fondo de reserva, mantención y otros, con aporte sugerido en %, aportes automáticos al publicar el período, usos (con egreso en el flujo de caja) y ajustes. La comunidad ve los saldos.
 - **Cargos individuales**: multas, arriendo de espacios comunes y otros cobros que se suman al gasto común de la unidad. El arriendo se carga solo al aprobarse una reserva con costo. Rebajas y condonaciones con motivo.
 - El residente ve el desglose de su cobro con sus consumos y cargos; el Excel del período trae el prorrateo ítem por ítem.
+- **Inicio según el rol**: el residente ve de entrada su gasto común del mes (monto, vencimiento, estado y deuda anterior) y lo que tiene pendiente; administración, comité y conserjería ven lo que requiere su atención (solicitudes, reservas por aprobar, morosidad, borradores, lecturas faltantes, encomiendas, estacionamientos excedidos…) con enlace directo.
+- **Montos y decimales a la chilena** en los formularios: punto de miles al escribir montos y coma decimal en alícuotas, tasas y lecturas. Los períodos se eligen con los meses escritos en español.
+- **Accesibilidad**: texto secundario más oscuro (cumple contraste AA) y más grande, botones y campos de al menos 44 px en pantallas táctiles, y acciones como anular o rebajar convertidas en botones.
 
 ## 0.2.1 — 2026-11-23
 
