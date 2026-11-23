@@ -1,6 +1,6 @@
 # Cambios
 
-## Sin publicar
+## 0.2.1 — 2026-11-23
 
 - **Votaciones de asamblea**: al crear una encuesta se elige si es un sondeo (un voto por unidad, secreto) o materia de asamblea, donde el voto pesa según la alícuota y se ve qué votó cada unidad. Detalle descargable en Excel.
 - **Horas bloqueadas en los espacios**: bloqueos semanales por aseo, mantención u otro motivo, varios por día, y opción de espacio abierto las 24 horas.
