@@ -260,7 +260,8 @@ async function consultar(uid, q) {
     const c = ident(k), tip = x => `(jsonb_populate_record(null::${T}, ${p({ [k]: x })})).${c}`;
     if (op === 'is' || (op === 'eq' && v === null)) return v === null ? `${c} is null` : `${c} is ${v === true ? 'true' : v === false ? 'false' : 'null'}`;
     if (op === 'eq') return `${c} = ${tip(v)}`;
-    if (op === 'gte') return `${c} >= ${tip(v)}`;
+    const CMP = { gte: '>=', gt: '>', lte: '<=', lt: '<', neq: '<>' };
+    if (CMP[op]) return `${c} ${CMP[op]} ${tip(v)}`;
     if (op === 'in') return `${c} in (select x.${c} from jsonb_populate_recordset(null::${T}, ${p((v || []).map(x => ({ [k]: x })))}) x)`;
     throw new Fallo('Filtro no válido');
   });

@@ -44,6 +44,7 @@ create table if not exists public.edificios (
   actualizado   timestamptz default now()
 );
 alter table public.edificios add column if not exists privacidad text default '';
+alter table public.edificios add column if not exists medidores jsonb not null default '[]'::jsonb;   -- tipos de medidor: [{id, nombre, unidad}]
 alter table public.edificios add column if not exists mora_tasa numeric(6,3) not null default 0;   -- interés por mora, % mensual (0 = no se cobra)
 alter table public.edificios add column if not exists mora_desde date;                             -- la mora se cuenta desde esta fecha (o desde el vencimiento, si es posterior)
 alter table public.edificios drop column if exists codigo;   -- los códigos de invitación eran de la versión multi-edificio
@@ -442,6 +443,68 @@ create table if not exists public.caja_movimientos (
   ts          timestamptz default now()
 );
 
+-- Lecturas de medidores individuales (agua caliente, calefacción, gas…) por período.
+-- El consumo del período es actual − anterior. Con ellas se reparten los ítems "según consumo".
+create table if not exists public.lecturas (
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  periodo     text not null,                -- 'YYYY-MM', el período de gastos comunes en que se cobra
+  medidor     text not null,                -- id del tipo de medidor (edificios.medidores)
+  depto       text not null,
+  anterior    numeric(14,3) not null,          -- si no se indica, la pone el trigger (última lectura o 0)
+  actual      numeric(14,3) not null,
+  nota        text default '',
+  registrado_por uuid references public.usuarios(id),
+  ts          timestamptz default now(),
+  primary key (edificio_id, periodo, medidor, depto),
+  check (actual >= anterior)
+);
+
+-- Fondos (reserva, mantención, otros). Se provisionan con ítems del gasto común marcados con items[].fondo
+-- (al publicar el período se anota el aporte) y se usan con movimientos registrados por la administración.
+create table if not exists public.fondos (
+  id          uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  nombre      text not null,
+  reserva     boolean not null default false,       -- es el fondo común de reserva que exige la ley
+  pct         numeric(6,2) not null default 0,      -- aporte sugerido, % sobre los gastos del período
+  saldo_inicial numeric(14,2) not null default 0,
+  descripcion text default '',
+  activo      boolean not null default true,
+  creado      timestamptz default now()
+);
+create table if not exists public.fondo_movimientos (
+  id          uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  fondo_id    uuid not null references public.fondos(id) on delete cascade,
+  tipo        text not null check (tipo in ('aporte','uso','ajuste')),
+  fecha       date not null default current_date,
+  monto       numeric(14,2) not null,               -- positivo; un ajuste puede ser negativo
+  descripcion text default '',
+  periodo     text,                                 -- aportes automáticos: el período de gastos comunes que los cobró
+  caja_id     uuid references public.caja_movimientos(id) on delete set null,
+  registrado_por uuid references public.usuarios(id),
+  ts          timestamptz default now()
+);
+
+-- Cargos individuales: multas, arriendo de espacios comunes y otros cobros a una unidad. Se suman a su
+-- gasto común del período indicado. No se borran: se anulan (condonación) o se rebajan, con motivo.
+create table if not exists public.cargos (
+  id          uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  depto       text not null,
+  periodo     text not null,
+  tipo        text not null default 'otro' check (tipo in ('multa','arriendo','otro')),
+  descripcion text not null default '',
+  monto       numeric(14,2) not null check (monto >= 0),
+  monto_original numeric(14,2),
+  estado      text not null default 'vigente' check (estado in ('vigente','anulado')),
+  motivo      text,                                  -- de la rebaja o la anulación
+  reserva_id  uuid references public.reservas(id) on delete set null,
+  registrado_por uuid references public.usuarios(id),
+  ts          timestamptz default now()
+);
+create unique index if not exists cargos_reserva_idx on public.cargos (reserva_id) where reserva_id is not null and estado = 'vigente';
+
 -- Archivos de filas borradas por plazo de conservación, pendientes de eliminar del bucket.
 -- Los elimina la app de la administración (la base de datos no puede borrar archivos de Storage).
 create table if not exists public.archivos_por_borrar (
@@ -480,7 +543,7 @@ begin
   end if;
 
   select id into def from public.edificios order by creado, id limit 1;
-  foreach t in array array['empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos']
+  foreach t in array array['empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos']
   loop
     execute format('alter table public.%I add column if not exists edificio_id uuid references public.edificios(id) on delete cascade', t);
     execute format('select count(*) from public.%I where edificio_id is null', t) into n;
@@ -531,6 +594,9 @@ do $$ begin
     update public.gasto_unidades set interes = 0 where pagado;
   end if;
 end $$;
+-- Desglose del cobro de cada unidad: [{i: índice del ítem, monto, consumo?}]. Vacío en períodos anteriores
+-- a esta función (se repartían solo por alícuota).
+alter table public.gasto_unidades add column if not exists detalle jsonb not null default '[]'::jsonb;
 alter table public.pagos add column if not exists concepto text not null default 'gasto';   -- gasto (capital) | interes
 
 -- Código del QR de acceso de cada visita (las visitas ya existentes reciben uno)
@@ -589,7 +655,7 @@ $$;
 do $$
 declare t text;
 begin
-  foreach t in array array['empresas','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos']
+  foreach t in array array['empresas','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos']
   loop
     execute format('alter table public.%I alter column edificio_id set default public.mi_edificio()', t);
   end loop;
@@ -1013,20 +1079,298 @@ begin
 end $$;
 
 -- Recalcular prorrateo de un período con las alícuotas actuales
+-- Reparte el total de un período entre las unidades. Cada ítem dice cómo se reparte (items[].prorrateo):
+--   alicuota (o vacío)  según la alícuota de cada unidad
+--   iguales             en partes iguales entre todas las unidades
+--   consumo             según las lecturas del medidor items[].medidor; items[].fijo (0–100) es el % que
+--                       se reparte igual por alícuota (pérdidas, mantención del equipo, áreas comunes)
+--   unidades            solo entre las unidades de items[].deptos, en partes iguales (cargos directos)
+-- Cada ítem se redondea al peso y la diferencia de redondeo se asigna a las unidades con mayor fracción,
+-- así la suma de las unidades cuadra exactamente con el ítem.
 create or replace function public.recalcular_prorrateo(p_periodo text) returns void
 language plpgsql security definer set search_path = public as $$
-declare t numeric; e uuid := public.mi_edificio();
 begin
   if not public.es_admin() then raise exception 'Solo administración'; end if;
-  select total into t from public.gastos where edificio_id = e and periodo = p_periodo;
-  insert into public.gasto_unidades (edificio_id, periodo, depto, alicuota, monto)
-  select e, p_periodo, u.depto, u.alicuota, round(t * u.alicuota / 100.0)
-  from public.unidades u where u.edificio_id = e
-  on conflict (edificio_id, periodo, depto) do update set alicuota = excluded.alicuota, monto = excluded.monto;
-  delete from public.gasto_unidades g where g.edificio_id = e and g.periodo = p_periodo
-    and not exists (select 1 from public.unidades u where u.edificio_id = e and u.depto = g.depto);
-  perform privado.recalc_unidad(e, g.depto) from public.gasto_unidades g where g.edificio_id = e and g.periodo = p_periodo;
+  perform privado.repartir(public.mi_edificio(), p_periodo);
 end $$;
+
+create or replace function privado.repartir(e uuid, p_periodo text) returns void
+language plpgsql security definer set search_path = public as $$
+declare g public.gastos; it record; med jsonb; n int; c numeric; k int; its jsonb;
+begin
+  select * into g from public.gastos where edificio_id = e and periodo = p_periodo;
+  if not found then raise exception 'Período no encontrado'; end if;
+  select count(*) into n from public.unidades where edificio_id = e;
+  -- sin ítems (períodos creados por fuera de la app), el total se reparte por alícuota
+  its := case when jsonb_array_length(coalesce(g.items, '[]'::jsonb)) = 0 then jsonb_build_array(jsonb_build_object('monto', g.total)) else g.items end;
+
+  for it in select x, i from jsonb_array_elements(its) with ordinality t(x, i) loop
+    if coalesce(it.x->>'prorrateo', 'alicuota') = 'consumo' then
+      select m into med from public.edificios ed, jsonb_array_elements(ed.medidores) m where ed.id = e and m->>'id' = it.x->>'medidor';
+      if med is null then raise exception 'El ítem "%" usa un medidor que no existe', it.x->>'categoria'; end if;
+      select coalesce(sum(l.actual - l.anterior), 0) into c from public.lecturas l
+      where l.edificio_id = e and l.periodo = p_periodo and l.medidor = it.x->>'medidor'
+        and exists (select 1 from public.unidades u where u.edificio_id = e and u.depto = l.depto);
+      if c <= 0 and g.publicado and coalesce((it.x->>'fijo')::numeric, 0) < 100 and coalesce((it.x->>'monto')::numeric, 0) > 0 then
+        raise exception 'Faltan las lecturas de % del período: sin ellas no se puede repartir "%"', med->>'nombre', it.x->>'categoria';
+      end if;
+    end if;
+    if it.x ? 'fondo' and coalesce(it.x->>'fondo', '') <> '' and not exists (select 1 from public.fondos f where f.id::text = it.x->>'fondo' and f.edificio_id = e) then
+      raise exception 'El ítem "%" va a un fondo que no existe', it.x->>'categoria';
+    end if;
+    if it.x->>'prorrateo' = 'unidades' then
+      select count(*) into k from public.unidades u
+      where u.edificio_id = e and u.depto in (select jsonb_array_elements_text(coalesce(it.x->'deptos', '[]'::jsonb)));
+      if k = 0 then raise exception 'El ítem "%" no indica ninguna unidad existente', it.x->>'categoria'; end if;
+    end if;
+  end loop;
+
+  with u as (select depto, alicuota from public.unidades where edificio_id = e),
+  itm as (select i, x, coalesce((x->>'monto')::numeric, 0) as m, coalesce(nullif(x->>'prorrateo', ''), 'alicuota') as modo,
+                least(greatest(coalesce((x->>'fijo')::numeric, 0), 0), 100) as fijo,
+                array(select jsonb_array_elements_text(coalesce(x->'deptos', '[]'::jsonb))) as deptos
+         from jsonb_array_elements(its) with ordinality t(x, i)),
+  lec as (select medidor, depto, actual - anterior as c from public.lecturas where edificio_id = e and periodo = p_periodo),
+  tot as (select l.medidor, sum(l.c) as c from lec l join u on u.depto = l.depto group by l.medidor),
+  sel as (select itm.i, count(u.depto) as k from itm join u on u.depto = any(itm.deptos) group by itm.i),
+  exacto as (
+    select u.depto, itm.i, l.c as consumo,
+      case itm.modo
+        when 'iguales'  then itm.m / nullif(n, 0)
+        when 'unidades' then case when u.depto = any(itm.deptos) then itm.m / nullif(s.k, 0) else 0 end
+        when 'consumo'  then itm.m * itm.fijo / 100 * u.alicuota / 100
+                             + case when coalesce(t.c, 0) > 0 then itm.m * (100 - itm.fijo) / 100 * coalesce(l.c, 0) / t.c else 0 end
+        else itm.m * u.alicuota / 100
+      end as v,
+      itm.modo
+    from u cross join itm
+    left join lec l on itm.modo = 'consumo' and l.medidor = itm.x->>'medidor' and l.depto = u.depto
+    left join tot t on itm.modo = 'consumo' and t.medidor = itm.x->>'medidor'
+    left join sel s on s.i = itm.i),
+  red as (
+    select depto, i, consumo, modo, floor(coalesce(v, 0)) as piso,
+      row_number() over (partition by i order by coalesce(v, 0) - floor(coalesce(v, 0)) desc, depto) as orden,
+      round(sum(coalesce(v, 0)) over (partition by i)) - sum(floor(coalesce(v, 0))) over (partition by i) as resto
+    from exacto),
+  final as (select depto, i, consumo, modo, piso + case when orden <= resto then 1 else 0 end as monto from red)
+  insert into public.gasto_unidades (edificio_id, periodo, depto, alicuota, monto, detalle)
+  select e, p_periodo, u.depto, u.alicuota, coalesce(sum(f.monto), 0),
+         coalesce(jsonb_agg(jsonb_strip_nulls(jsonb_build_object('i', f.i - 1, 'monto', f.monto, 'consumo', case when f.modo = 'consumo' then coalesce(f.consumo, 0) end)) order by f.i)
+                  filter (where f.i is not null), '[]'::jsonb)
+  from u left join final f on f.depto = u.depto
+  group by u.depto, u.alicuota
+  on conflict (edificio_id, periodo, depto) do update set alicuota = excluded.alicuota, monto = excluded.monto, detalle = excluded.detalle;
+
+  if jsonb_array_length(coalesce(g.items, '[]'::jsonb)) = 0 then
+    update public.gasto_unidades set detalle = '[]'::jsonb where edificio_id = e and periodo = p_periodo;
+  end if;
+  -- cargos individuales vigentes del período: se suman al cobro de su unidad
+  update public.gasto_unidades x set monto = x.monto + c.total, detalle = x.detalle || c.lineas
+  from (select depto, sum(round(monto)) as total,
+               jsonb_agg(jsonb_build_object('c', id, 'tipo', tipo, 'descripcion', descripcion, 'monto', round(monto)) order by ts) as lineas
+        from public.cargos where edificio_id = e and periodo = p_periodo and estado = 'vigente' group by depto) c
+  where x.edificio_id = e and x.periodo = p_periodo and x.depto = c.depto;
+
+  delete from public.gasto_unidades x where x.edificio_id = e and x.periodo = p_periodo
+    and not exists (select 1 from public.unidades u where u.edificio_id = e and u.depto = x.depto);
+  perform privado.recalc_unidad(e, x.depto) from public.gasto_unidades x where x.edificio_id = e and x.periodo = p_periodo;
+end $$;
+
+-- Primer período aún no publicado desde p_desde ('YYYY-MM'): ahí se cobran los cargos nuevos.
+create or replace function privado.periodo_abierto(p_e uuid, p_desde text) returns text
+language plpgsql stable security definer set search_path = public as $$
+declare d date := to_date(p_desde || '-01', 'YYYY-MM-DD'); p text;
+begin
+  for k in 0..36 loop
+    p := to_char(d + make_interval(months => k), 'YYYY-MM');
+    if not exists (select 1 from public.gastos where edificio_id = p_e and periodo = p and publicado) then return p; end if;
+  end loop;
+  return p;
+end $$;
+
+-- Cargos: solo se agregan o suben en períodos no publicados; rebajar o anular se puede siempre, con motivo.
+-- Si el período ya tiene gasto común, se recalcula el reparto.
+create or replace function public.cargos_antes() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare pub boolean;
+begin
+  if tg_op = 'DELETE' then raise exception 'Los cargos no se borran: anúlalos con un motivo'; end if;
+  new.depto := trim(new.depto); new.descripcion := trim(coalesce(new.descripcion, ''));
+  if tg_op = 'INSERT' then
+    if new.periodo is null or new.periodo = '' then new.periodo := privado.periodo_abierto(new.edificio_id, to_char(public.hoy(), 'YYYY-MM')); end if;
+    if new.periodo !~ '^\d{4}-(0[1-9]|1[0-2])$' then raise exception 'Período no válido'; end if;
+    if not exists (select 1 from public.unidades where edificio_id = new.edificio_id and depto = new.depto) then raise exception 'La unidad % no existe', new.depto; end if;
+    if exists (select 1 from public.gastos where edificio_id = new.edificio_id and periodo = new.periodo and publicado) then
+      raise exception 'El período % ya está publicado: el cargo debe ir en un período siguiente', new.periodo;
+    end if;
+    new.monto_original := new.monto; new.estado := 'vigente'; new.motivo := null;
+    new.registrado_por := coalesce(auth.uid(), new.registrado_por); new.ts := now();
+    return new;
+  end if;
+  new.depto := old.depto; new.periodo := old.periodo; new.tipo := old.tipo; new.monto_original := old.monto_original;
+  new.reserva_id := old.reserva_id; new.registrado_por := old.registrado_por; new.ts := old.ts;
+  if old.estado = 'anulado' then raise exception 'El cargo ya está anulado'; end if;
+  pub := exists (select 1 from public.gastos where edificio_id = old.edificio_id and periodo = old.periodo and publicado);
+  if new.estado = 'anulado' or new.monto < old.monto then
+    if coalesce(trim(new.motivo), '') = '' and auth.uid() is not null then raise exception 'Indica el motivo de la rebaja o anulación'; end if;
+    if new.estado = 'anulado' then new.monto := old.monto; end if;
+  elsif new.monto > old.monto and pub then
+    raise exception 'El período % ya está publicado: no se puede subir el cargo', old.periodo;
+  elsif pub and new.descripcion <> old.descripcion then
+    null;
+  end if;
+  return new;
+end $$;
+drop trigger if exists cargos_antes on public.cargos;
+create trigger cargos_antes before insert or update or delete on public.cargos
+for each row execute function public.cargos_antes();
+
+create or replace function public.cargos_despues() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if exists (select 1 from public.gastos where edificio_id = new.edificio_id and periodo = new.periodo) then
+    perform set_config('mi_edificio.interno', '1', true);
+    perform privado.repartir(new.edificio_id, new.periodo);
+    perform set_config('mi_edificio.interno', '', true);
+  end if;
+  return null;
+end $$;
+drop trigger if exists cargos_despues on public.cargos;
+create trigger cargos_despues after insert or update on public.cargos
+for each row execute function public.cargos_despues();
+
+-- Arriendo de espacios comunes: al aprobarse una reserva de un espacio con costo, se carga a la unidad en el
+-- primer período abierto desde la fecha de la reserva; si se cancela o rechaza, el cargo se anula solo.
+create or replace function privado.tg_cargo_reserva() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare costo numeric;
+begin
+  if new.estado = 'aprobada' and (tg_op = 'INSERT' or old.estado <> 'aprobada') then
+    select coalesce((x->>'costo')::numeric, 0) into costo from public.edificios e, jsonb_array_elements(e.espacios) x
+    where e.id = new.edificio_id and x->>'id' = new.espacio_id;
+    if coalesce(costo, 0) > 0 and not exists (select 1 from public.cargos where reserva_id = new.id and estado = 'vigente') then
+      insert into public.cargos (edificio_id, depto, periodo, tipo, descripcion, monto, reserva_id)
+      values (new.edificio_id, new.depto, privado.periodo_abierto(new.edificio_id, to_char(greatest(new.fecha, public.hoy()), 'YYYY-MM')), 'arriendo',
+              new.espacio_nombre || ' · ' || to_char(new.fecha, 'DD-MM-YYYY') || ' ' || lpad(new.h_ini::text, 2, '0') || ':00–' || lpad(new.h_fin::text, 2, '0') || ':00', costo, new.id);
+    end if;
+  elsif tg_op = 'UPDATE' and old.estado = 'aprobada' and new.estado in ('cancelada','rechazada') then
+    update public.cargos set estado = 'anulado', motivo = 'Reserva ' || new.estado where reserva_id = new.id and estado = 'vigente';
+  end if;
+  return null;
+end $$;
+drop trigger if exists cargo_reserva on public.reservas;
+create trigger cargo_reserva after insert or update on public.reservas for each row execute function privado.tg_cargo_reserva();
+
+-- Fondos: al publicar un período se anota el aporte de cada ítem que va a un fondo; al despublicarlo, se quita.
+create or replace function privado.sync_aportes(p_e uuid, p_periodo text) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  delete from public.fondo_movimientos where edificio_id = p_e and periodo = p_periodo and tipo = 'aporte';
+  insert into public.fondo_movimientos (edificio_id, fondo_id, tipo, fecha, monto, descripcion, periodo)
+  select p_e, (x->>'fondo')::uuid, 'aporte', coalesce(g.vence, to_date(p_periodo || '-01', 'YYYY-MM-DD')), sum((x->>'monto')::numeric),
+         'Aporte de gastos comunes ' || p_periodo, p_periodo
+  from public.gastos g, jsonb_array_elements(g.items) x
+  where g.edificio_id = p_e and g.periodo = p_periodo and g.publicado and coalesce(x->>'fondo', '') <> '' and coalesce((x->>'monto')::numeric, 0) > 0
+    and exists (select 1 from public.fondos f where f.id::text = x->>'fondo' and f.edificio_id = p_e)
+  group by x->>'fondo', g.vence;
+end $$;
+create or replace function privado.tg_gastos_fondos() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  perform set_config('mi_edificio.interno', '1', true);
+  perform privado.sync_aportes(coalesce(new.edificio_id, old.edificio_id), coalesce(new.periodo, old.periodo));
+  perform set_config('mi_edificio.interno', '', true);
+  return null;
+end $$;
+drop trigger if exists gastos_fondos on public.gastos;
+create trigger gastos_fondos after insert or update or delete on public.gastos for each row execute function privado.tg_gastos_fondos();
+
+create or replace function public.fondo_mov_antes() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare saldo numeric;
+begin
+  if current_setting('mi_edificio.interno', true) = '1' or auth.uid() is null then return coalesce(new, old); end if;
+  if tg_op = 'DELETE' then
+    if old.tipo = 'aporte' and old.periodo is not null then raise exception 'Los aportes de gastos comunes se quitan despublicando el período'; end if;
+    return old;
+  end if;
+  if tg_op = 'UPDATE' then raise exception 'Un movimiento no se modifica: elimínalo y regístralo de nuevo'; end if;
+  if new.periodo is not null then raise exception 'Los aportes de gastos comunes se anotan solos al publicar el período'; end if;
+  if new.tipo <> 'ajuste' and new.monto <= 0 then raise exception 'El monto debe ser mayor que cero'; end if;
+  if new.tipo = 'uso' then
+    select f.saldo_inicial + coalesce((select sum(case when m.tipo = 'uso' then -m.monto else m.monto end) from public.fondo_movimientos m where m.fondo_id = f.id), 0)
+    into saldo from public.fondos f where f.id = new.fondo_id;
+    if new.monto > saldo then raise exception 'El fondo no tiene saldo suficiente (saldo $%)', saldo::bigint; end if;
+  end if;
+  new.registrado_por := auth.uid(); new.ts := now();
+  return new;
+end $$;
+drop trigger if exists fondo_mov_antes on public.fondo_movimientos;
+create trigger fondo_mov_antes before insert or update or delete on public.fondo_movimientos
+for each row execute function public.fondo_mov_antes();
+
+-- Usar un fondo: anota el uso y, si se pide, el egreso en el flujo de caja (una sola operación).
+create or replace function public.usar_fondo(p_fondo uuid, p_monto numeric, p_fecha date, p_descripcion text, p_egreso boolean default true) returns uuid
+language plpgsql security definer set search_path = public as $$
+declare f public.fondos; cid uuid; mid uuid;
+begin
+  if not public.es_admin() then raise exception 'Solo administración'; end if;
+  select * into f from public.fondos where id = p_fondo and edificio_id = public.mi_edificio();
+  if not found then raise exception 'Fondo no válido'; end if;
+  if coalesce(trim(p_descripcion), '') = '' then raise exception 'Indica en qué se usó el fondo'; end if;
+  if p_egreso then
+    insert into public.caja_movimientos (edificio_id, tipo, fecha, categoria, descripcion, monto, registrado_por)
+    values (f.edificio_id, 'egreso', coalesce(p_fecha, public.hoy()), f.nombre, trim(p_descripcion), p_monto, auth.uid()) returning id into cid;
+  end if;
+  insert into public.fondo_movimientos (edificio_id, fondo_id, tipo, fecha, monto, descripcion, caja_id)
+  values (f.edificio_id, f.id, 'uso', coalesce(p_fecha, public.hoy()), p_monto, trim(p_descripcion), cid) returning id into mid;
+  return mid;
+end $$;
+
+-- Saldo de cada fondo
+create or replace function public.saldos_fondos()
+returns table (fondo_id uuid, aportes numeric, usos numeric, ajustes numeric, saldo numeric)
+language sql stable security definer set search_path = public as $$
+  select f.id,
+    coalesce(sum(m.monto) filter (where m.tipo = 'aporte'), 0),
+    coalesce(sum(m.monto) filter (where m.tipo = 'uso'), 0),
+    coalesce(sum(m.monto) filter (where m.tipo = 'ajuste'), 0),
+    f.saldo_inicial + coalesce(sum(case when m.tipo = 'uso' then -m.monto else m.monto end), 0)
+  from public.fondos f left join public.fondo_movimientos m on m.fondo_id = f.id
+  where f.edificio_id = public.mi_edificio() and public.mi_rol() in ('residente','propietario','comite','admin')
+  group by f.id
+$$;
+
+-- Lecturas: la anterior se completa sola con la última lectura de ese medidor y unidad. Una vez publicado
+-- el período, sus lecturas ya no cambian (para corregir, se despublica, se corrige y se recalcula).
+create or replace function public.lecturas_antes() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if tg_op in ('UPDATE', 'DELETE') and exists (select 1 from public.gastos where edificio_id = old.edificio_id and periodo = old.periodo and publicado) then
+    raise exception 'El período % ya está publicado: para corregir una lectura, despublícalo primero', old.periodo;
+  end if;
+  if tg_op = 'DELETE' then return old; end if;
+  if exists (select 1 from public.gastos where edificio_id = new.edificio_id and periodo = new.periodo and publicado) then
+    raise exception 'El período % ya está publicado: para agregar una lectura, despublícalo primero', new.periodo;
+  end if;
+  if new.periodo !~ '^\d{4}-(0[1-9]|1[0-2])$' then raise exception 'Período no válido'; end if;
+  if not exists (select 1 from public.edificios ed, jsonb_array_elements(ed.medidores) m where ed.id = new.edificio_id and m->>'id' = new.medidor) then
+    raise exception 'Medidor no válido';
+  end if;
+  if not exists (select 1 from public.unidades where edificio_id = new.edificio_id and depto = new.depto) then raise exception 'La unidad % no existe', new.depto; end if;
+  if new.anterior is null then
+    new.anterior := coalesce((select l.actual from public.lecturas l where l.edificio_id = new.edificio_id and l.medidor = new.medidor
+                              and l.depto = new.depto and l.periodo < new.periodo order by l.periodo desc limit 1), 0);
+  end if;
+  if new.actual < new.anterior then
+    raise exception 'Unidad %: la lectura actual (%) es menor que la anterior (%). Si se cambió el medidor, pon 0 como anterior', new.depto, new.actual, new.anterior;
+  end if;
+  new.registrado_por := auth.uid(); new.ts := now();
+  return new;
+end $$;
+drop trigger if exists lecturas_antes on public.lecturas;
+create trigger lecturas_antes before insert or update or delete on public.lecturas
+for each row execute function public.lecturas_antes();
 
 -- Encuestas: ¿puede mi unidad votar esta opción ahora?
 create or replace function public.puede_votar(p_encuesta uuid, p_opcion int) returns boolean
@@ -1460,6 +1804,10 @@ alter table public.pagos            enable row level security;
 alter table public.convenios        enable row level security;
 alter table public.convenio_cuotas  enable row level security;
 alter table public.caja_movimientos enable row level security;
+alter table public.lecturas         enable row level security;
+alter table public.fondos           enable row level security;
+alter table public.fondo_movimientos enable row level security;
+alter table public.cargos           enable row level security;
 
 -- helper para (re)crear políticas sin errores. Salvo que se indique lo contrario, toda
 -- política queda además limitada a las filas del edificio del usuario.
@@ -1601,6 +1949,22 @@ select public._pol('caja_movimientos','cj_sel','select','public.mi_rol() in (''c
 select public._pol('caja_movimientos','cj_ins','insert','public.es_admin()');
 select public._pol('caja_movimientos','cj_upd','update','public.es_admin()');
 select public._pol('caja_movimientos','cj_del','delete','public.es_admin()');
+-- lecturas: conserjería y administración las ingresan; comité las ve; cada unidad ve las suyas
+select public._pol('lecturas','lec_sel','select','public.mi_rol() in (''conserje'',''comite'',''admin'') or (public.es_residente() and depto = public.mi_depto())');
+select public._pol('lecturas','lec_ins','insert','public.mi_rol() in (''conserje'',''admin'')');
+select public._pol('lecturas','lec_upd','update','public.mi_rol() in (''conserje'',''admin'')');
+select public._pol('lecturas','lec_del','delete','public.mi_rol() in (''conserje'',''admin'')');
+-- fondos: la comunidad ve fondos y saldos (es su plata); la administración los gestiona
+select public._pol('fondos','fon_sel','select','public.mi_rol() in (''residente'',''propietario'',''comite'',''admin'')');
+select public._pol('fondos','fon_ins','insert','public.es_admin()');
+select public._pol('fondos','fon_upd','update','public.es_admin()');
+select public._pol('fondo_movimientos','fm_sel','select','public.mi_rol() in (''residente'',''propietario'',''comite'',''admin'')');
+select public._pol('fondo_movimientos','fm_ins','insert','public.es_admin()');
+select public._pol('fondo_movimientos','fm_del','delete','public.es_admin()');
+-- cargos: la administración los registra; el comité los ve; cada unidad ve los suyos
+select public._pol('cargos','car_sel','select','public.mi_rol() in (''comite'',''admin'') or (public.es_residente() and depto = public.mi_depto())');
+select public._pol('cargos','car_ins','insert','public.es_admin()');
+select public._pol('cargos','car_upd','update','public.es_admin()');
 
 -- archivos_por_borrar: la administración los lee y los quita de la cola al borrarlos del bucket
 select public._pol('archivos_por_borrar','apb_sel','select','public.es_admin()');
@@ -1667,7 +2031,7 @@ create policy "fotos_delete" on storage.objects for delete to authenticated usin
 do $$
 declare t text;
 begin
-  foreach t in array array['edificios','empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos']
+  foreach t in array array['edificios','empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos']
   loop
     begin
       execute format('alter publication supabase_realtime add table public.%I', t);

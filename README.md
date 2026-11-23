@@ -11,10 +11,12 @@ Se instala **en un computador del propio edificio**: un solo programa sirve la a
 | ![Inicio de la administración](docs/capturas/inicio-administracion.png) | ![Estado económico y morosidad](docs/capturas/finanzas-estado.png) |
 | ![Votación de asamblea por alícuota](docs/capturas/votacion-asamblea.png) | ![Estacionamientos de visita](docs/capturas/estacionamientos.png) |
 | ![Flujo de caja](docs/capturas/finanzas-caja.png) | ![Reservas con horas bloqueadas](docs/capturas/reservas-bloqueo.png) |
+| ![Prorrateo con consumos de calefacción y agua caliente](docs/capturas/gasto-prorrateo.png) | ![Lecturas de medidores](docs/capturas/lecturas.png) |
+| ![Fondos de reserva y mantención](docs/capturas/fondos.png) | |
 
 En el teléfono de un residente:
 
-<img src="docs/capturas/inicio-residente.png" width="260" alt="Inicio del residente"> <img src="docs/capturas/residente-estado-cuenta.png" width="260" alt="Estado de cuenta del residente">
+<img src="docs/capturas/inicio-residente.png" width="260" alt="Inicio del residente"> <img src="docs/capturas/residente-estado-cuenta.png" width="260" alt="Estado de cuenta del residente"> <img src="docs/capturas/residente-desglose.png" width="260" alt="Desglose del gasto común con el consumo de la unidad">
 
 Las capturas son de un edificio de demostración con datos inventados.
 
@@ -173,8 +175,9 @@ Límites: está pensada para un edificio. La base de datos atiende una consulta 
 
 | Módulo | Residente / Propietario | Conserje | Comité | Admin | Empresa mantención |
 |---|---|---|---|---|---|
-| Gastos comunes (desglose, prorrateo, estado de pago, PDF/Excel) | ve y descarga su aviso de cobro | – | ve todo y exporta | edita, registra pagos, exporta | – |
-| Finanzas: pagos, morosidad, convenios y flujo de caja | ve su estado de cuenta, acepta convenios | – | ve todo | registra pagos, propone convenios, anota egresos | – |
+| Gastos comunes (desglose, prorrateo por alícuota o consumo, PDF/Excel) | ve su aviso de cobro con sus consumos | – | ve todo y exporta | edita, registra pagos, exporta | – |
+| Lecturas de medidores (agua caliente, calefacción, gas…) | ve las suyas en su desglose | ingresa | ve | configura, ingresa | – |
+| Finanzas: pagos, morosidad, convenios, cargos, fondos y flujo de caja | ve su estado de cuenta y los saldos de los fondos, acepta convenios | – | ve todo | registra pagos, cargos y usos de fondos, propone convenios, anota egresos | – |
 | Reservas de áreas comunes | reserva / cancela | ve agenda | aprueba | aprueba, configura | – |
 | Incidencias con fotos | reporta, cierra las suyas | gestiona, se asigna | gestiona | gestiona, crea OT | ve las ligadas a sus OT |
 | Mensajes (canales conserjería / comité / administración) | chat por canal | canal conserjería | canal comité | todos | – |
@@ -189,6 +192,23 @@ Límites: está pensada para un edificio. La base de datos atiende una consulta 
 | Administración (edificio, usuarios, unidades, espacios, estacionamientos, activos, empresas) | – | – | – | ✔ | – |
 
 La seguridad está en la base de datos (permisos por rol y reglas en `schema.sql`), no en el navegador: aunque alguien modifique el JS, solo puede leer y escribir lo que su rol permite.
+
+## Cálculo de los gastos comunes
+
+Cada período tiene sus ítems (remuneraciones, agua, calefacción…) y **cada ítem dice cómo se reparte**:
+
+- **Por alícuota**: lo normal. Cada unidad paga según su alícuota (Administración → Unidades).
+- **En partes iguales** entre todas las unidades.
+- **Según consumo**: con las lecturas de un medidor individual (agua caliente, calefacción, gas, lo que tenga el edificio). Se puede indicar un **% fijo por alícuota** para la parte que no depende del consumo (pérdidas de la caldera, mantención del equipo, áreas comunes); el resto se reparte en proporción al consumo de cada unidad. Ejemplo: calefacción central de $1.600.000 con 25 % fijo → $400.000 por alícuota y $1.200.000 según los kWh de cada unidad.
+- **Solo a algunas unidades**: en partes iguales entre las que se indiquen (por ejemplo, un gasto de una sola torre o piso).
+
+Cada ítem se redondea al peso y la diferencia de redondeo se asigna a las unidades con mayor fracción: **la suma de las unidades cuadra exactamente con el total**. El cobro de cada unidad guarda su desglose, que el residente ve con sus consumos y descarga en su aviso de cobro (PDF o Excel); el Excel de la administración trae el prorrateo ítem por ítem.
+
+**Lecturas de medidores.** En el módulo **Lecturas**, la administración define qué medidores tiene cada unidad y conserjería (o la administración) ingresa, por período y medidor, la lectura actual de cada unidad; la anterior se completa con la del período previo. También se pueden **pegar desde Excel** (unidad y lectura). La app marca consumos en cero o muy por sobre lo típico, para revisar errores de lectura. Al guardar un período con ítems según consumo, avisa cuántas unidades tienen lectura; **no deja publicar un ítem según consumo sin lecturas**, y una vez publicado el período sus lecturas ya no se pueden cambiar (para corregir, se despublica). Una unidad sin lectura paga solo la parte fija.
+
+**Fondos.** En Finanzas → Fondos se crean el **fondo común de reserva** (la Ley de Copropiedad Inmobiliaria exige formarlo; el porcentaje lo fija el reglamento dentro del mínimo legal, confírmalo) y otros, como uno de mantención. Cada fondo tiene un aporte sugerido en % de los gastos del período y su saldo al empezar a usar la app. Al crear un período se agrega el ítem de cada fondo y **"Calcular aportes a fondos"** calcula su monto. Al publicar el período, el aporte se anota solo en el fondo (y se quita si se despublica). Para **usar un fondo** se registra en qué y cuánto, y si se quiere también el egreso en el flujo de caja; no se puede usar más que el saldo. Los ajustes (intereses del banco, diferencias) se anotan aparte. La comunidad ve los saldos.
+
+**Cargos individuales.** Multas, arriendo de espacios comunes y otros cobros a una unidad se registran en Finanzas → Cargos y **se suman al gasto común de esa unidad** en el período indicado (por defecto, el primero sin publicar; no se pueden agregar a uno publicado). El **arriendo** se carga solo al aprobarse la reserva de un espacio con costo, y se anula solo si la reserva se cancela. Desde Estacionamientos → Excedidos se puede **cursar una multa** con los datos del uso. Un cargo no se borra: se **rebaja o se anula (condonación) con un motivo**, y queda el registro de multas condonadas o rebajadas.
 
 ## Pagos, convenios y flujo de caja
 

@@ -140,6 +140,7 @@ const MODULES = [
   {id:'encomiendas', ic:'📦', t:'Encomiendas', d:'Paquetes recibidos', roles:['residente','propietario','conserje','admin']},
   {id:'visitas', ic:'🚪', t:'Visitas', d:'Anunciar y registrar', roles:['residente','propietario','conserje','admin']},
   {id:'estacionamientos', ic:'🅿️', t:'Estacionamientos', d:'Visitas: ocupación y tiempos', roles:['conserje','comite','admin']},
+  {id:'lecturas', ic:'🔢', t:'Lecturas', d:'Medidores de agua caliente, calefacción…', roles:['conserje','comite','admin']},
   {id:'documentos', ic:'📁', t:'Documentos', d:'Reglamento, actas, balances', roles:['residente','propietario','conserje','comite','admin']},
   {id:'rondas', ic:'📍', t:'Rondas', d:'Checkpoints NFC y bitácora', roles:['conserje','comite','admin']},
   {id:'mantencion', ic:'🔧', t:'Mantención', d:'Órdenes de trabajo y activos', roles:['comite','admin','mantencion']},
@@ -212,7 +213,7 @@ async function start(){
   watch('estacionamientos', ()=>q(T('estacionamientos').select('*')), rows=>{ S.estac={}; rows.forEach(u=>S.estac[u.id]=u); refreshView(); }, {global:true, silent:true});
 }
 function meKey(){ const m=S.me||{}; return [m.edificio_id,m.rol,m.estado,m.nombre,m.depto,m.empresa_id].join('|'); }
-function cfgKey(){ const c=S.cfg||{}; return [c.id,c.nombre,c.direccion,c.logo,c.color,JSON.stringify(c.espacios||[])].join('|'); }
+function cfgKey(){ const c=S.cfg||{}; return [c.id,c.nombre,c.direccion,c.logo,c.color,JSON.stringify(c.espacios||[]),JSON.stringify(c.medidores||[])].join('|'); }
 function gate(){ if(S.ready) return; if(!S.cfgLoaded || !S.meLoaded) return; S.ready=true; routeNow(); pushSync(); limpiarArchivos(); }
 // Borra del bucket los archivos de filas eliminadas por plazo de conservación (solo administración)
 async function limpiarArchivos(){ try{ if(realRole()!=='admin' || S.me.estado!=='activo') return; const rows=await q(T('archivos_por_borrar').select('id,path').limit(500)); if(!rows.length) return; await sb.storage.from('fotos').remove(rows.map(r=>r.path)); await q(T('archivos_por_borrar').delete().in('id',rows.map(r=>r.id))); }catch(e){ console.warn('limpiarArchivos',e); } }
@@ -346,12 +347,34 @@ VIEWS.inicio = function(){
 };
 
 // GASTOS COMUNES
+// GASTOS COMUNES. Cada ítem dice cómo se reparte (items[].prorrateo, ver recalcular_prorrateo en schema.sql)
+// y puede ir a un fondo (items[].fondo). El cobro de cada unidad y su desglose los calcula la base de datos
+// (gasto_unidades.monto y .detalle), incluidos los cargos individuales (multas, arriendos, otros).
+const medidores=()=>S.cfg?.medidores||[];
+const MEDIDORES_EJ=[{id:'acs',nombre:'Agua caliente',unidad:'m³'},{id:'agua',nombre:'Agua fría',unidad:'m³'},{id:'cal',nombre:'Calefacción',unidad:'kWh'},{id:'gas',nombre:'Gas',unidad:'m³'}];
+const TIPO_CARGO={multa:'Multa', arriendo:'Arriendo de espacio común', otro:'Otro cargo'};
+const numCL=(n,d=1)=>Number(n||0).toLocaleString('es-CL',{maximumFractionDigits:d});
+const porNum=(a,b)=>String(a).localeCompare(String(b),undefined,{numeric:true});
+const txtReparto=it=>{ const p=it.prorrateo||'alicuota';
+  if(p==='iguales') return 'partes iguales';
+  if(p==='unidades') return 'solo '+((it.deptos||[]).length===1?'unidad ':'unidades ')+(it.deptos||[]).join(', ');
+  if(p==='consumo'){ const md=medidores().find(x=>x.id===it.medidor); return 'según consumo de '+(md?md.nombre.toLowerCase():'?')+(Number(it.fijo)>0?` (${numCL(it.fijo)} % fijo por alícuota)`:''); }
+  return 'por alícuota'; };
+// Líneas del cobro de una unidad: ítems del período (con su parte y consumo) y cargos individuales
+function desgloseUnidad(g, gu){
+  const items=g.items||[], det=Array.isArray(gu?.detalle)?gu.detalle:[], md=it=>medidores().find(x=>x.id===it.medidor);
+  const conDet=det.some(d=>d.i!=null);
+  const lineas=items.map((it,i)=>{ const d=det.find(x=>x.i===i); return {t:it.categoria, d:it.descripcion||'', total:Number(it.monto)||0, parte:conDet?(d?Number(d.monto):0):Math.round((Number(it.monto)||0)*Number(gu?.alicuota||0)/100), consumo:d&&d.consumo!=null?Number(d.consumo):null, unidad:md(it)?.unidad||'', reparto:txtReparto(it)}; }).filter(l=>!conDet||l.parte>0||l.consumo!=null);
+  det.filter(d=>d.c).forEach(d=>lineas.push({t:TIPO_CARGO[d.tipo]||'Cargo', d:d.descripcion||'', total:null, parte:Number(d.monto), cargo:true}));
+  return lineas; }
 VIEWS.gastos = function(){
   const staff = ['comite','admin'].includes(role());
-  setMain(`<h1>Gastos comunes</h1>${isAdmin()?`<div class="row" style="margin-bottom:12px"><button class="btn" id="bNuevoG">+ Nuevo período</button></div>`:''}<div id="gList"></div><div id="gCuenta"></div>`);
+  setMain(`<h1>Gastos comunes</h1>${isAdmin()?`<div class="row" style="margin-bottom:12px"><button class="btn" id="bNuevoG">+ Nuevo período</button></div>`:''}<div id="gList"></div><div id="gCuenta"></div><div id="gFondos"></div>`);
   if(!staff && myDepto()) cuentaResidente();
   $('#bNuevoG')?.addEventListener('click',()=>formGasto());
   let aviso=null; $('#gList').addEventListener('click',e=>{ const x=e.target.closest('[data-x]'); if(x&&aviso?.mio) exportGasto(x.dataset.x, aviso.g, null, aviso.mio); });
+  if(!staff) watch(['fondos','fondo_movimientos'], async()=>{ const [f,sd]=await Promise.all([q(T('fondos').select('*').eq('activo',true)), q(sb.rpc('saldos_fondos')).catch(()=>[])]); return {f,sd}; }, ({f,sd})=>{ const el=$('#gFondos'); if(!el) return;
+    el.innerHTML=f.length?`<h2>Fondos del edificio</h2><div class="kpi">${f.map(x=>`<div class="k"><b>${clp(sd.find(y=>y.fondo_id===x.id)?.saldo||0)}</b><span>${esc(x.nombre)}</span></div>`).join('')}</div>`:''; }, {silent:true});
   watch(['gastos','gasto_unidades'], async()=>{ const g=await q(T('gastos').select('*').order('periodo',{ascending:false}).limit(24)); const gu=await q(T('gasto_unidades').select('*')); return {g,gu}; }, ({g,gu})=>{
     const el=$('#gList'); if(!el) return;
     const pr={}; gu.forEach(x=>{ (pr[x.periodo]=pr[x.periodo]||{})[x.depto]=x; });
@@ -361,39 +384,74 @@ VIEWS.gastos = function(){
       $$('#gList [data-g]').forEach(it=>it.addEventListener('click',()=>detalleGastoAdmin(g.find(x=>x.periodo===it.dataset.g), pr[it.dataset.g]||{})));
     } else {
       const dep=myDepto(); const vis=g.filter(x=>x.publicado); if(!vis.length){ el.innerHTML='<div class="empty">Aún no hay períodos publicados.</div>'; return; }
-      const cur=vis[0]; const mio=pr[cur.periodo]?.[dep]; aviso={g:cur, mio};
+      const cur=vis[0]; const mio=pr[cur.periodo]?.[dep]; aviso={g:cur, mio}; const ls=mio?desgloseUnidad(cur,mio):[];
       el.innerHTML = `<div class="card"><div class="row"><div class="grow"><span class="muted small">${esc(fmtMonth(cur.periodo))} · Depto ${esc(dep)}</span><div style="font-size:28px;font-weight:700">${mio?clp(mio.monto):'—'}</div></div>${mio?`<span class="pill ${mio.pagado?'ok':'wa'}">${mio.pagado?'Pagado':'Pendiente'}</span>`:''}</div>
       ${mio?`<div class="small muted" style="margin:6px 0 10px">Alícuota ${Number(mio.alicuota)}% · Vence ${cur.vence?fmtDay(cur.vence):'—'}</div>`:'<div class="small muted">Tu unidad no está en el prorrateo de este período. Consulta a administración.</div>'}
       ${S.cfg?.datos_bancarios?`<details><summary>Datos para transferir</summary><pre style="white-space:pre-wrap;font:inherit;margin:8px 0 0">${esc(S.cfg.datos_bancarios)}</pre></details>`:''}
       ${mio?`<div class="row" style="margin-top:10px;gap:6px"><button class="btn sec sm" data-x="pdf">Descargar PDF</button><button class="btn sec sm" data-x="xls">Descargar Excel</button></div>`:''}</div>
-      <h2>Desglose del período</h2><div class="card"><table><thead><tr><th>Ítem</th><th class="num">Total edificio</th><th class="num">Tu parte</th></tr></thead><tbody>
-      ${(cur.items||[]).map(it=>`<tr><td>${esc(it.categoria)}<br><span class="muted small">${esc(it.descripcion||'')}</span></td><td class="num">${clp(it.monto)}</td><td class="num">${mio?clp(it.monto*Number(mio.alicuota)/100):'—'}</td></tr>`).join('')}
+      <h2>Desglose del período</h2><div class="card" style="overflow:auto"><table><thead><tr><th>Ítem</th><th class="num">Total edificio</th><th class="num">Tu parte</th></tr></thead><tbody>
+      ${mio?ls.map(l=>`<tr><td>${esc(l.t)}${l.cargo?' <span class="pill wa">Solo tu unidad</span>':''}<br><span class="muted small">${esc(l.d)}${l.d&&l.reparto?' · ':''}${l.reparto?'Se reparte '+esc(l.reparto):''}${l.consumo!=null?` · <b>tu consumo: ${numCL(l.consumo,3)} ${esc(l.unidad)}</b>`:''}</span></td><td class="num">${l.total==null?'—':clp(l.total)}</td><td class="num">${clp(l.parte)}</td></tr>`).join('')
+        :(cur.items||[]).map(it=>`<tr><td>${esc(it.categoria)}</td><td class="num">${clp(it.monto)}</td><td class="num">—</td></tr>`).join('')}
       <tr><th>Total</th><th class="num">${clp(cur.total)}</th><th class="num">${mio?clp(mio.monto):'—'}</th></tr></tbody></table></div>
       <h2>Historial</h2><div class="list">${vis.slice(1).map(x=>{const m=pr[x.periodo]?.[dep]; return `<div class="item static"><div class="hd"><b>${esc(fmtMonth(x.periodo))}</b>${m?`<span class="pill ${m.pagado?'ok':'wa'}">${m.pagado?'Pagado':'Pendiente'}</span>`:''}</div><div class="meta">${m?clp(m.monto):'—'} · total edificio ${clp(x.total)}</div></div>`;}).join('')||'<div class="empty">Sin períodos anteriores</div>'}</div>`;
     }
   });
 };
-function formGasto(g){
-  g = g || {periodo:monthStr(), vence:'', items:[{categoria:'Remuneraciones',monto:0},{categoria:'Agua',monto:0},{categoria:'Electricidad áreas comunes',monto:0},{categoria:'Mantención ascensores',monto:0},{categoria:'Aseo',monto:0},{categoria:'Fondo de reserva',monto:0}], publicado:false};
-  const suma=Object.values(S.unidades).reduce((a,u)=>a+(Number(u.alicuota)||0),0);
+async function formGasto(g){
+  g = g || {periodo:monthStr(), vence:'', items:[{categoria:'Remuneraciones',monto:0},{categoria:'Agua',monto:0},{categoria:'Electricidad áreas comunes',monto:0},{categoria:'Mantención ascensores',monto:0},{categoria:'Aseo',monto:0}], publicado:false};
+  let fondos=[]; try{ fondos=await q(T('fondos').select('*').eq('activo',true)); }catch(e){}
+  if(!g.actualizado) fondos.filter(f=>Number(f.pct)>0||f.reserva).forEach(f=>{ if(!g.items.some(it=>it.fondo===f.id)) g.items.push({categoria:f.nombre, monto:0, fondo:f.id}); });
+  const suma=Object.values(S.unidades).reduce((a,u)=>a+(Number(u.alicuota)||0),0), mds=medidores();
   const m=modal(`<h3>${g.actualizado?'Editar':'Nuevo'} período</h3><form id="fG">
   <div class="row"><label class="f grow"><span>Período</span><input type="month" name="periodo" value="${esc(g.periodo)}" required ${g.actualizado?'readonly':''}></label><label class="f grow"><span>Vencimiento</span><input type="date" name="vence" value="${esc(g.vence||'')}"></label></div>
-  <div id="items"></div><button type="button" class="btn sec sm" id="addIt">+ Ítem</button>
+  <div id="items"></div><div class="row wrap" style="gap:6px"><button type="button" class="btn sec sm" id="addIt">+ Ítem</button>${fondos.some(f=>Number(f.pct)>0)?'<button type="button" class="btn sec sm" id="calcF">Calcular aportes a fondos</button>':''}</div>
   <div class="row" style="margin-top:12px;justify-content:space-between"><b>Total: <span id="gTot">$0</span></b><label class="sw"><input type="checkbox" name="publicado" ${g.publicado?'checked':''}> Publicado</label></div>
-  <p class="small muted">Prorrateo según alícuotas (Administración → Unidades). Unidades: ${Object.keys(S.unidades).length}, suma: ${suma.toFixed(2)}%</p>
+  <div id="gAvisos" class="small" style="margin-top:6px"></div>
+  <p class="small muted">Alícuotas en Administración → Unidades: ${Object.keys(S.unidades).length} unidades, suma ${suma.toFixed(2)}%.${mds.length?'':' Para repartir según consumo (agua caliente, calefacción…), configura los medidores en Lecturas.'} ${fondos.length?'':'Los fondos (reserva, mantención…) se crean en Finanzas → Fondos.'}</p>
   <div class="row" style="justify-content:flex-end;margin-top:8px">${g.actualizado?'<button type="button" class="btn dan sm" id="delG">Eliminar</button>':''}<button class="btn">Guardar</button></div></form>`);
-  const items=$('#items',m); const rowIt=(it={})=>{ const d=document.createElement('div'); d.className='row'; d.style.marginBottom='6px'; d.innerHTML=`<input type="text" name="cat" placeholder="Categoría" value="${esc(it.categoria||'')}" required style="flex:2"><input type="text" name="des" placeholder="Detalle" value="${esc(it.descripcion||'')}" style="flex:2"><input type="number" name="mon" placeholder="$" value="${it.monto||''}" min="0" style="flex:1;min-width:90px"><button type="button" class="btn sec sm" data-rm>✕</button>`; items.appendChild(d); };
+  const items=$('#items',m);
+  const rowIt=(it={})=>{ const d=document.createElement('div'); d.className='itm card'; d.style.cssText='padding:8px;margin-bottom:6px';
+    const modo=it.prorrateo==='consumo'?'consumo:'+it.medidor:(it.prorrateo||'alicuota');
+    d.innerHTML=`<div class="row"><input type="text" name="cat" placeholder="Categoría" value="${esc(it.categoria||'')}" required style="flex:2"><input type="text" name="des" placeholder="Detalle" value="${esc(it.descripcion||'')}" style="flex:2"><input type="number" name="mon" placeholder="$" value="${it.monto||''}" min="0" style="flex:1;min-width:90px"><button type="button" class="btn sec sm" data-rm>✕</button></div>
+    <div class="row wrap" style="gap:6px;margin-top:6px;align-items:center"><span class="small muted">Se reparte</span><select name="rep" style="width:auto">${[['alicuota','por alícuota'],['iguales','en partes iguales'],...mds.map(x=>['consumo:'+x.id,'según consumo de '+x.nombre.toLowerCase()]),['unidades','solo a algunas unidades']].map(([v,t])=>`<option value="${esc(v)}" ${v===modo?'selected':''}>${esc(t)}</option>`).join('')}</select>
+      <label class="small" data-k="fijo">con <input type="number" name="fijo" min="0" max="100" step="1" value="${Number(it.fijo)||0}" style="width:64px"> % fijo por alícuota</label>
+      <input type="text" name="deptos" data-k="deptos" placeholder="Unidades, ej: 101, 204" value="${esc((it.deptos||[]).join(', '))}" style="width:180px">
+      ${fondos.length?`<select name="fondo" style="width:auto"><option value="">No va a un fondo</option>${fondos.map(f=>`<option value="${f.id}" ${it.fondo===f.id?'selected':''}>Va al ${esc(f.nombre.toLowerCase().startsWith('fondo')?f.nombre:'fondo '+f.nombre)}</option>`).join('')}</select>`:''}</div>`;
+    items.appendChild(d); vis(d); };
+  const vis=d=>{ const v=$('[name=rep]',d).value; $('[data-k=fijo]',d).style.display=v.startsWith('consumo:')?'':'none'; $('[data-k=deptos]',d).style.display=v==='unidades'?'':'none'; };
   (g.items||[]).forEach(rowIt); $('#addIt',m).addEventListener('click',()=>rowIt());
+  const leer=()=>$$('#items .itm',m).map(r=>{ const v=$('[name=rep]',r).value, o={categoria:$('[name=cat]',r).value.trim(), descripcion:$('[name=des]',r).value.trim(), monto:Number($('[name=mon]',r).value)||0};
+    if(v.startsWith('consumo:')){ o.prorrateo='consumo'; o.medidor=v.slice(8); const f=Math.min(100,Math.max(0,Number($('[name=fijo]',r).value)||0)); if(f) o.fijo=f; }
+    else if(v==='unidades'){ o.prorrateo='unidades'; o.deptos=[...new Set($('[name=deptos]',r).value.split(/[,;\s]+/).map(x=>x.trim()).filter(Boolean))]; }
+    else if(v==='iguales') o.prorrateo='iguales';
+    const f=$('[name=fondo]',r)?.value; if(f) o.fondo=f; return o; });
+  let lecs={}, cargosP=[];
+  const avisos=()=>{ const its=leer(), out=[], nU=Object.keys(S.unidades).length;
+    its.filter(it=>it.prorrateo==='consumo').forEach(it=>{ const md=mds.find(x=>x.id===it.medidor), n=lecs[it.medidor]||0; out.push(n>=nU?`<span class="pill ok">✓</span> ${esc(md?.nombre)}: lecturas de las ${nU} unidades.`:`<span class="pill ${n?'wa':'er'}">${n} de ${nU}</span> ${esc(md?.nombre)}: ${n?'las unidades sin lectura pagarán solo la parte fija.':'sin lecturas, no se puede publicar.'} <a href="#lecturas">Ingresar lecturas</a>`); });
+    its.filter(it=>it.prorrateo==='unidades').forEach(it=>{ const malas=it.deptos.filter(d=>!S.unidades[d]); if(!it.deptos.length||malas.length) out.push(`<span class="pill er">Revisar</span> "${esc(it.categoria)}": ${it.deptos.length?'no existen las unidades '+esc(malas.join(', ')):'indica las unidades'}.`); });
+    if(cargosP.length) out.push(`<span class="pill in">+ ${clp(cargosP.reduce((a,c)=>a+Number(c.monto),0))}</span> Además se cobran ${cargosP.length} ${cargosP.length===1?'cargo individual':'cargos individuales'} (multas, arriendos…) a sus unidades.`);
+    $('#gAvisos',m).innerHTML=out.map(x=>`<div style="margin-bottom:4px">${x}</div>`).join(''); };
+  const cargar=async()=>{ const p=$('[name=periodo]',m).value; try{ const [l,c]=await Promise.all([q(T('lecturas').select('medidor,depto').eq('periodo',p)), q(T('cargos').select('monto').eq('periodo',p).eq('estado','vigente'))]); lecs={}; l.forEach(x=>{ if(S.unidades[x.depto]) lecs[x.medidor]=(lecs[x.medidor]||0)+1; }); cargosP=c; }catch(e){ lecs={}; cargosP=[]; } avisos(); };
   const recalc=()=>{ let t=0; $$('input[name=mon]',m).forEach(i=>t+=Number(i.value)||0); $('#gTot',m).textContent=clp(t); };
-  m.addEventListener('input',recalc); m.addEventListener('click',e=>{ if(e.target.closest('[data-rm]')){ e.target.closest('.row').remove(); recalc(); } }); recalc();
+  m.addEventListener('input',()=>{ recalc(); avisos(); }); m.addEventListener('change',e=>{ const r=e.target.closest('.itm'); if(r) vis(r); if(e.target.name==='periodo') cargar(); else avisos(); });
+  m.addEventListener('click',e=>{ if(e.target.closest('[data-rm]')){ e.target.closest('.itm').remove(); recalc(); avisos(); } }); recalc(); cargar();
+  $('#calcF',m)?.addEventListener('click',()=>{ const base=leer().filter(it=>!it.fondo).reduce((a,it)=>a+it.monto,0);
+    fondos.filter(f=>Number(f.pct)>0).forEach(f=>{ let r=$$('#items .itm',m).find(x=>$('[name=fondo]',x)?.value===f.id); if(!r){ rowIt({categoria:f.nombre, fondo:f.id}); r=$$('#items .itm',m).pop(); } $('[name=mon]',r).value=Math.round(base*Number(f.pct)/100); if(!$('[name=des]',r).value) $('[name=des]',r).value=numCL(f.pct,2)+' % de los gastos del período'; });
+    recalc(); toast('Aportes calculados sobre '+clp(base)); });
   $('#delG',m)?.addEventListener('click', async()=>{ if(await confirmBox('¿Eliminar este período?')){ await q(T('gastos').delete().eq('periodo',g.periodo)); closeModal(); toast('Eliminado'); } });
-  $('#fG',m).addEventListener('submit', async e=>{ e.preventDefault(); const rows=$$('#items .row',m).map(r=>({categoria:$('[name=cat]',r).value.trim(), descripcion:$('[name=des]',r).value.trim(), monto:Number($('[name=mon]',r).value)||0})); const total=rows.reduce((a,b)=>a+b.monto,0); const periodo=$('[name=periodo]',m).value; const vence=$('[name=vence]',m).value||null; const publicado=$('[name=publicado]',m).checked;
-    try{ await q(T('gastos').upsert({edificio_id:S.me.edificio_id, periodo, vence, items:rows, total, publicado, actualizado:now()})); await q(sb.rpc('recalcular_prorrateo',{p_periodo:periodo})); closeModal(); toast('Período guardado'); }catch(err){ toast('Error: '+errMsg(err)); } });
+  $('#fG',m).addEventListener('submit', async e=>{ e.preventDefault(); const rows=leer(); const total=rows.reduce((a,b)=>a+b.monto,0); const periodo=$('[name=periodo]',m).value; const vence=$('[name=vence]',m).value||null; const publicado=$('[name=publicado]',m).checked; const b=$('#fG > .row:last-child .btn:not(.dan)',m);
+    busy(b,true);
+    try{ await q(T('gastos').upsert({edificio_id:S.me.edificio_id, periodo, vence, items:rows, total, publicado:false, actualizado:now()})); await q(sb.rpc('recalcular_prorrateo',{p_periodo:periodo}));
+      if(publicado){ try{ await q(T('gastos').update({publicado:true}).eq('periodo',periodo)); await q(sb.rpc('recalcular_prorrateo',{p_periodo:periodo})); }
+        catch(err){ await q(T('gastos').update({publicado:false}).eq('periodo',periodo)).catch(()=>{}); throw new Error(errMsg(err)+' (el período quedó guardado como borrador)'); } }
+      closeModal(); toast(publicado?'Período publicado':'Período guardado'); }catch(err){ toast('Error: '+errMsg(err)); busy(b,false); } });
 }
 function detalleGastoAdmin(g, pr){
+  const us=Object.values(pr).sort((a,b)=>porNum(a.depto,b.depto)), items=g.items||[], cons=items.map((it,i)=>({it,i})).filter(x=>x.it.prorrateo==='consumo');
+  const cargoDe=p=>(p.detalle||[]).filter(d=>d.c).reduce((a,d)=>a+Number(d.monto),0), hayCargos=us.some(p=>cargoDe(p)>0), consDe=(p,i)=>(p.detalle||[]).find(d=>d.i===i)?.consumo;
   const m=modal(`<h3>${esc(fmtMonth(g.periodo))}</h3><div class="row wrap" style="margin-bottom:10px"><span class="pill ${g.publicado?'ok':'wa'}">${g.publicado?'Publicado':'Borrador'}</span><b>${clp(g.total)}</b><span class="grow"></span><button class="btn sec sm" id="xPdf">PDF</button><button class="btn sec sm" id="xXls">Excel</button>${isAdmin()?`<button class="btn sec sm" id="edG">Editar</button><button class="btn sec sm" id="recG">Recalcular prorrateo</button>`:''}</div>
-  <table><thead><tr><th>Ítem</th><th class="num">Monto</th></tr></thead><tbody>${(g.items||[]).map(it=>`<tr><td>${esc(it.categoria)} <span class="muted small">${esc(it.descripcion||'')}</span></td><td class="num">${clp(it.monto)}</td></tr>`).join('')}</tbody></table>
-  <h2>Prorrateo por unidad</h2><table><thead><tr><th>Unidad</th><th class="num">Alíc.</th><th class="num">Monto</th><th>Pago</th></tr></thead><tbody>${Object.values(pr).sort((a,b)=>a.depto.localeCompare(b.depto,undefined,{numeric:true})).map(p=>`<tr><td>${esc(p.depto)}</td><td class="num">${Number(p.alicuota)}%</td><td class="num">${clp(p.monto)}</td><td>${estadoCobro(p)}${isAdmin()&&!p.pagado&&!p.convenio_id?` <button class="btn sec sm" data-pago="${esc(p.depto)}">Registrar pago</button>`:''}</td></tr>`).join('')||'<tr><td colspan="4" class="muted">Sin unidades. Agrega unidades con alícuota en Administración.</td></tr>'}</tbody></table>`);
+  <table><thead><tr><th>Ítem</th><th>Se reparte</th><th class="num">Monto</th></tr></thead><tbody>${items.map(it=>`<tr><td>${esc(it.categoria)} <span class="muted small">${esc(it.descripcion||'')}</span>${it.fondo?' <span class="pill in">Fondo</span>':''}</td><td class="small">${esc(txtReparto(it))}</td><td class="num">${clp(it.monto)}</td></tr>`).join('')}</tbody></table>
+  <h2>Prorrateo por unidad</h2><div style="overflow:auto"><table><thead><tr><th>Unidad</th><th class="num">Alíc.</th>${cons.map(x=>`<th class="num">${esc(medidores().find(y=>y.id===x.it.medidor)?.nombre||x.it.categoria)}</th>`).join('')}${hayCargos?'<th class="num">Cargos</th>':''}<th class="num">Monto</th><th>Pago</th></tr></thead><tbody>${us.map(p=>`<tr><td>${esc(p.depto)}</td><td class="num">${Number(p.alicuota)}%</td>${cons.map(x=>{ const c=consDe(p,x.i); return `<td class="num">${c==null?'—':numCL(c,3)+' '+esc(medidores().find(y=>y.id===x.it.medidor)?.unidad||'')}</td>`; }).join('')}${hayCargos?`<td class="num">${cargoDe(p)?clp(cargoDe(p)):'—'}</td>`:''}<td class="num">${clp(p.monto)}</td><td>${estadoCobro(p)}${isAdmin()&&!p.pagado&&!p.convenio_id?` <button class="btn sec sm" data-pago="${esc(p.depto)}">Registrar pago</button>`:''}</td></tr>`).join('')||`<tr><td colspan="${4+cons.length+(hayCargos?1:0)}" class="muted">Sin unidades. Agrega unidades con alícuota en Administración.</td></tr>`}</tbody></table></div>`);
   $('#xPdf',m).addEventListener('click',()=>{ closeModal(); exportGasto('pdf',g,pr); });
   $('#xXls',m).addEventListener('click',()=>exportGasto('xls',g,pr));
   $('#edG',m)?.addEventListener('click',()=>formGasto(g));
@@ -406,18 +464,20 @@ function detalleGastoAdmin(g, pr){
 async function exportGasto(tipo, g, pr, mio){
   const c=S.cfg||{}; const items=g.items||[]; const mes=fmtMonth(g.periodo);
   const dmy=d=>d?String(d).slice(8,10)+'-'+String(d).slice(5,7)+'-'+String(d).slice(0,4):'—';
-  const us=Object.values(pr||{}).sort((a,b)=>a.depto.localeCompare(b.depto,undefined,{numeric:true}));
-  const parte=it=>Math.round(Number(it.monto)*Number(mio.alicuota)/100);
+  const us=Object.values(pr||{}).sort((a,b)=>porNum(a.depto,b.depto));
+  const ls=mio?desgloseUnidad(g,mio):[];
   const archivo='gastos-comunes-'+g.periodo+(mio?'-depto-'+seg(mio.depto):'');
+  const parteDe=(u,i)=>{ const d=(u.detalle||[]).find(x=>x.i===i); return d?Number(d.monto):((u.detalle||[]).some(x=>x.i!=null)?0:Math.round(Number(items[i].monto)*Number(u.alicuota)/100)); };
+  const cargoDe=u=>(u.detalle||[]).filter(d=>d.c).reduce((a,d)=>a+Number(d.monto),0);
   if(tipo==='xls'){
     const B=v=>({v,b:true}); let hojas;
-    if(mio) hojas=[{name:'Aviso de cobro', widths:[34,34,16,16], rows:[[B(c.nombre||'')],[B('Gastos comunes '+mes)],[],['Unidad',String(mio.depto)],['Alícuota %',Number(mio.alicuota)],['Vencimiento',dmy(g.vence)],['Estado',mio.pagado?'Pagado':'Pendiente'],[],
-      [B('Ítem'),B('Detalle'),B('Total edificio'),B('Tu parte')], ...items.map(it=>[it.categoria,it.descripcion||'',Number(it.monto)||0,parte(it)]), [B('Total'),'',B(Number(g.total)),B(Number(mio.monto))]]}];
-    else hojas=[{name:'Resumen', widths:[34,34,16], rows:[[B(c.nombre||'')],[B('Gastos comunes '+mes)],[],['Vencimiento',dmy(g.vence)],['Estado',g.publicado?'Publicado':'Borrador'],['Unidades pagadas',us.filter(u=>u.pagado).length+' de '+us.length],[],
-        [B('Ítem'),B('Detalle'),B('Monto')], ...items.map(it=>[it.categoria,it.descripcion||'',Number(it.monto)||0]), [B('Total'),'',B(Number(g.total))]]},
-      {name:'Prorrateo', widths:[12,30,12,16,12,16], rows:[[B('Unidad'),B('Propietario'),B('Alícuota %'),B('Monto'),B('Estado'),B('Fecha de pago')],
-        ...us.map(u=>[String(u.depto),S.unidades[u.depto]?.prop||'',Number(u.alicuota),Number(u.monto),u.pagado?'Pagado':'Pendiente',u.pagado_at?dmy(u.pagado_at):'']),
-        [B('Total'),'',B(us.reduce((a,u)=>a+Number(u.alicuota),0)),B(us.reduce((a,u)=>a+Number(u.monto),0))]]}];
+    if(mio) hojas=[{name:'Aviso de cobro', widths:[34,40,16,16,14], rows:[[B(c.nombre||'')],[B('Gastos comunes '+mes)],[],['Unidad',String(mio.depto)],['Alícuota %',Number(mio.alicuota)],['Vencimiento',dmy(g.vence)],['Estado',mio.pagado?'Pagado':'Pendiente'],[],
+      [B('Ítem'),B('Detalle'),B('Total edificio'),B('Tu parte'),B('Tu consumo')], ...ls.map(l=>[l.t,[l.d,l.reparto?'se reparte '+l.reparto:''].filter(Boolean).join(' · '),l.total==null?'':l.total,l.parte,l.consumo==null?'':l.consumo+' '+l.unidad]), [B('Total'),'',B(Number(g.total)),B(Number(mio.monto)),'']]}];
+    else hojas=[{name:'Resumen', widths:[34,34,30,16], rows:[[B(c.nombre||'')],[B('Gastos comunes '+mes)],[],['Vencimiento',dmy(g.vence)],['Estado',g.publicado?'Publicado':'Borrador'],['Unidades pagadas',us.filter(u=>u.pagado).length+' de '+us.length],[],
+        [B('Ítem'),B('Detalle'),B('Se reparte'),B('Monto')], ...items.map(it=>[it.categoria,it.descripcion||'',txtReparto(it),Number(it.monto)||0]), [B('Total'),'','',B(Number(g.total))]]},
+      {name:'Prorrateo', widths:[12,26,12,...items.map(()=>16),14,16,12], rows:[[B('Unidad'),B('Propietario'),B('Alícuota %'),...items.map(it=>B(it.categoria)),B('Cargos'),B('Total'),B('Estado')],
+        ...us.map(u=>[String(u.depto),S.unidades[u.depto]?.prop||'',Number(u.alicuota),...items.map((it,i)=>parteDe(u,i)),cargoDe(u),Number(u.monto),u.pagado?'Pagado':'Pendiente']),
+        [B('Total'),'',B(us.reduce((a,u)=>a+Number(u.alicuota),0)),...items.map((it,i)=>B(us.reduce((a,u)=>a+parteDe(u,i),0))),B(us.reduce((a,u)=>a+cargoDe(u),0)),B(us.reduce((a,u)=>a+Number(u.monto),0)),'']]}];
     descargar(new Blob([window.MiniXlsx.build(hojas)],{type:window.MiniXlsx.MIME}), archivo+'.xlsx'); return;
   }
   const logo=await urlFirmada(c.logo).catch(()=>'');
@@ -425,13 +485,59 @@ async function exportGasto(tipo, g, pr, mio){
   const banco=c.datos_bancarios?`<h2>Datos para transferir</h2><div class="pie">${esc(c.datos_bancarios)}</div>`:'';
   imprimir(archivo, mio?
     `${cab}<h1>Aviso de cobro · Gastos comunes ${esc(mes)}</h1><p class="sub">Depto ${esc(mio.depto)} · Alícuota ${Number(mio.alicuota)}% · Vence ${dmy(g.vence)} · ${mio.pagado?'Pagado':'Pendiente de pago'}</p>
-    <table><thead><tr><th>Ítem</th><th class="num">Total edificio</th><th class="num">Tu parte</th></tr></thead><tbody>${items.map(it=>`<tr><td>${esc(it.categoria)}${it.descripcion?' <span class="muted">'+esc(it.descripcion)+'</span>':''}</td><td class="num">${clp(it.monto)}</td><td class="num">${clp(parte(it))}</td></tr>`).join('')}
+    <table><thead><tr><th>Ítem</th><th class="num">Total edificio</th><th class="num">Tu parte</th></tr></thead><tbody>${ls.map(l=>`<tr><td>${esc(l.t)}${l.d?' <span class="muted">'+esc(l.d)+'</span>':''}${l.consumo!=null?` <span class="muted">· tu consumo ${numCL(l.consumo,3)} ${esc(l.unidad)}</span>`:''}</td><td class="num">${l.total==null?'—':clp(l.total)}</td><td class="num">${clp(l.parte)}</td></tr>`).join('')}
     <tr class="tot"><td>Total a pagar</td><td class="num">${clp(g.total)}</td><td class="num">${clp(mio.monto)}</td></tr></tbody></table>${banco}`
   : `${cab}<h1>Gastos comunes ${esc(mes)}</h1><p class="sub">Total ${clp(g.total)} · Vence ${dmy(g.vence)} · ${g.publicado?'Publicado':'Borrador'} · ${us.filter(u=>u.pagado).length} de ${us.length} unidades pagadas</p>
-    <table><thead><tr><th>Ítem</th><th>Detalle</th><th class="num">Monto</th></tr></thead><tbody>${items.map(it=>`<tr><td>${esc(it.categoria)}</td><td>${esc(it.descripcion||'')}</td><td class="num">${clp(it.monto)}</td></tr>`).join('')}<tr class="tot"><td>Total</td><td></td><td class="num">${clp(g.total)}</td></tr></tbody></table>
-    <h2>Prorrateo por unidad</h2><table><thead><tr><th>Unidad</th><th>Propietario</th><th class="num">Alícuota</th><th class="num">Monto</th><th>Estado</th></tr></thead><tbody>${us.map(u=>`<tr><td>${esc(u.depto)}</td><td>${esc(S.unidades[u.depto]?.prop||'')}</td><td class="num">${Number(u.alicuota)}%</td><td class="num">${clp(u.monto)}</td><td>${u.pagado?'Pagado '+dmy(u.pagado_at):'Pendiente'}</td></tr>`).join('')}
-    <tr class="tot"><td>Total</td><td></td><td class="num">${us.reduce((a,u)=>a+Number(u.alicuota),0).toFixed(2)}%</td><td class="num">${clp(us.reduce((a,u)=>a+Number(u.monto),0))}</td><td></td></tr></tbody></table>${banco}`);
+    <table><thead><tr><th>Ítem</th><th>Detalle</th><th>Se reparte</th><th class="num">Monto</th></tr></thead><tbody>${items.map(it=>`<tr><td>${esc(it.categoria)}</td><td>${esc(it.descripcion||'')}</td><td>${esc(txtReparto(it))}</td><td class="num">${clp(it.monto)}</td></tr>`).join('')}<tr class="tot"><td>Total</td><td></td><td></td><td class="num">${clp(g.total)}</td></tr></tbody></table>
+    <h2>Prorrateo por unidad</h2><table><thead><tr><th>Unidad</th><th>Propietario</th><th class="num">Alícuota</th><th class="num">Cargos</th><th class="num">Monto</th><th>Estado</th></tr></thead><tbody>${us.map(u=>`<tr><td>${esc(u.depto)}</td><td>${esc(S.unidades[u.depto]?.prop||'')}</td><td class="num">${Number(u.alicuota)}%</td><td class="num">${cargoDe(u)?clp(cargoDe(u)):'—'}</td><td class="num">${clp(u.monto)}</td><td>${u.pagado?'Pagado '+dmy(u.pagado_at):'Pendiente'}</td></tr>`).join('')}
+    <tr class="tot"><td>Total</td><td></td><td class="num">${us.reduce((a,u)=>a+Number(u.alicuota),0).toFixed(2)}%</td><td class="num">${clp(us.reduce((a,u)=>a+cargoDe(u),0))}</td><td class="num">${clp(us.reduce((a,u)=>a+Number(u.monto),0))}</td><td></td></tr></tbody></table>${banco}`);
 }
+
+// LECTURAS de medidores individuales. Conserjería y administración las ingresan; el comité las ve.
+VIEWS.lecturas = function(){
+  const puede=['conserje','admin'].includes(role()); let per=monthStr(), med='', filas=[], prev={}, pub=false;
+  setMain(`<h1>Lecturas de medidores</h1><div id="lcCfg"></div><div class="card" id="lcSel"></div><div id="lcBody"></div>`);
+  const cfg=()=>{ const mds=medidores(); $('#lcCfg').innerHTML=isAdmin()?`<div class="row" style="margin-bottom:10px"><button class="btn sec sm" id="bMed">${mds.length?'Configurar medidores':'+ Configurar medidores'}</button></div>`:'';
+    if(!mds.length){ $('#lcSel').innerHTML=`<div class="empty">${isAdmin()?'Primero define qué medidores individuales hay en el edificio (agua caliente, calefacción, gas…).':'La administración aún no configura los medidores.'}</div>`; $('#lcBody').innerHTML=''; return false; }
+    if(!mds.some(x=>x.id===med)) med=mds[0].id;
+    $('#lcSel').innerHTML=`<div class="row wrap"><label class="f grow" style="margin:0"><span>Período de gastos comunes</span><input type="month" id="lcPer" value="${esc(per)}"></label><label class="f grow" style="margin:0"><span>Medidor</span><select id="lcMed">${mds.map(x=>`<option value="${esc(x.id)}" ${x.id===med?'selected':''}>${esc(x.nombre)} (${esc(x.unidad)})</option>`).join('')}</select></label></div>`; return true; };
+  const draw=()=>{ const el=$('#lcBody'); if(!el) return; const md=medidores().find(x=>x.id===med); if(!md) return;
+    const us=Object.keys(S.unidades).sort(porNum), R={}; filas.forEach(f=>R[f.depto]=f);
+    const cons=us.map(d=>R[d]?Number(R[d].actual)-Number(R[d].anterior):null).filter(x=>x!=null).sort((a,b)=>a-b), med50=cons.length?cons[Math.floor(cons.length/2)]:0, tot=cons.reduce((a,b)=>a+b,0);
+    const ed=puede&&!pub;
+    el.innerHTML=`<div class="kpi"><div class="k"><b>${filas.length} de ${us.length}</b><span>Unidades con lectura</span></div><div class="k"><b>${numCL(tot,3)} ${esc(md.unidad)}</b><span>Consumo total</span></div><div class="k"><b>${numCL(med50,3)} ${esc(md.unidad)}</b><span>Consumo típico (mediana)</span></div></div>
+    ${pub?`<div class="note" style="margin-top:10px">El período ${esc(fmtMonth(per))} ya está publicado: sus lecturas no se pueden cambiar. Para corregir, la administración debe despublicarlo.</div>`:''}
+    <div class="card" style="overflow:auto;margin-top:12px"><table id="lcTab"><thead><tr><th>Unidad</th><th>Propietario</th><th class="num">Anterior</th><th class="num">Actual</th><th class="num">Consumo</th><th></th></tr></thead><tbody>${us.map(d=>{ const r=R[d], ant=r?Number(r.anterior):(prev[d]??0), c=r?Number(r.actual)-Number(r.anterior):null;
+      const alerta=c!=null&&med50>0&&c>3*med50?'<span class="pill wa">Alto</span>':c===0?'<span class="pill mu">Sin consumo</span>':'';
+      return `<tr data-d="${esc(d)}"><td><b>${esc(d)}</b></td><td class="small">${esc(S.unidades[d]?.prop||'')}</td><td class="num">${ed?`<input type="number" name="ant" step="any" min="0" value="${ant}" style="width:100px;text-align:right">`:numCL(ant,3)}</td><td class="num">${ed?`<input type="number" name="act" step="any" min="0" value="${r?Number(r.actual):''}" placeholder="—" style="width:100px;text-align:right">`:(r?numCL(r.actual,3):'—')}</td><td class="num" data-c>${c==null?'—':numCL(c,3)}</td><td>${alerta}</td></tr>`; }).join('')}</tbody></table></div>
+    ${ed?`<div class="row wrap" style="margin-top:10px;gap:6px"><button class="btn" id="lcGuardar">Guardar lecturas</button><button class="btn sec" id="lcPegar">Pegar desde Excel</button></div><p class="small muted">"Anterior" se completa con la lectura del período previo. Si se cambió el medidor de una unidad, pon 0 como anterior. Las unidades sin lectura pagan solo la parte fija del ítem.</p>`:''}`; };
+  const cargar=async()=>{ if(!cfg()) return; const [f,p,g]=await Promise.all([q(T('lecturas').select('*').eq('periodo',per).eq('medidor',med)), q(T('lecturas').select('depto,periodo,actual').eq('medidor',med).lt('periodo',per).order('periodo',{ascending:true})), q(T('gastos').select('publicado').eq('periodo',per)).catch(()=>[])]);
+    filas=f; prev={}; p.forEach(x=>prev[x.depto]=Number(x.actual)); pub=!!g[0]?.publicado; draw(); };
+  const w=watch(['lecturas','gastos','edificios'], async()=>true, ()=>{ if(!$('.modal')&&!document.activeElement?.closest?.('#lcTab')) cargar(); }, {silent:true});
+  $('#lcSel').addEventListener('change',e=>{ if(e.target.id==='lcPer') per=e.target.value||monthStr(); if(e.target.id==='lcMed') med=e.target.value; cargar(); });
+  $('#lcBody').addEventListener('input',e=>{ const tr=e.target.closest('tr[data-d]'); if(!tr) return; const a=Number($('[name=ant]',tr).value), b=$('[name=act]',tr).value; $('[data-c]',tr).textContent=b===''?'—':numCL(Number(b)-a,3); });
+  $('#lcBody').addEventListener('click', async e=>{
+    if(e.target.id==='lcGuardar'){ const b=e.target, rows=$$('#lcTab tr[data-d]').filter(tr=>$('[name=act]',tr).value!=='').map(tr=>({periodo:per, medidor:med, depto:tr.dataset.d, anterior:Number($('[name=ant]',tr).value)||0, actual:Number($('[name=act]',tr).value)}));
+      const malas=rows.filter(r=>r.actual<r.anterior); if(malas.length){ toast('La lectura actual es menor que la anterior en: '+malas.map(r=>r.depto).join(', ')); return; }
+      if(!rows.length){ toast('No hay lecturas para guardar'); return; } busy(b,true);
+      try{ await q(T('lecturas').upsert(rows)); toast(rows.length+' lecturas guardadas'); await cargar(); }catch(err){ toast('Error: '+errMsg(err)); busy(b,false); } }
+    if(e.target.id==='lcPegar'){ const t=await askText('Pega dos columnas: unidad y lectura actual (una unidad por línea, separadas por tabulación, punto y coma o espacio)'); if(!t) return; let n=0, no=[];
+      t.split('\n').map(l=>l.trim()).filter(Boolean).forEach(l=>{ const [d,v]=l.split(/[\t;]+|\s+/); const tr=$(`#lcTab tr[data-d="${CSS.escape(String(d||'').trim())}"]`), x=Number(String(v||'').replace(/\./g,'').replace(',','.')); if(tr&&!isNaN(x)&&v!==undefined){ $('[name=act]',tr).value=x; tr.querySelector('[name=act]').dispatchEvent(new Event('input',{bubbles:true})); n++; } else no.push(d); });
+      toast(`${n} lecturas cargadas${no.length?' · no reconocidas: '+no.slice(0,5).join(', '):''}. Revisa y guarda.`); } });
+  $('#lcCfg').addEventListener('click', e=>{ if(e.target.id==='bMed') formMedidores(()=>cargar()); });
+  cargar();
+};
+function formMedidores(listo){
+  const ya=medidores(); const m=modal(`<h3>Medidores individuales</h3><p class="small muted">Los tipos de medidor que tiene cada unidad. Con sus lecturas se reparten los ítems del gasto común "según consumo".</p><form id="fMd"><div id="mdL"></div><button type="button" class="btn sec sm" id="mdAdd">+ Medidor</button>
+    <div class="small muted" style="margin:10px 0 4px">Agregar rápido:</div><div class="row wrap" style="gap:6px">${MEDIDORES_EJ.map(x=>`<button type="button" class="btn sec sm" data-ej="${x.id}">${esc(x.nombre)}</button>`).join('')}</div>
+    <button class="btn full" style="margin-top:12px">Guardar</button></form>`);
+  const fila=(x={})=>{ const d=document.createElement('div'); d.className='row md'; d.style.marginBottom='6px'; d.dataset.id=x.id||''; d.innerHTML=`<input type="text" name="n" placeholder="Nombre, ej: Agua caliente" value="${esc(x.nombre||'')}" style="flex:2" required><input type="text" name="u" placeholder="Unidad, ej: m³" value="${esc(x.unidad||'')}" style="flex:1" required><button type="button" class="btn sec sm" data-q>✕</button>`; $('#mdL',m).appendChild(d); };
+  ya.forEach(fila); $('#mdAdd',m).addEventListener('click',()=>fila());
+  m.addEventListener('click',e=>{ const q1=e.target.closest('[data-q]'), ej=e.target.closest('[data-ej]'); if(q1) q1.closest('.md').remove(); if(ej){ const x=MEDIDORES_EJ.find(y=>y.id===ej.dataset.ej); if(!$$('.md',m).some(r=>r.dataset.id===x.id)) fila(x); } });
+  $('#fMd',m).addEventListener('submit', async e=>{ e.preventDefault(); const usados=new Set(); const arr=$$('.md',m).map(r=>{ let id=r.dataset.id||seg($('[name=n]',r).value).toLowerCase(); while(usados.has(id)) id+='_2'; usados.add(id); return {id, nombre:$('[name=n]',r).value.trim(), unidad:$('[name=u]',r).value.trim()}; }).filter(x=>x.nombre);
+    try{ await q(T('edificios').update({medidores:arr}).eq('id',S.cfg.id)); S.cfg.medidores=arr; closeModal(); toast('Medidores guardados'); listo?.(); }catch(err){ toast('Error: '+errMsg(err)); } });
+}
+
 
 // FINANZAS: pagos registrados por la administración, convenios de pago, estado económico y caja.
 // Los montos pagados, los estados y las cuotas los calcula la base de datos (privado.recalc_unidad).
@@ -507,6 +613,17 @@ function detalleConvenio(c, listo){
   $('#cvPago',m)?.addEventListener('click',()=>formPago({depto:c.depto, convenio:c.id, listo}));
   $('#cvNo',m)?.addEventListener('click', async()=>{ const mot=await askText(mio?'¿Por qué rechazas el convenio? (opcional)':'Motivo de la anulación'); if(mot===null) return; try{ await q(sb.rpc('anular_convenio',{p_id:c.id, p_motivo:mot})); toast(mio?'Convenio rechazado':'Convenio anulado'); listo?.(); }catch(err){ toast('Error: '+errMsg(err)); } });
 }
+// Cargo individual (multa, arriendo, otro) a una unidad, en el primer período no publicado salvo que se elija otro
+async function formCargo(pre={}, listo){
+  let gs=[]; try{ gs=await q(T('gastos').select('periodo,publicado')); }catch(e){}
+  const pub=new Set(gs.filter(x=>x.publicado).map(x=>x.periodo)); let p=monthStr(); for(let k=0;k<36&&pub.has(p);k++){ const [y,mm]=p.split('-').map(Number); const d=new Date(y,mm,1); p=d.getFullYear()+'-'+pad(d.getMonth()+1); }
+  const m=modal(`<h3>Nuevo cargo</h3><form id="fCg"><div class="row"><label class="f grow"><span>Unidad</span><input type="text" name="depto" list="dlCg" value="${esc(pre.depto||'')}" required><datalist id="dlCg">${Object.keys(S.unidades).sort(porNum).map(d=>`<option value="${esc(d)}">`).join('')}</datalist></label><label class="f grow"><span>Tipo</span><select name="tipo">${Object.entries(TIPO_CARGO).map(([k,v])=>`<option value="${k}" ${pre.tipo===k?'selected':''}>${v}</option>`).join('')}</select></label></div>
+    <label class="f"><span>Detalle</span><input type="text" name="descripcion" value="${esc(pre.descripcion||'')}" placeholder="Ej: ruidos molestos 12-11, art. 15 del reglamento" required></label>
+    <div class="row"><label class="f grow"><span>Monto</span><input type="number" name="monto" min="1" step="1" value="${pre.monto||''}" required></label><label class="f grow"><span>Se cobra en el gasto común de</span><input type="month" name="periodo" value="${p}" min="${p}" required></label></div>
+    <p class="small muted">Se suma al cobro de la unidad en ese período. Solo se pueden usar períodos aún no publicados. Para multas, aplica lo que diga el reglamento de copropiedad.</p><button class="btn full">Registrar cargo</button></form>`);
+  $('#fCg',m).addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); if(!S.unidades[d.depto.trim()]){ toast('Esa unidad no existe'); return; } const b=$('button.full',e.target); busy(b,true);
+    try{ await q(T('cargos').insert({depto:d.depto.trim(), tipo:d.tipo, descripcion:d.descripcion.trim(), monto:Number(d.monto), periodo:d.periodo})); closeModal(); toast('Cargo registrado'); listo?.(); }catch(err){ toast('Error: '+errMsg(err)); busy(b,false); } });
+}
 const filaPago=(p,conDepto)=>`<div class="item static"><div class="hd"><b>${conDepto?'Depto '+esc(p.depto)+' · ':''}${clp(p.monto)}</b><span class="row" style="gap:4px">${p.anulado?'<span class="pill er">Anulado</span>':''}<span class="muted small">${fmtDay(p.fecha)}</span></span></div><div class="meta">${p.periodo?(p.concepto==='interes'?'Interés por mora ':'Gastos comunes ')+esc(fmtMonth(p.periodo)):'Convenio de pago'} · ${esc(MEDIOS[p.medio]||p.medio)}${p.referencia?' · comprobante '+esc(p.referencia):''}${p.nota?' · '+esc(p.nota):''}${p.anulado&&p.anulado_motivo?' · anulado: '+esc(p.anulado_motivo):''}${conDepto&&isAdmin()&&!p.anulado?` · <a href="#" data-anular="${p.id}">Anular</a>`:''}</div></div>`;
 // Estado de cuenta de la unidad, bajo los gastos comunes del residente
 function cuentaResidente(){
@@ -520,10 +637,11 @@ function cuentaResidente(){
   $('#gCuenta').addEventListener('click',e=>{ const it=e.target.closest('[data-cv]'); if(it&&D?.C[it.dataset.cv]) detalleConvenio(D.C[it.dataset.cv], w.reload); });
 }
 VIEWS.finanzas = function(param){
-  const adm=isAdmin(); const TABS={estado:'Estado',pagos:'Pagos',convenios:'Convenios',caja:'Flujo de caja'};
-  let tab=TABS[param]?param:'estado', D=null, movs=[], anio=new Date().getFullYear();
+  const adm=isAdmin(); const TABS={estado:'Estado',pagos:'Pagos',convenios:'Convenios',cargos:'Cargos',fondos:'Fondos',caja:'Flujo de caja'};
+  let tab=TABS[param]?param:'estado', D=null, movs=[], anio=new Date().getFullYear(), cargos=[], fondos=[], fmov=[], saldos=[], verAnul=false;
   setMain(`<h1>Finanzas</h1><div class="tabs" id="fTabs">${Object.entries(TABS).map(([k,v])=>`<button data-t="${k}" class="${k===tab?'on':''}">${v}</button>`).join('')}</div><div id="fBody"><div class="empty">Cargando…</div></div>`);
-  const w=watch(['gastos','gasto_unidades','pagos','convenios','convenio_cuotas','caja_movimientos'], async()=>({d:await finDatos(), mv:await q(T('caja_movimientos').select('*').order('fecha',{ascending:false}).limit(5000))}), ({d,mv})=>{ D=d; movs=mv; if(!$('.modal')) draw(); });
+  const w=watch(['gastos','gasto_unidades','pagos','convenios','convenio_cuotas','caja_movimientos','cargos','fondos','fondo_movimientos'], async()=>{ const [d,mv,cg,fo,fm,sd]=await Promise.all([finDatos(), q(T('caja_movimientos').select('*').order('fecha',{ascending:false}).limit(5000)), q(T('cargos').select('*').order('ts',{ascending:false}).limit(2000)), q(T('fondos').select('*').order('creado')), q(T('fondo_movimientos').select('*').order('fecha',{ascending:false}).limit(2000)), q(sb.rpc('saldos_fondos')).catch(()=>[])]); return {d,mv,cg,fo,fm,sd}; },
+    ({d,mv,cg,fo,fm,sd})=>{ D=d; movs=mv; cargos=cg; fondos=fo; fmov=fm; saldos=sd; if(!$('.modal')) draw(); });
   const listo=()=>w.reload();
   // Flujo de caja: ingresos por gastos comunes (pagos vigentes) + otros movimientos, por mes
   const caja=()=>{ const M={}; const mes=k=>M[k]=M[k]||{gc:0, otros:0, egresos:0}; D.pagos.filter(p=>enCaja(p)).forEach(p=>mes(p.fecha.slice(0,7)).gc+=Number(p.monto)); movs.forEach(x=>{ mes(x.fecha.slice(0,7))[x.tipo==='egreso'?'egresos':'otros']+=Number(x.monto); });
@@ -535,6 +653,17 @@ VIEWS.finanzas = function(param){
       el.innerHTML=`<div class="kpi"><div class="k"><b>${clp(tot('deuda'))}</b><span>Por cobrar</span></div><div class="k"><b style="color:${tot('vencido')?'var(--er)':'inherit'}">${clp(tot('vencido'))}</b><span>Vencido</span></div><div class="k"><b>${clp(tot('convenio'))}</b><span>En convenio</span></div>${tot('interes')?`<div class="k"><b>${clp(tot('interes'))}</b><span>Intereses por mora</span></div>`:''}<div class="k"><b>${us.filter(z=>z.vencido>0).length}</b><span>Unidades morosas</span></div><div class="k"><b>${clp(D.pagos.filter(p=>enCaja(p)&&p.fecha.slice(0,7)===mes).reduce((a,p)=>a+Number(p.monto),0))}</b><span>Recaudado en ${esc(fmtMonth(mes))}</span></div></div>
       <h2>Unidades con deuda</h2><div class="card" style="overflow:auto"><table><thead><tr><th>Unidad</th><th>Propietario</th><th class="num">Deuda</th><th class="num">Vencido</th><th class="num">Interés</th><th class="num">Cobros</th><th>Convenio</th><th></th></tr></thead><tbody>${deu.map(z=>{ const c=z.convs.find(x=>['propuesto','vigente'].includes(x.estado)); return `<tr><td><b>${esc(z.depto)}</b></td><td>${esc(S.unidades[z.depto]?.prop||'')}</td><td class="num">${clp(z.deuda)}</td><td class="num" style="color:${z.vencido?'var(--er)':'inherit'}">${clp(z.vencido)}</td><td class="num">${z.interes?clp(z.interes):'—'}</td><td class="num">${z.rows.filter(r=>r.saldo>0).length}</td><td>${c?`<a href="#" data-cv="${c.id}">${pillConv(c)}</a>`:'—'}</td><td style="white-space:nowrap">${adm?`<button class="btn sec sm" data-pago="${esc(z.depto)}">Pago</button> ${z.rows.some(r=>r.saldo>0&&!r.enConvenio)?`<button class="btn sec sm" data-conv="${esc(z.depto)}">Convenio</button>`:''}`:''}</td></tr>`; }).join('')||'<tr><td colspan="8" class="muted">Ninguna unidad tiene deuda 🎉</td></tr>'}</tbody></table></div>
       <p class="small muted">"Vencido" suma los cobros pasados de su fecha que no están en un convenio vigente, más las cuotas de convenio atrasadas. Solo cuentan los períodos publicados. ${Number(S.cfg?.mora_tasa)>0?esc(txtMora())+' El interés se muestra aparte de la deuda; se paga o se condona desde "Pago". Mientras un cobro está en convenio, deja de sumar.':'No se cobra interés por mora: la tasa se define en Administración → Edificio.'}</p>`; }
+    else if(tab==='cargos'){ const cs=cargos.filter(c=>verAnul||c.estado==='vigente');
+      el.innerHTML=`<div class="row wrap" style="margin-bottom:10px">${adm?'<button class="btn" id="bCargo">+ Nuevo cargo</button>':''}<label class="sw small"><input type="checkbox" id="cgAnul" ${verAnul?'checked':''}> Mostrar anulados</label></div>
+      <div class="kpi"><div class="k"><b>${clp(cargos.filter(c=>c.estado==='vigente'&&c.tipo==='multa').reduce((a,c)=>a+Number(c.monto),0))}</b><span>Multas vigentes</span></div><div class="k"><b>${clp(cargos.filter(c=>c.estado==='vigente'&&c.tipo==='arriendo').reduce((a,c)=>a+Number(c.monto),0))}</b><span>Arriendos</span></div><div class="k"><b>${clp(cargos.filter(c=>c.estado==='anulado'||Number(c.monto)<Number(c.monto_original)).reduce((a,c)=>a+Number(c.monto_original)-(c.estado==='anulado'?0:Number(c.monto)),0))}</b><span>Condonado o rebajado</span></div></div>
+      <div class="list" style="margin-top:12px">${cs.map(c=>`<div class="item static"><div class="hd"><b>Depto ${esc(c.depto)} · ${esc(TIPO_CARGO[c.tipo])} · ${clp(c.estado==='anulado'?c.monto_original:c.monto)}</b><span class="row" style="gap:4px">${c.estado==='anulado'?'<span class="pill mu">Anulado</span>':Number(c.monto)<Number(c.monto_original)?'<span class="pill wa">Rebajado</span>':''}<span class="muted small">${esc(fmtMonth(c.periodo))}</span></span></div>
+        <div class="meta">${esc(c.descripcion||'')}${c.descripcion?' · ':''}se cobra en el gasto común de ${esc(fmtMonth(c.periodo))}${Number(c.monto)<Number(c.monto_original)&&c.estado!=='anulado'?' · rebajado desde '+clp(c.monto_original):''}${c.motivo?' · motivo: '+esc(c.motivo):''}${adm&&c.estado==='vigente'?` · <a href="#" data-rebajar="${c.id}">Rebajar</a> · <a href="#" data-anularc="${c.id}">Anular</a>`:''}</div></div>`).join('')||'<div class="empty">Sin cargos</div>'}</div>
+      <p class="small muted">Multas, arriendo de espacios comunes y otros cobros a una unidad. Se suman a su gasto común del período indicado. El arriendo de un espacio con costo se carga solo al aprobarse la reserva, y se anula si se cancela. Un cargo no se borra: se rebaja o se anula (condonación) con un motivo, y queda el registro.</p>`; }
+    else if(tab==='fondos'){ const sd=id=>saldos.find(x=>x.fondo_id===id)||{aportes:0,usos:0,ajustes:0,saldo:0};
+      el.innerHTML=`${adm?'<div style="margin-bottom:10px"><button class="btn" id="bFondo">+ Nuevo fondo</button></div>':''}
+      ${!fondos.some(f=>f.reserva)?`<div class="note" style="margin-bottom:10px">No hay un fondo común de reserva. La Ley de Copropiedad Inmobiliaria exige formarlo con un recargo sobre los gastos comunes; el porcentaje lo fija el reglamento dentro del mínimo legal.${adm?' Créalo con "+ Nuevo fondo" y márcalo como fondo de reserva.':''}</div>`:''}
+      <div class="list">${fondos.map(f=>{ const x=sd(f.id); return `<div class="item" data-fondo="${f.id}"><div class="hd"><b>${esc(f.nombre)}</b><span class="row" style="gap:4px">${f.reserva?'<span class="pill in">Reserva legal</span>':''}${f.activo?'':'<span class="pill mu">Inactivo</span>'}<b>${clp(x.saldo)}</b></span></div><div class="meta">Saldo inicial ${clp(f.saldo_inicial)} · aportes ${clp(x.aportes)} · usos ${clp(x.usos)}${Number(x.ajustes)?' · ajustes '+clp(x.ajustes):''}${Number(f.pct)>0?' · aporte sugerido '+numCL(f.pct,2)+' %':''}</div></div>`; }).join('')||'<div class="empty">Sin fondos</div>'}</div>
+      <p class="small muted">Los fondos se provisionan con ítems del gasto común marcados "Va al fondo…": al publicar el período, el aporte se anota solo. Al usar un fondo se registra en qué y, si se quiere, también el egreso en el flujo de caja.</p>`; }
     else if(tab==='pagos'){ el.innerHTML=`${adm?'<div style="margin-bottom:10px"><button class="btn" id="bPago">+ Registrar pago</button></div>':''}<div class="list">${D.pagos.slice(0,400).map(p=>filaPago(p,true)).join('')||'<div class="empty">Aún no hay pagos registrados</div>'}</div>`; }
     else if(tab==='convenios'){ const cs=Object.values(D.C).sort((a,b)=>a.ts<b.ts?1:-1); el.innerHTML=`<p class="small muted">Para proponer un convenio, usa el botón "Convenio" de la unidad en la pestaña Estado.</p><div class="list">${cs.map(c=>`<div class="item" data-cv="${c.id}"><div class="hd"><b>Depto ${esc(c.depto)} · ${clp(c.monto_total)} en ${c.cuotas} ${c.cuotas===1?'cuota':'cuotas'}</b>${pillConv(c)}</div><div class="meta">${c.lista.filter(k=>Number(k.pagado_monto)>=Number(k.monto)).length} de ${c.cuotas} cuotas pagadas · saldo ${clp(c.saldo)}${c.atraso?' · atrasado '+clp(c.atraso):''} · ${fmtDate(c.ts)}</div></div>`).join('')||'<div class="empty">Sin convenios</div>'}</div>`; }
     else { const {previo,filas}=filasAnio(); const anios=[...new Set([new Date().getFullYear(), ...D.pagos.map(p=>+p.fecha.slice(0,4)), ...movs.map(x=>+x.fecha.slice(0,4))])].sort((a,b)=>b-a); const s=k=>filas.reduce((a,f)=>a+f[k],0);
@@ -552,13 +681,36 @@ VIEWS.finanzas = function(param){
     <label class="f"><span>Detalle</span><input type="text" name="descripcion" placeholder="Proveedor, N° de factura…"></label><label class="f"><span>Monto</span><input type="number" name="monto" min="1" step="1" required></label><p class="small muted">Los pagos de gastos comunes no se anotan aquí: se registran en Pagos y entran solos al flujo.</p><button class="btn full">Guardar</button></form>`);
     $('#fMv',m).addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); const b=$('button',e.target); busy(b,true); try{ await q(T('caja_movimientos').insert({tipo:d.tipo, fecha:d.fecha, categoria:d.categoria.trim(), descripcion:d.descripcion.trim(), monto:Number(d.monto), registrado_por:S.uid})); closeModal(); toast('Movimiento guardado'); listo(); }catch(err){ toast('Error: '+errMsg(err)); busy(b,false); } }); };
   $('#fTabs').addEventListener('click',e=>{ const b=e.target.closest('button'); if(!b) return; $$('#fTabs button').forEach(x=>x.classList.remove('on')); b.classList.add('on'); tab=b.dataset.t; draw(); });
-  $('#fBody').addEventListener('change',e=>{ if(e.target.id==='fAnio'){ anio=Number(e.target.value); draw(); } });
+  $('#fBody').addEventListener('change',e=>{ if(e.target.id==='fAnio'){ anio=Number(e.target.value); draw(); } if(e.target.id==='cgAnul'){ verAnul=e.target.checked; draw(); } });
+  const formFondo=(f={})=>{ const m=modal(`<h3>${f.id?'Editar':'Nuevo'} fondo</h3><form id="fFo"><label class="f"><span>Nombre</span><input type="text" name="nombre" value="${esc(f.nombre||'')}" placeholder="Ej: Fondo de reserva, Fondo de mantención" required></label>
+    <label class="sw" style="margin-bottom:10px"><input type="checkbox" name="reserva" ${f.reserva?'checked':''}> Es el fondo común de reserva que exige la ley</label>
+    <div class="row"><label class="f grow"><span>Aporte sugerido (% de los gastos del período)</span><input type="number" name="pct" min="0" max="100" step="0.01" value="${Number(f.pct)||0}"></label><label class="f grow"><span>Saldo al empezar a usar la app</span><input type="number" name="saldo_inicial" step="1" value="${Number(f.saldo_inicial)||0}" ${f.id?'disabled':''}></label></div>
+    <label class="f"><span>Descripción (opcional)</span><input type="text" name="descripcion" value="${esc(f.descripcion||'')}"></label>${f.id?`<label class="sw" style="margin-bottom:10px"><input type="checkbox" name="activo" ${f.activo?'checked':''}> Activo</label>`:''}
+    <p class="small muted">Con un aporte sugerido, al crear un período se agrega el ítem del fondo y el botón "Calcular aportes a fondos" calcula su monto. El reglamento de copropiedad fija el porcentaje; confírmalo.</p><button class="btn full">Guardar</button></form>`);
+    $('#fFo',m).addEventListener('submit', async ev=>{ ev.preventDefault(); const d=formData(ev.target); const o={nombre:d.nombre.trim(), reserva:!!d.reserva, pct:Number(d.pct)||0, descripcion:d.descripcion.trim()}; if(f.id) o.activo=!!d.activo; else o.saldo_inicial=Number(d.saldo_inicial)||0;
+      try{ await q(f.id?T('fondos').update(o).eq('id',f.id):T('fondos').insert(o)); closeModal(); toast('Fondo guardado'); listo(); }catch(err){ toast('Error: '+errMsg(err)); } }); };
+  const detalleFondo=(f,x={},ms=[])=>{ const TM={aporte:'Aporte',uso:'Uso',ajuste:'Ajuste'};
+    const m=modal(`<h3>${esc(f.nombre)}</h3><div class="kpi"><div class="k"><b>${clp(x.saldo)}</b><span>Saldo</span></div><div class="k"><b>${clp(x.aportes)}</b><span>Aportes</span></div><div class="k"><b>${clp(x.usos)}</b><span>Usos</span></div></div>
+    ${adm?`<div class="row wrap" style="gap:6px;margin:12px 0"><button class="btn" id="foUso">Registrar uso</button><button class="btn sec" id="foAj">Ajuste</button><button class="btn sec" id="foEd">Editar</button></div>`:''}
+    <div class="list">${ms.map(v=>`<div class="item static"><div class="hd"><b>${TM[v.tipo]} · ${v.tipo==='uso'?'−':''}${clp(v.monto)}</b><span class="muted small">${fmtDay(v.fecha)}</span></div><div class="meta">${esc(v.descripcion||'')}${v.caja_id?' · también en el flujo de caja':''}${adm&&!v.periodo?` · <a href="#" data-delfm="${v.id}">Eliminar</a>`:''}</div></div>`).join('')||'<div class="empty">Sin movimientos</div>'}<div class="item static"><div class="meta">Saldo inicial ${clp(f.saldo_inicial)}</div></div></div>
+    <div class="center" style="margin-top:12px"><button class="btn sec" data-close>Cerrar</button></div>`);
+    $('#foEd',m)?.addEventListener('click',()=>formFondo(f));
+    $('#foUso',m)?.addEventListener('click',()=>{ const m2=modal(`<h3>Usar ${esc(f.nombre)}</h3><p class="small muted">Saldo disponible ${clp(x.saldo)}.</p><form id="fUs"><label class="f"><span>En qué se usó</span><input type="text" name="d" required placeholder="Ej: reparación bomba de agua, factura 1234"></label><div class="row"><label class="f grow"><span>Monto</span><input type="number" name="m" min="1" max="${Math.max(0,Math.floor(x.saldo))}" required></label><label class="f grow"><span>Fecha</span><input type="date" name="f" value="${todayStr()}" required></label></div><label class="sw" style="margin-bottom:10px"><input type="checkbox" name="e" checked> Registrar también el egreso en el flujo de caja</label><button class="btn full">Registrar uso</button></form>`);
+      $('#fUs',m2).addEventListener('submit', async ev=>{ ev.preventDefault(); const d=formData(ev.target); try{ await q(sb.rpc('usar_fondo',{p_fondo:f.id, p_monto:Number(d.m), p_fecha:d.f, p_descripcion:d.d.trim(), p_egreso:!!d.e})); closeModal(); toast('Uso registrado'); listo(); }catch(err){ toast('Error: '+errMsg(err)); } }); });
+    $('#foAj',m)?.addEventListener('click',()=>{ const m2=modal(`<h3>Ajuste de ${esc(f.nombre)}</h3><p class="small muted">Para cuadrar el saldo con la cuenta del banco (intereses ganados, diferencias). Positivo suma, negativo resta. No pasa por el flujo de caja.</p><form id="fAj"><label class="f"><span>Motivo</span><input type="text" name="d" required></label><div class="row"><label class="f grow"><span>Monto</span><input type="number" name="m" required></label><label class="f grow"><span>Fecha</span><input type="date" name="f" value="${todayStr()}" required></label></div><button class="btn full">Guardar ajuste</button></form>`);
+      $('#fAj',m2).addEventListener('submit', async ev=>{ ev.preventDefault(); const d=formData(ev.target); try{ await q(T('fondo_movimientos').insert({fondo_id:f.id, tipo:'ajuste', monto:Number(d.m), fecha:d.f, descripcion:d.d.trim()})); closeModal(); toast('Ajuste guardado'); listo(); }catch(err){ toast('Error: '+errMsg(err)); } }); });
+    m.addEventListener('click', async ev=>{ const d=ev.target.closest('[data-delfm]'); if(!d) return; ev.preventDefault(); if(!await confirmBox('¿Eliminar este movimiento? Si generó un egreso en el flujo de caja, elimínalo también allí.')) return; try{ await q(T('fondo_movimientos').delete().eq('id',d.dataset.delfm)); toast('Movimiento eliminado'); listo(); }catch(err){ toast('Error: '+errMsg(err)); } }); };
   $('#fBody').addEventListener('click', async e=>{ const t=x=>e.target.closest(x); let b;
     if(b=t('[data-cv]')){ e.preventDefault(); detalleConvenio(D.C[b.dataset.cv], listo); }
     else if(b=t('[data-pago]')) formPago({depto:b.dataset.pago, listo});
     else if(b=t('[data-conv]')) formConvenio(b.dataset.conv, listo);
     else if(t('#bPago')) formPago({listo});
     else if(t('#bMov')) formMov();
+    else if(t('#bCargo')) formCargo({}, listo);
+    else if(t('#bFondo')) formFondo();
+    else if(b=t('[data-fondo]')) detalleFondo(fondos.find(f=>f.id===b.dataset.fondo), saldos.find(x=>x.fondo_id===b.dataset.fondo), fmov.filter(x=>x.fondo_id===b.dataset.fondo));
+    else if(b=t('[data-rebajar]')){ e.preventDefault(); const c=cargos.find(x=>x.id===b.dataset.rebajar); const v=await askText('Nuevo monto (hoy '+clp(c.monto)+')', String(Math.round(c.monto))); if(v===null) return; const n=Number(String(v).replace(/[^0-9]/g,'')); if(!(n>=0&&n<Number(c.monto))){ toast('El nuevo monto debe ser menor que el actual'); return; } const mot=await askText('Motivo de la rebaja'); if(!mot) return; try{ await q(T('cargos').update({monto:n, motivo:mot.trim()}).eq('id',c.id)); toast('Cargo rebajado'); listo(); }catch(err){ toast('Error: '+errMsg(err)); } }
+    else if(b=t('[data-anularc]')){ e.preventDefault(); const mot=await askText('Motivo de la anulación (condonación)'); if(!mot) return; try{ await q(T('cargos').update({estado:'anulado', motivo:mot.trim()}).eq('id',b.dataset.anularc)); toast('Cargo anulado'); listo(); }catch(err){ toast('Error: '+errMsg(err)); } }
     else if(b=t('[data-anular]')){ e.preventDefault(); const mot=await askText('Motivo de la anulación'); if(mot===null) return; try{ await q(T('pagos').update({anulado:true, anulado_motivo:mot}).eq('id',b.dataset.anular)); toast('Pago anulado'); listo(); }catch(err){ toast('Error: '+errMsg(err)); } }
     else if(t('#bCajaX')){ const {previo,filas}=filasAnio(); const B=v=>({v,b:true}); descargar(new Blob([window.MiniXlsx.build([{name:'Flujo '+anio, widths:[20,18,16,14,14,18], rows:[[B(S.cfg?.nombre||'')],[B('Flujo de caja '+anio)],[],[B('Mes'),B('Gastos comunes'),B('Otros ingresos'),B('Egresos'),B('Flujo neto'),B('Saldo acumulado')],['Saldo inicial','','','','',previo], ...filas.map(f=>[fmtMonth(f.k),f.gc,f.otros,f.egresos,f.neto,f.acum]), [B('Total'),B(filas.reduce((a,f)=>a+f.gc,0)),B(filas.reduce((a,f)=>a+f.otros,0)),B(filas.reduce((a,f)=>a+f.egresos,0)),B(filas.reduce((a,f)=>a+f.neto,0)),B(filas[11].acum)]]},
       {name:'Movimientos', widths:[12,10,22,34,14], rows:[[B('Fecha'),B('Tipo'),B('Categoría'),B('Detalle'),B('Monto')], ...movs.filter(x=>x.fecha.startsWith(anio+'-')).map(x=>[x.fecha,x.tipo,x.categoria,x.descripcion||'',Number(x.monto)]), ...D.pagos.filter(p=>enCaja(p)&&p.fecha.startsWith(anio+'-')).map(p=>[p.fecha,'ingreso',p.concepto==='interes'?'Intereses por mora':'Gastos comunes','Depto '+p.depto+(p.periodo?' · '+p.periodo:' · convenio'),Number(p.monto)])]}])],{type:window.MiniXlsx.MIME}), 'flujo-de-caja-'+anio+'.xlsx'); }
@@ -582,7 +734,7 @@ VIEWS.reservas = function(){
   const curEsp=()=>esp.find(e=>e.id===$('#selEsp').value)||esp[0];
   const hours=e=>{ const out=[]; for(let h=parseInt(e.desde),hf=parseInt(e.hasta);h<hf;h++) out.push(h); return out; };
   function drawSlots(){ const e=curEsp(); if(!e){ $('#slots').innerHTML='<div class="muted">No hay espacios configurados.</div>'; return; } const dia=$('#selDia').value; const maxDay=new Date(); maxDay.setDate(maxDay.getDate()+(Number(e.anticipacionDias)||30));
-    $('#espInfo').innerHTML=`Capacidad ${e.capacidad||'-'} · ${e.desde}–${e.hasta} · máx ${e.maxHoras} h · hasta ${e.anticipacionDias} días de anticipación · ${e.aprobacion?'requiere aprobación':'confirmación inmediata'}${e.costo?' · costo '+clp(e.costo):''}`;
+    $('#espInfo').innerHTML=`Capacidad ${e.capacidad||'-'} · ${e.desde}–${e.hasta} · máx ${e.maxHoras} h · hasta ${e.anticipacionDias} días de anticipación · ${e.aprobacion?'requiere aprobación':'confirmación inmediata'}${e.costo?' · costo '+clp(e.costo)+' (se suma a tu gasto común)':''}`;
     const busyH={}; allRes.filter(d=>d.espacio_id===e.id && d.fecha===dia && ['pendiente','aprobada'].includes(d.estado)).forEach(d=>{ for(let h=d.h_ini;h<d.h_fin;h++) busyH[h]=d; });
     const blq=bloqueosDia(e,dia); if(e.bloqueos?.length) $('#espInfo').innerHTML+=`<br>No disponible: ${e.bloqueos.map(b=>esc(txtBloqueo(b))).join(' · ')}`;
     $('#slots').innerHTML = hours(e).map(h=>{ const b=busyH[h], k=blq[h]; return `<button data-h="${h}" class="${b||k?'busy':''}${selected.has(h)?' sel':''}" ${b||k?'disabled':''}>${pad(h)}:00${b?`<br><small>${esc(b.depto)}</small>`:k?`<br><small>${esc(k)}</small>`:''}</button>`; }).join('');
@@ -852,7 +1004,7 @@ VIEWS.estacionamientos = function(param){
   let usos=[], visHoy=[], tab='ahora', pend=null;
   const minDe=u=>(new Date(u.fin||Date.now())-new Date(u.inicio))/60000;
   const nivel=u=>{ const {a,m}=lim(), x=minDe(u); return m&&x>=m?'er':a&&x>=a?'wa':''; };
-  const filaUso=u=>`<div class="item ${u.fin?'static':''}" ${u.fin?'':`data-u="${u.id}"`}><div class="hd"><b>${esc(u.est_nombre||'—')} · Depto ${esc(u.depto)}${u.patente?' · '+esc(u.patente):''}</b><span class="row" style="gap:4px">${u.aviso_admin_at?'<span class="pill er">Excedido</span>':''}<span class="pill ${u.fin?'mu':'in'}">${u.fin?'Liberado':'Ocupado'}</span></span></div><div class="meta">${fmtDate(u.inicio)}${u.fin?' → '+fmtDate(u.fin):''} · ${durTxt(minDe(u)*60000)}${u.aviso_admin_at&&lim().m?' · excede el máximo de '+durTxt(lim().m*60000):''}${u.nota?' · '+esc(u.nota):''}</div></div>`;
+  const filaUso=u=>`<div class="item ${u.fin?'static':''}" ${u.fin?'':`data-u="${u.id}"`}><div class="hd"><b>${esc(u.est_nombre||'—')} · Depto ${esc(u.depto)}${u.patente?' · '+esc(u.patente):''}</b><span class="row" style="gap:4px">${u.aviso_admin_at?'<span class="pill er">Excedido</span>':''}<span class="pill ${u.fin?'mu':'in'}">${u.fin?'Liberado':'Ocupado'}</span></span></div><div class="meta">${fmtDate(u.inicio)}${u.fin?' → '+fmtDate(u.fin):''} · ${durTxt(minDe(u)*60000)}${u.aviso_admin_at&&lim().m?' · excede el máximo de '+durTxt(lim().m*60000):''}${u.nota?' · '+esc(u.nota):''}${tab==='exc'&&isAdmin()?` · <a href="#" data-multa="${u.id}">Cursar multa</a>`:''}</div></div>`;
   const draw=()=>{ const el=$('#esBody'); if(!el) return; const sp=estOrden(); const ab={}; usos.filter(u=>!u.fin).forEach(u=>ab[u.estacionamiento_id]=u); const {a,m}=lim();
     $('#esPend').innerHTML=pend?`<div class="info">Elige un estacionamiento libre para <b>${esc(pend.nombre)}</b> · Depto ${esc(pend.depto)}${pend.patente?' · '+esc(pend.patente):''}. <a href="#" id="esNoPend">Cancelar</a></div>`:'';
     if(tab==='ahora'){
@@ -874,7 +1026,8 @@ VIEWS.estacionamientos = function(param){
     $('#esLib',m)?.addEventListener('click', async()=>{ try{ await q(T('estacionamiento_usos').update({fin:now()}).eq('id',u.id)); closeModal(); toast(u.est_nombre+' liberado'); w.reload(); }catch(err){ toast('Error: '+errMsg(err)); } }); };
   $('#esTabs').addEventListener('click',e=>{ const b=e.target.closest('button'); if(!b) return; $$('#esTabs button').forEach(x=>x.classList.remove('on')); b.classList.add('on'); tab=b.dataset.t; draw(); });
   $('#esPend').addEventListener('click',e=>{ if(e.target.id==='esNoPend'){ e.preventDefault(); pend=null; draw(); } });
-  $('#esBody').addEventListener('click',e=>{ const t=e.target.closest('[data-e]'), it=e.target.closest('[data-u]');
+  $('#esBody').addEventListener('click',e=>{ const mu=e.target.closest('[data-multa]'); if(mu){ e.preventDefault(); const u=usos.find(x=>x.id===mu.dataset.multa); formCargo({depto:u.depto, tipo:'multa', descripcion:`Estacionamiento de visita ${u.est_nombre}${u.patente?' ('+u.patente+')':''} el ${fmtDate(u.inicio)}: ${durTxt(minDe(u)*60000)}, máximo ${durTxt(lim().m*60000)}`}); return; }
+    const t=e.target.closest('[data-e]'), it=e.target.closest('[data-u]');
     if(it){ const u=usos.find(x=>x.id===it.dataset.u); if(u) ficha(u); return; } if(!t) return;
     const u=usos.find(x=>!x.fin&&x.estacionamiento_id===t.dataset.e); if(u) ficha(u); else if(opera) ocupar(S.estac[t.dataset.e]); });
   const d0=new Date(); d0.setDate(d0.getDate()-90);
