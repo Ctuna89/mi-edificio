@@ -14,6 +14,11 @@ q -d mi_edificio_test -f tests/rls.sql
 q -d mi_edificio_test -f schema.sql          # idempotente también con datos
 echo "OK: schema.sql se puede volver a ejecutar"
 
+nueva mi_edificio_test
+q -d mi_edificio_test -f schema.sql
+q -d mi_edificio_test -f tests/funciones.sql
+q -d mi_edificio_test -f schema.sql
+
 if [ -f tests/schema_v1.sql ]; then
   nueva mi_edificio_mig
   q -d mi_edificio_mig -f tests/schema_v1.sql

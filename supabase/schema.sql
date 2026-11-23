@@ -44,6 +44,8 @@ create table if not exists public.edificios (
   actualizado   timestamptz default now()
 );
 alter table public.edificios add column if not exists privacidad text default '';
+alter table public.edificios add column if not exists mora_tasa numeric(6,3) not null default 0;   -- interés por mora, % mensual (0 = no se cobra)
+alter table public.edificios add column if not exists mora_desde date;                             -- la mora se cuenta desde esta fecha (o desde el vencimiento, si es posterior)
 alter table public.edificios drop column if exists codigo;   -- los códigos de invitación eran de la versión multi-edificio
 -- Un solo edificio por instalación
 do $$ begin
@@ -322,6 +324,9 @@ create table if not exists public.encuestas (
   uid         uuid references public.usuarios(id),
   ts          timestamptz default now()
 );
+-- sondeo: un voto por unidad, solo se ven los totales.
+-- asamblea: el voto pesa según la alícuota de la unidad y es nominal (se ve qué votó cada unidad).
+alter table public.encuestas add column if not exists tipo text not null default 'sondeo';
 
 create table if not exists public.votos (
   encuesta_id uuid not null references public.encuestas(id) on delete cascade,
@@ -518,6 +523,16 @@ do $$ begin
   end if;
 end $$;
 
+-- Interés por mora. interes: null = se calcula al día; con valor = quedó fijo cuando se pagó el capital.
+-- Los cobros que ya estaban pagados antes de existir esta función quedan sin interés.
+do $$ begin
+  if not exists (select 1 from information_schema.columns where table_schema = 'public' and table_name = 'gasto_unidades' and column_name = 'interes') then
+    alter table public.gasto_unidades add column interes numeric(14,2), add column interes_pagado numeric(14,2) not null default 0;
+    update public.gasto_unidades set interes = 0 where pagado;
+  end if;
+end $$;
+alter table public.pagos add column if not exists concepto text not null default 'gasto';   -- gasto (capital) | interes
+
 -- Código del QR de acceso de cada visita (las visitas ya existentes reciben uno)
 alter table public.visitas add column if not exists codigo text not null default upper(substr(replace(gen_random_uuid()::text,'-',''),1,8));
 create unique index if not exists visitas_codigo_idx on public.visitas (edificio_id, codigo);
@@ -676,7 +691,7 @@ end $$;
 -- aceptan horarios traslapados y quien reserva solo puede cancelar; aprobar es del comité/admin.
 create or replace function public.reservas_antes() returns trigger
 language plpgsql security definer set search_path = public as $$
-declare esp jsonb;
+declare esp jsonb; blq text;
 begin
   if auth.uid() is null then return new; end if;   -- SQL Editor / service role
   if tg_op = 'INSERT' then
@@ -687,6 +702,13 @@ begin
     if exists (select 1 from public.reservas r where r.edificio_id = new.edificio_id and r.espacio_id = new.espacio_id
                and r.fecha = new.fecha and r.estado in ('pendiente','aprobada') and r.h_ini < new.h_fin and new.h_ini < r.h_fin) then
       raise exception 'Ese horario ya está reservado';
+    end if;
+    -- bloqueos recurrentes del espacio (aseo, mantención): [{dias:[0-6, 0 = domingo], desde, hasta, motivo}]
+    if jsonb_typeof(esp->'bloqueos') = 'array' then
+      select coalesce(nullif(b->>'motivo', ''), 'no disponible') into blq from jsonb_array_elements(esp->'bloqueos') b
+      where jsonb_typeof(b->'dias') = 'array' and (b->'dias') @> to_jsonb(extract(dow from new.fecha)::int)
+        and (b->>'desde')::int < new.h_fin and new.h_ini < (b->>'hasta')::int limit 1;
+      if blq is not null then raise exception 'Ese horario está bloqueado: %', blq; end if;
     end if;
     new.espacio_nombre := coalesce(esp->>'nombre', new.espacio_nombre);
     new.estado := case when coalesce((esp->>'aprobacion')::boolean, false) then 'pendiente' else 'aprobada' end;
@@ -805,6 +827,48 @@ for each row execute function public.ot_antes_update();
 -- ---------------------------------------------------------------------
 create schema if not exists privado;
 
+-- Interés por mora de un cobro, calculado a una fecha: interés simple diario (tasa mensual / 30) sobre el
+-- capital impago, desde el vencimiento (o desde edificios.mora_desde, si es posterior). Cada abono al
+-- capital reduce la base desde su fecha. Mientras el cobro está en un convenio, deja de sumar desde el
+-- día en que se propuso. (Los abonos de un convenio anulado no reducen la base: se corrige condonando.)
+create or replace function privado.interes_cobro(p_e uuid, p_depto text, p_periodo text, p_hasta date) returns numeric
+language plpgsql stable security definer set search_path = public as $$
+declare tasa numeric; desde date; g record; p record; d date; f date; tope date; cap numeric; total numeric := 0;
+begin
+  select mora_tasa, mora_desde into tasa, desde from public.edificios where id = p_e;
+  if coalesce(tasa, 0) <= 0 then return 0; end if;
+  select u.monto, u.convenio_id, x.vence, x.publicado into g
+  from public.gasto_unidades u join public.gastos x on x.edificio_id = u.edificio_id and x.periodo = u.periodo
+  where u.edificio_id = p_e and u.depto = p_depto and u.periodo = p_periodo;
+  if not found or g.vence is null or not g.publicado or g.monto <= 0 then return 0; end if;
+  tope := p_hasta;
+  if g.convenio_id is not null then
+    tope := coalesce((select least(p_hasta, c.ts::date) from public.convenios c where c.id = g.convenio_id and c.estado in ('propuesto','vigente','cumplido')), p_hasta);
+  end if;
+  d := greatest(g.vence, coalesce(desde, g.vence)); cap := g.monto;
+  for p in select fecha, monto from public.pagos
+           where edificio_id = p_e and depto = p_depto and periodo = p_periodo and convenio_id is null and concepto = 'gasto' and not anulado order by fecha, ts loop
+    f := least(greatest(p.fecha, d), greatest(tope, d));
+    total := total + cap * tasa / 100 / 30 * (f - d); d := f; cap := greatest(cap - p.monto, 0);
+  end loop;
+  if cap > 0 and tope > d then total := total + cap * tasa / 100 / 30 * (tope - d); end if;
+  return round(total);
+end $$;
+
+-- Intereses por mora de cada cobro: total devengado y cuánto se ha pagado o condonado.
+-- Comité y administración ven todos; cada unidad, los suyos.
+create or replace function public.intereses_mora()
+returns table (depto text, periodo text, interes numeric, pagado numeric)
+language sql stable security definer set search_path = public as $$
+  select t.depto, t.periodo, t.interes, t.interes_pagado from (
+    select g.depto, g.periodo, g.interes_pagado,
+           coalesce(g.interes, privado.interes_cobro(g.edificio_id, g.depto, g.periodo, public.hoy())) as interes
+    from public.gasto_unidades g
+    where g.edificio_id = public.mi_edificio()
+      and (public.mi_rol() in ('comite','admin') or (public.es_residente() and g.depto = public.mi_depto()))) t
+  where t.interes > 0 or t.interes_pagado > 0
+$$;
+
 -- Recalcula cuánto está pagado de cada cobro y cuota de una unidad, a partir de sus pagos vigentes.
 -- Lo abonado a un convenio se reparte entre sus períodos y sus cuotas, del más antiguo al más nuevo.
 create or replace function privado.recalc_unidad(p_e uuid, p_depto text) returns void
@@ -813,7 +877,10 @@ declare c record; r record; abonado numeric; rest numeric; x numeric;
 begin
   update public.gasto_unidades g set pagado_monto = coalesce((
       select sum(p.monto) from public.pagos p
-      where p.edificio_id = p_e and p.depto = p_depto and p.periodo = g.periodo and p.convenio_id is null and not p.anulado), 0)
+      where p.edificio_id = p_e and p.depto = p_depto and p.periodo = g.periodo and p.convenio_id is null and p.concepto = 'gasto' and not p.anulado), 0),
+    interes_pagado = coalesce((
+      select sum(p.monto) from public.pagos p
+      where p.edificio_id = p_e and p.depto = p_depto and p.periodo = g.periodo and p.concepto = 'interes' and not p.anulado), 0)
   where g.edificio_id = p_e and g.depto = p_depto;
 
   for c in select * from public.convenios where edificio_id = p_e and depto = p_depto order by ts loop
@@ -838,7 +905,10 @@ begin
 
   update public.gasto_unidades set
     pagado = (monto > 0 and pagado_monto >= monto),
-    pagado_at = case when monto > 0 and pagado_monto >= monto then coalesce(pagado_at, now()) end
+    pagado_at = case when monto > 0 and pagado_monto >= monto then coalesce(pagado_at, now()) end,
+    -- al quedar pagado el capital, el interés devengado queda fijo; si deja de estarlo, vuelve a calcularse al día
+    interes = case when monto > 0 and pagado_monto >= monto
+                   then coalesce(case when pagado then interes end, privado.interes_cobro(p_e, p_depto, periodo, public.hoy())) end
   where edificio_id = p_e and depto = p_depto;
 end $$;
 
@@ -854,7 +924,15 @@ begin
     return ret;
   end if;
   new.registrado_por := auth.uid(); new.anulado := false; new.anulado_motivo := null; new.depto := trim(new.depto);
-  if new.periodo is not null then
+  new.concepto := coalesce(new.concepto, 'gasto');
+  if new.concepto not in ('gasto','interes') then raise exception 'Concepto no válido'; end if;
+  if new.medio = 'condonacion' and new.concepto <> 'interes' then raise exception 'Solo se pueden condonar intereses por mora'; end if;
+  if new.concepto = 'interes' then
+    if new.periodo is null then raise exception 'El interés se paga por período'; end if;
+    select * into g from public.gasto_unidades where edificio_id = new.edificio_id and periodo = new.periodo and depto = new.depto;
+    if not found then raise exception 'Esa unidad no tiene cobro en ese período'; end if;
+    saldo := coalesce(g.interes, privado.interes_cobro(new.edificio_id, new.depto, new.periodo, public.hoy())) - g.interes_pagado;
+  elsif new.periodo is not null then
     select * into g from public.gasto_unidades where edificio_id = new.edificio_id and periodo = new.periodo and depto = new.depto;
     if not found then raise exception 'Esa unidad no tiene cobro en ese período'; end if;
     if exists (select 1 from public.convenios where id = g.convenio_id and estado in ('propuesto','vigente')) then
@@ -959,6 +1037,35 @@ language sql stable security definer set search_path = public as $$
       and e.estado = 'abierta' and (e.cierra is null or e.cierra >= public.hoy())
       and p_opcion >= 0 and p_opcion < jsonb_array_length(e.opciones)
       and case when e.solo_propietarios then public.mi_rol() = 'propietario' else public.es_residente() end)
+$$;
+
+-- El tipo de una votación no cambia después de publicarla (un sondeo secreto no puede volverse nominal).
+create or replace function public.encuestas_antes() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if tg_op = 'UPDATE' then new.tipo := old.tipo;
+  elsif new.tipo not in ('sondeo','asamblea') then raise exception 'Tipo de votación no válido';
+  end if;
+  return new;
+end $$;
+drop trigger if exists encuestas_antes on public.encuestas;
+create trigger encuestas_antes before insert or update on public.encuestas
+for each row execute function public.encuestas_antes();
+
+-- Votaciones de asamblea: voto de cada unidad con su alícuota. Lo ve la comunidad con la misma
+-- regla que los resultados (comité y administración siempre; residentes al votar o al cierre).
+create or replace function public.votos_asamblea()
+returns table (encuesta_id uuid, depto text, opcion int, alicuota numeric, ts timestamptz)
+language sql stable security definer set search_path = public as $$
+  select v.encuesta_id, v.depto, v.opcion, coalesce(u.alicuota, 0)::numeric, v.ts
+  from public.votos v
+  join public.encuestas e on e.id = v.encuesta_id
+  left join public.unidades u on u.edificio_id = v.edificio_id and u.depto = v.depto
+  where e.edificio_id = public.mi_edificio() and e.tipo = 'asamblea'
+    and public.mi_rol() in ('residente','propietario','comite','admin')
+    and (public.mi_rol() in ('comite','admin')
+         or e.estado = 'cerrada' or (e.cierra is not null and e.cierra < public.hoy())
+         or exists (select 1 from public.votos m where m.encuesta_id = e.id and m.depto = public.mi_depto()))
 $$;
 
 -- Resultados agregados (nadie ve el voto de otra unidad). Comité y administración los ven

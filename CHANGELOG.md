@@ -1,5 +1,12 @@
 # Cambios
 
+## 0.2.1 — 2026-11-23
+
+- **Votaciones de asamblea**: al crear una encuesta se elige si es un sondeo (un voto por unidad, secreto) o materia de asamblea, donde el voto pesa según la alícuota y se ve qué votó cada unidad. Detalle descargable en Excel.
+- **Horas bloqueadas en los espacios**: bloqueos semanales por aseo, mantención u otro motivo, varios por día, y opción de espacio abierto las 24 horas.
+- **Interés por mora**: tasa mensual definida por la administración, calculada por día sobre lo impago; se paga o se condona, y queda registrado.
+- Capturas de pantalla en el README.
+
 ## 0.2.0 — 2026-11-22
 
 - **Instalación local**: un solo programa (`local/`) sirve la app y guarda la base de datos y los archivos en una carpeta del computador del edificio, sin servicios en la nube. Incluye cuentas, permisos, archivos con enlaces firmados, avisos en vivo, notificaciones, tareas programadas y respaldo diario. Supabase queda como instalación alternativa.
