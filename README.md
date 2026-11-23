@@ -6,6 +6,18 @@ App web para residentes, conserjería, comité, administración y empresas de ma
 
 Se instala **en un computador del propio edificio**: un solo programa sirve la app, guarda la base de datos y los archivos en una carpeta, y no depende de ningún servicio en la nube. Una instalación = un edificio.
 
+| | |
+|---|---|
+| ![Inicio de la administración](docs/capturas/inicio-administracion.png) | ![Estado económico y morosidad](docs/capturas/finanzas-estado.png) |
+| ![Votación de asamblea por alícuota](docs/capturas/votacion-asamblea.png) | ![Estacionamientos de visita](docs/capturas/estacionamientos.png) |
+| ![Flujo de caja](docs/capturas/finanzas-caja.png) | ![Reservas con horas bloqueadas](docs/capturas/reservas-bloqueo.png) |
+
+En el teléfono de un residente:
+
+<img src="docs/capturas/inicio-residente.png" width="260" alt="Inicio del residente"> <img src="docs/capturas/residente-estado-cuenta.png" width="260" alt="Estado de cuenta del residente">
+
+Las capturas son de un edificio de demostración con datos inventados.
+
 ```
 mi-edificio/
 ├── instalador/          ← instalador de Windows (se construye con construir.sh)
@@ -167,7 +179,7 @@ Límites: está pensada para un edificio. La base de datos atiende una consulta 
 | Incidencias con fotos | reporta, cierra las suyas | gestiona, se asigna | gestiona | gestiona, crea OT | ve las ligadas a sus OT |
 | Mensajes (canales conserjería / comité / administración) | chat por canal | canal conserjería | canal comité | todos | – |
 | Comunicados | lee | lee | publica | publica | lee |
-| Encuestas (un voto por unidad) | vota, ve totales | – | crea, cierra, ve totales | crea, cierra, ve totales | – |
+| Encuestas y votaciones de asamblea | vota, ve resultados | – | crea, cierra, ve totales | crea, cierra, ve totales | – |
 | Documentos (reglamento, actas, balances) | lee | lee | sube | sube | – |
 | Encomiendas | ve las suyas | registra / entrega | – | registra / entrega | – |
 | Visitas con QR | anuncia y comparte el QR | escanea, registra ingreso/salida | – | escanea, registra | – |
@@ -185,6 +197,8 @@ La seguridad está en la base de datos (permisos por rol y reglas en `schema.sql
 **Convenios de pago.** Para una unidad morosa, la administración elige los cobros atrasados, el número de cuotas mensuales y la fecha de la primera. El convenio queda *propuesto* hasta que alguien de la unidad lo acepta en la app (o la administración registra la aceptación, si se firmó en papel). Mientras está vigente y al día, esos cobros no cuentan como vencidos. Lo que se abona al convenio salda las cuotas en orden y los períodos del más antiguo al más nuevo. Si se anula, lo abonado se conserva y el resto vuelve a ser deuda corriente. El total es la deuda de los cobros incluidos: no calcula intereses ni multas.
 
 **Estado económico.** La administración y el comité ven en Finanzas → Estado lo por cobrar, lo vencido, lo que está en convenio, cuántas unidades están morosas, lo recaudado en el mes y la lista de unidades con deuda. Cada residente ve en Gastos comunes el estado de cuenta de su unidad.
+
+**Interés por mora.** En Administración → Edificio se define la tasa mensual (0 = no se cobra) y, si se quiere, desde qué fecha se cuenta. Es interés simple, calculado por día (tasa ÷ 30) sobre el saldo impago de cada cobro vencido; cada abono reduce la base desde su fecha. Se muestra aparte de la deuda, a la administración, al comité y a la unidad. Se paga desde "Registrar pago" eligiendo *Interés por mora*, o se perdona con el medio *Condonación*, que queda en el historial y no entra al flujo de caja. Al pagarse el capital, el interés de ese cobro queda fijo; mientras un cobro está en un convenio, deja de sumar. Cambiar la tasa recalcula las deudas pendientes, no los cobros ya pagados. **La app no sabe cuál es la tasa máxima legal ni la de tu reglamento de copropiedad: confírmala antes de activarla.**
 
 **Flujo de caja.** Finanzas → Flujo de caja muestra, por mes y con totales del año, los ingresos por gastos comunes (tomados de los pagos registrados), otros ingresos, egresos, flujo neto y saldo acumulado; se exporta a Excel. Los egresos y otros ingresos los anota la administración; para partir con la caja real, anota un ingreso de categoría "Saldo inicial". Los ítems de un período de gastos comunes son lo que se cobra, no egresos: no entran solos al flujo.
 
@@ -204,9 +218,20 @@ El QR no contiene datos personales, solo un código aleatorio. La lectura usa el
 
 La hora de inicio y de término las pone el servidor, no el teléfono de conserjería. Los tiempos se revisan cada 5 minutos.
 
-## Encuestas
+## Reservas y horas bloqueadas
 
-El comité o la administración publican una pregunta con opciones, plazo opcional y, si corresponde, restringida a propietarios. Cada **unidad** emite un voto y puede cambiarlo mientras la encuesta esté abierta. Nadie ve el voto de otra unidad: la app solo muestra totales (cantidad de votos y suma de alícuotas por opción).
+Cada espacio tiene su horario de apertura y cierre (o **abierto las 24 horas**), máximo de horas por reserva, anticipación y si requiere aprobación. Además se le pueden definir **horarios bloqueados cada semana**: los días, de qué hora a qué hora y el motivo (aseo, mantención, lo que sea). Pueden ser varios, también el mismo día. En esas horas nadie puede reservar: aparecen marcadas con el motivo, y la base de datos rechaza la reserva aunque se intente por fuera de la app. Todo se configura en Administración → Espacios.
+
+Límites: las reservas y los bloqueos son por horas completas; el horario de apertura es el mismo todos los días (para cerrar antes un día, se usa un bloqueo); y no hay bloqueos de una fecha puntual.
+
+## Encuestas y votaciones
+
+El comité o la administración publican una pregunta con opciones, plazo opcional y, si corresponde, restringida a propietarios. Al crearla se elige el tipo, que después no se puede cambiar:
+
+- **Sondeo de opinión**: cada unidad emite un voto. Nadie ve el voto de otra unidad: la app solo muestra totales.
+- **Materia de asamblea**: el voto de cada unidad pesa según su **alícuota** (la que está en Administración → Unidades) y es **nominal**: la comunidad ve qué unidades apoyan cada opción, el porcentaje de derechos de cada una y cuánto ha participado. El comité y la administración pueden descargar el detalle en Excel, con las unidades que no votaron. Antes de votar, la app avisa que el voto no es secreto.
+
+En ambos casos el voto es de la unidad, lo emite una cuenta con acceso aprobado a esa unidad y se puede cambiar mientras la votación esté abierta. La app no gestiona poderes ni verifica quórum o mayorías legales: entrega el resultado ponderado para que el comité lo use según la ley y el reglamento.
 
 ## Notificaciones
 
