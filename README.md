@@ -177,6 +177,7 @@ Límites: está pensada para un edificio. La base de datos atiende una consulta 
 |---|---|---|---|---|---|
 | Gastos comunes (desglose, prorrateo por alícuota o consumo, PDF/Excel) | ve su aviso de cobro con sus consumos | – | ve todo y exporta | edita, registra pagos, exporta | – |
 | Lecturas de medidores (agua caliente, calefacción, gas…) | ve las suyas en su desglose | ingresa | ve | configura, ingresa | – |
+| Multas con debido proceso (cargos, descargos, resolución) | ve los casos de su unidad y presenta descargos | abre casos | aprueba multas, abre casos | formula cargos, resuelve, configura el catálogo | – |
 | Finanzas: pagos, morosidad, convenios, cargos, fondos y flujo de caja | ve su estado de cuenta y los saldos de los fondos, acepta convenios | – | ve todo | registra pagos, cargos y usos de fondos, propone convenios, anota egresos | – |
 | Reservas de áreas comunes | reserva / cancela | ve agenda | aprueba | aprueba, configura | – |
 | Incidencias con fotos | reporta, cierra las suyas | gestiona, se asigna | gestiona | gestiona, crea OT | ve las ligadas a sus OT |
@@ -209,6 +210,21 @@ Cada ítem se redondea al peso y la diferencia de redondeo se asigna a las unida
 **Fondos.** En Finanzas → Fondos se crean el **fondo común de reserva** (la Ley de Copropiedad Inmobiliaria exige formarlo; el porcentaje lo fija el reglamento dentro del mínimo legal, confírmalo) y otros, como uno de mantención. Cada fondo tiene un aporte sugerido en % de los gastos del período y su saldo al empezar a usar la app. Al crear un período se agrega el ítem de cada fondo y **"Calcular aportes a fondos"** calcula su monto. Al publicar el período, el aporte se anota solo en el fondo (y se quita si se despublica). Para **usar un fondo** se registra en qué y cuánto, y si se quiere también el egreso en el flujo de caja; no se puede usar más que el saldo. Los ajustes (intereses del banco, diferencias) se anotan aparte. La comunidad ve los saldos.
 
 **Cargos individuales.** Multas, arriendo de espacios comunes y otros cobros a una unidad se registran en Finanzas → Cargos y **se suman al gasto común de esa unidad** en el período indicado (por defecto, el primero sin publicar; no se pueden agregar a uno publicado). El **arriendo** se carga solo al aprobarse la reserva de un espacio con costo, y se anula solo si la reserva se cancela. Desde Estacionamientos → Excedidos se puede **cursar una multa** con los datos del uso. Un cargo no se borra: se **rebaja o se anula (condonación) con un motivo**, y queda el registro de multas condonadas o rebajadas.
+
+## Multas con debido proceso
+
+Una multa no se cobra directo: pasa por un caso con su expediente, que nadie puede borrar.
+
+1. **Apertura**: conserjería, el comité o la administración abren un caso con lo constatado y fotos de evidencia (también desde Estacionamientos → Excedidos). Abrir un caso no es multar.
+2. **Cargos**: la administración elige la conducta del **catálogo** (solo se aplican multas del catálogo, en UTM o UF) y la unidad. La notificación de cargos parte de un borrador con los hechos. Si la conducta exige evidencia mínima (por ejemplo, denuncia de dos unidades), hay que confirmarla. La unidad recibe el aviso y puede verlo en la app; la notificación también se imprime para entregarla en papel.
+3. **Descargos**: la unidad los presenta en la app dentro del plazo (por defecto 5 días hábiles, sin fines de semana ni feriados), o la administración registra los entregados por escrito.
+4. **Resolución fundada**: recién con descargos o con el plazo vencido, la administración absuelve o sanciona, indicando los antecedentes considerados. Si la unidad fue sancionada por la misma conducta en los 6 meses anteriores, se propone la categoría superior o el doble.
+5. **Comité**: si así se configura (por defecto, una aprobación), la multa espera la aprobación del comité; si la rechaza, vuelve a la administración.
+6. **Cobro**: se convierte a pesos con la UTM o UF vigente y queda como cargo en el próximo gasto común abierto de la unidad. Lo cobrado va al **fondo de reserva** (configurable). Las conductas permanentes (obras no autorizadas, por ejemplo) se repiten cada mes hasta que se restituya. Las que corresponden al Juzgado de Policía Local se derivan, no se multan.
+
+En **Multas → Catálogo y ajustes** se cargan las conductas (hay un catálogo de ejemplo basado en el borrador del reglamento de Los Cactus, que hay que ajustar al propio), los valores de UTM y UF, los plazos, las aprobaciones del comité y los feriados. Ningún plazo ni monto está fijo en el código.
+
+Este módulo está adaptado de [CactusOne](https://github.com/Ctuna89/cactusone), con permiso de sus autores.
 
 ## Pagos, convenios y flujo de caja
 

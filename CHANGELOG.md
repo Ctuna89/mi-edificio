@@ -2,6 +2,7 @@
 
 ## Sin publicar
 
+- **Multas con debido proceso** (adaptado de CactusOne): catálogo de conductas en UTM o UF, caso con evidencia, notificación de cargos, descargos en días hábiles, resolución fundada, aprobación del comité, reincidencia, infracciones permanentes y derivación al Juzgado de Policía Local. Lo cobrado va al fondo de reserva. Las multas ya no se pueden cargar a mano.
 - **Reparto por ítem**: cada ítem del gasto común se reparte por alícuota, en partes iguales, según consumo (con un % fijo opcional por alícuota) o solo entre algunas unidades. La suma cuadra al peso.
 - **Lecturas de medidores**: agua caliente, calefacción, gas u otros. Cada mes se anota lo que marca el medidor y el consumo es la diferencia con el mes anterior (nunca negativo). Cambio de medidor: consumo = (última del retirado − mes anterior) + (actual − inicial del nuevo). Conserjería y administración las ingresan o pegan desde Excel; la app avisa consumos raros y faltantes, y bloquea las lecturas de un período publicado.
 - **Fondos**: fondo de reserva, mantención y otros, con aporte sugerido en %, aportes automáticos al publicar el período, usos (con egreso en el flujo de caja) y ajustes. La comunidad ve los saldos.

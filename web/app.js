@@ -160,6 +160,7 @@ const MODULES = [
   {id:'visitas', ic:'🚪', t:'Visitas', d:'Anunciar y registrar', roles:['residente','propietario','conserje','admin']},
   {id:'estacionamientos', ic:'🅿️', t:'Estacionamientos', d:'Visitas: ocupación y tiempos', roles:['conserje','comite','admin']},
   {id:'lecturas', ic:'🔢', t:'Lecturas', d:'Medidores de agua caliente, calefacción…', roles:['conserje','comite','admin']},
+  {id:'multas', ic:'⚖️', t:'Multas', d:'Casos de infracción: cargos, descargos y resolución', roles:['residente','propietario','conserje','comite','admin']},
   {id:'documentos', ic:'📁', t:'Documentos', d:'Reglamento, actas, balances', roles:['residente','propietario','conserje','comite','admin']},
   {id:'rondas', ic:'📍', t:'Rondas', d:'Checkpoints NFC y bitácora', roles:['conserje','comite','admin']},
   {id:'mantencion', ic:'🔧', t:'Mantención', d:'Órdenes de trabajo y activos', roles:['comite','admin','mantencion']},
@@ -339,15 +340,15 @@ function inicioEstado(r){
   const lecturasFaltan=async per=>{ if(!mds.length) return []; const l=await q(T('lecturas').select('medidor,depto').eq('periodo',per)).catch(()=>[]); return mds.map(md=>({md, n:l.filter(x=>x.medidor===md.id&&S.unidades[x.depto]).length})).filter(x=>x.n<nU()); };
   if(['residente','propietario'].includes(r)){
     if(!dep) return;
-    watch(['gastos','gasto_unidades','pagos','convenios','encomiendas','conversaciones','encuestas','votos','reservas'], async()=>{
-      const [D,enc,msj,encs,votos,res]=await Promise.all([finDatos(dep).catch(()=>null), cuenta(q(T('encomiendas').select('id').eq('depto',dep).eq('entregado',false))), cuenta(q(T('conversaciones').select('id').eq('depto',dep).eq('no_leido_residente',true))),
+    watch(['gastos','gasto_unidades','pagos','convenios','encomiendas','conversaciones','encuestas','votos','reservas','infracciones'], async()=>{
+      const [D,enc,msj,encs,votos,res,infs]=await Promise.all([finDatos(dep).catch(()=>null), cuenta(q(T('encomiendas').select('id').eq('depto',dep).eq('entregado',false))), cuenta(q(T('conversaciones').select('id').eq('depto',dep).eq('no_leido_residente',true))),
         q(T('encuestas').select('id,cierra,solo_propietarios').eq('estado','abierta')).catch(()=>[]), q(T('votos').select('encuesta_id').eq('depto',dep)).catch(()=>[]),
-        q(T('reservas').select('*').eq('depto',dep).gte('fecha',hoy).order('fecha',{ascending:true})).catch(()=>[])]);
-      return {D,enc,msj,encs,votos,res}; },
-    ({D,enc,msj,encs,votos,res})=>{ const el=$('#homeEstado'); if(!el) return;
+        q(T('reservas').select('*').eq('depto',dep).gte('fecha',hoy).order('fecha',{ascending:true})).catch(()=>[]), q(T('infracciones').select('id,estado,descargos_hasta,descargos_at')).catch(()=>[])]);
+      return {D,enc,msj,encs,votos,res,infs}; },
+    ({D,enc,msj,encs,votos,res,infs})=>{ const el=$('#homeEstado'); if(!el) return;
       const z=D?.U[dep], pubs=(D?.gastos||[]).filter(g=>g.publicado).sort((a,b)=>a.periodo<b.periodo?1:-1), g=pubs[0], mio=g&&z?.rows.find(x=>x.periodo===g.periodo);
       const ya=new Set(votos.map(v=>v.encuesta_id)), porVotar=encs.filter(x=>(!x.cierra||x.cierra>=hoy)&&!ya.has(x.id)&&(!x.solo_propietarios||r==='propietario')).length;
-      const conv=(z?.convs||[]).filter(c=>c.estado==='propuesto').length, prox=res.filter(x=>['pendiente','aprobada'].includes(x.estado))[0];
+      const conv=(z?.convs||[]).filter(c=>c.estado==='propuesto').length, cargosInf=(infs||[]).filter(c=>c.estado==='cargos'&&c.descargos_hasta>=hoy&&!c.descargos_at), prox=res.filter(x=>['pendiente','aprobada'].includes(x.estado))[0];
       const total=(z?.deuda||0)+(z?.interes||0), otros=mio?total-(mio.saldo||0):total;
       const cobro=g&&mio?`<div class="card resumen"><div class="row" style="align-items:flex-start"><div class="grow"><div class="small muted">Gasto común de ${esc(fmtMonth(g.periodo))} · Depto ${esc(dep)}</div>
           <div class="monto">${clp(mio.monto)}</div><div class="small">${mio.pagado?'Pagado. ¡Gracias!':g.vence?(g.vence<hoy?`<b style="color:var(--er)">Venció el ${esc(fmtDay(g.vence))}</b>`:`Vence el ${esc(fmtDay(g.vence))}`):''}${!mio.pagado&&Number(mio.pagado_monto)>0?` · abonado ${clp(mio.pagado_monto)}`:''}</div></div>
@@ -355,14 +356,14 @@ function inicioEstado(r){
           ${otros>0?`<div class="note" style="margin:10px 0 0">Además tienes ${clp(otros)} pendientes de meses anteriores${z?.interes?' e intereses por mora':''}. Total por pagar: <b>${clp(total)}</b>.</div>`:''}
           <div class="row wrap" style="margin-top:12px;gap:8px"><a class="btn" href="#gastos">Ver desglose</a>${S.cfg?.datos_bancarios&&!mio.pagado?'<a class="btn sec" href="#gastos">Datos para transferir</a>':''}</div></div>`
         :`<div class="card resumen"><div class="small muted">Gastos comunes · Depto ${esc(dep)}</div><div style="margin-top:6px">${total>0?`Tienes ${clp(total)} por pagar. <a href="#gastos">Ver detalle</a>`:'Aún no hay un período de gastos comunes publicado.'}</div></div>`;
-      const items=[conv?fila(conv,'Convenio de pago por revisar','#gastos','wa','La administración te propuso un convenio'):'', enc?fila(enc,enc===1?'Encomienda por retirar':'Encomiendas por retirar','#encomiendas','in','En conserjería'):'',
+      const items=[cargosInf.length?fila(cargosInf.length,cargosInf.length===1?'Notificación de cargos':'Notificaciones de cargos','#multas','er','Puedes presentar descargos hasta el '+fmtDay(cargosInf[0].descargos_hasta)):'', conv?fila(conv,'Convenio de pago por revisar','#gastos','wa','La administración te propuso un convenio'):'', enc?fila(enc,enc===1?'Encomienda por retirar':'Encomiendas por retirar','#encomiendas','in','En conserjería'):'',
         msj?fila(msj,msj===1?'Mensaje sin leer':'Mensajes sin leer','#mensajes','in'):'', porVotar?fila(porVotar,porVotar===1?'Votación abierta':'Votaciones abiertas','#encuestas','wa','Tu unidad aún no vota'):'',
         prox?fila('📅',`Reserva: ${prox.espacio_nombre}`,'#reservas','mu',`${fmtDay(prox.fecha)} de ${pad(prox.h_ini)}:00 a ${pad(prox.h_fin)}:00${prox.estado==='pendiente'?' · por aprobar':''}`):''].filter(Boolean);
       el.innerHTML=cobro+`<h2>Pendiente</h2><div class="list">${items.join('')||nada}</div>`; }, {silent:true});
     return;
   }
   const canal=Object.keys(canalRol).find(c=>canalRol[c]===r);
-  const tablas=['usuarios','reservas','incidencias','conversaciones','estacionamiento_usos','gastos','gasto_unidades','pagos','convenios','lecturas','encomiendas','visitas','ot'];
+  const tablas=['usuarios','reservas','incidencias','conversaciones','estacionamiento_usos','gastos','gasto_unidades','pagos','convenios','lecturas','encomiendas','visitas','ot','infracciones','infraccion_votos'];
   watch(tablas, async()=>{ const L=[], add=(n,...a)=>{ if(typeof n==='string'||n>0) L.push(fila(n,...a)); };
     if(r==='mantencion'){ if(S.me.empresa_id) add(await cuenta(q(T('ot').select('id').eq('empresa_id',S.me.empresa_id).eq('estado','asignada'))),'Órdenes de trabajo asignadas','#mantencion','wa'); return L; }
     const [usu,resv,inc,msj,est,borr,enc,vis]=await Promise.all([
@@ -383,6 +384,10 @@ function inicioEstado(r){
     add(excAdm,'Estacionamientos de visita excedidos','#estacionamientos','er','Superaron el tiempo máximo');
     if(r==='conserje') add(excRes,'Visitas cerca del tiempo máximo','#estacionamientos','wa','Ya se avisó al residente');
     add(inc,'Incidencias abiertas','#incidencias','wa');
+    if(['admin','comite'].includes(r)){ const cs=await q(T('infracciones').select('id,estado,decidir_antes,descargos_hasta,descargos_at,ronda')).catch(()=>[]), vs=r==='comite'?await q(T('infraccion_votos').select('infraccion_id,ronda,uid')).catch(()=>[]):[];
+      if(r==='admin'){ add(cs.filter(c=>c.estado==='abierto').length,'Casos de multa por decidir','#multas','wa','Formular cargos o archivar');
+        add(cs.filter(c=>c.estado==='cargos'&&(c.descargos_at||c.descargos_hasta<hoy)).length,'Casos de multa listos para resolver','#multas','wa','Llegaron los descargos o venció el plazo'); }
+      else add(cs.filter(c=>c.estado==='en_comite'&&!vs.some(v=>v.infraccion_id===c.id&&v.ronda===c.ronda&&v.uid===S.uid)).length,'Multas por aprobar','#multas','er','El comité debe aprobarlas antes de cobrarlas'); }
     if(['admin','comite'].includes(r)){ const D=await finDatos().catch(()=>null); if(D){ const mor=Object.values(D.U).filter(z=>z.vencido>0); add(mor.length, mor.length===1?'Unidad con deuda vencida':'Unidades con deuda vencida','#finanzas','er',clp(mor.reduce((a,z)=>a+z.vencido,0))+' vencido'); } }
     if(r==='admin'){ const b=borr.filter(g=>!g.publicado).map(g=>g.periodo).sort(); add(b.length, b.length===1?'Período de gastos comunes en borrador':'Períodos de gastos comunes en borrador','#gastos','wa',b.map(fmtMonth).join(', ')); }
     if(['admin','conserje'].includes(r)){ const pub=new Set(borr.filter(g=>g.publicado).map(g=>g.periodo)); let per=monthStr(); if(r==='admin'){ const b=borr.filter(g=>!g.publicado).map(g=>g.periodo).sort(); if(b.length) per=b[0]; }
@@ -575,6 +580,141 @@ async function exportGasto(tipo, g, pr, mio){
     <tr class="tot"><td>Total</td><td></td><td class="num">${us.reduce((a,u)=>a+Number(u.alicuota),0).toFixed(2)}%</td><td class="num">${clp(us.reduce((a,u)=>a+cargoDe(u),0))}</td><td class="num">${clp(us.reduce((a,u)=>a+Number(u.monto),0))}</td><td></td></tr></tbody></table>${banco}`);
 }
 
+// MULTAS con debido proceso (adaptado del módulo E2 de CactusOne). Cada caso: apertura con evidencia →
+// cargos (conducta del catálogo) → descargos dentro del plazo → resolución fundada → aprobación del comité
+// (si así se configura) → cargo en el gasto común. Las reglas las aplica la base de datos.
+const EST_INF={abierto:['Por decidir','wa'], cargos:['Cargos notificados','in'], en_comite:['En el comité','wa'], resuelto:['Multa aplicada','er'], absuelto:['Absuelto','ok'], archivado:['Archivado','mu'], derivado_jpl:['Derivado al JPL','mu']};
+const ORIGEN_INF={administracion:'Administración', comite:'Comité', conserjeria:'Conserjería', estacionamiento:'Estacionamiento de visita', reclamo:'Reclamo'};
+const EV_INF={apertura:'Apertura', evidencia:'Evidencia', cargos:'Notificación de cargos', descargos:'Descargos', resolucion:'Resolución', voto:'Voto del comité', cobro:'Cobro', derivacion:'Derivación', restitucion:'Restitución', archivo:'Archivo'};
+const enCurso=c=>['abierto','cargos','en_comite'].includes(c.estado);
+const montoUnidad=(m,u)=>`${numCL(m,2)} ${u}`;
+async function cabeceraImpresion(){ const c=S.cfg||{}; const logo=await urlFirmada(c.logo).catch(()=>''); return `<div class="ph">${logo?`<img src="${esc(logo)}" alt="">`:''}<div><b>${esc(c.nombre||'')}</b><br>${esc([c.direccion,c.comuna].filter(Boolean).join(', '))}</div></div>`; }
+async function imprimirCaso(tipo, c, cat){ const cab=await cabeceraImpresion(), fecha=d=>d?fmtDay(String(d).slice(0,10)):'—';
+  if(tipo==='cargos') imprimir('notificacion-cargos-'+c.folio, `${cab}<h1>Notificación de cargos · Caso nº ${c.folio}</h1><p class="sub">Fecha: ${fecha(c.cargos_at)} · Unidad: ${esc(c.depto)} · A: propietario(s) y ocupantes de la unidad</p>
+    <h2>Conducta</h2><p>${esc(cat?.conducta||'')}${cat?.articulo?` (artículo ${esc(cat.articulo)} del reglamento de copropiedad)`:''}. Multa posible: ${cat?montoUnidad(cat.monto,cat.unidad):'—'}${cat?.por_evento?' por evento':''}${cat?.permanente?', que se repite cada mes hasta restituir':''}.</p>
+    <h2>Cargos</h2><p style="white-space:pre-wrap">${esc(c.cargos_texto||'')}</p>
+    <h2>Descargos</h2><p>Puede presentar sus descargos por escrito, con los antecedentes que estime, <b>hasta el ${fecha(c.descargos_hasta)}</b>, en la app (módulo Multas) o entregándolos a la administración.</p>
+    <p style="margin-top:40px">______________________________<br>Administración · ${esc(S.cfg?.nombre||'')}</p><p class="sub" style="margin-top:30px">Recibí copia: ____________________ Fecha: __________</p>`);
+  else imprimir('resolucion-caso-'+c.folio, `${cab}<h1>Resolución · Caso nº ${c.folio}</h1><p class="sub">Fecha: ${fecha(c.resuelto_at)} · Unidad: ${esc(c.depto||'—')}</p>
+    <h2>Conducta imputada</h2><p>${esc(cat?.conducta||'')}${cat?.articulo?` (artículo ${esc(cat.articulo)})`:''}</p>
+    <h2>Descargos</h2><p style="white-space:pre-wrap">${c.descargos_texto?esc(c.descargos_texto):'No se presentaron descargos dentro del plazo.'}</p>
+    <h2>Fundamentos</h2><p style="white-space:pre-wrap">${esc(c.resolucion_texto||'')}</p>
+    <h2>Resuelve</h2><p>${c.estado==='absuelto'?'Absolver a la unidad, sin multa.':c.multa_monto?`Aplicar una multa de <b>${montoUnidad(c.multa_monto,c.multa_unidad)}</b>${c.multa_clp?` (${clp(c.multa_clp)})`:''}${c.reincidencia?', por reincidencia dentro de 6 meses':''}, que se cobra con los gastos comunes${c.restituir_antes?`, y restituir a más tardar el ${fecha(c.restituir_antes)}; mientras no se restituya, la multa se repite cada mes`:''}.`:'—'}</p>
+    <p style="margin-top:40px">______________________________<br>Administración · ${esc(S.cfg?.nombre||'')}</p>`); }
+function formCaso(pre={}, listo){
+  const m=modal(`<h3>Nuevo caso de infracción</h3><form id="fCa"><label class="f"><span>Unidad (si se sabe)</span><input type="text" name="depto" list="dlCa" value="${esc(pre.depto||'')}"><datalist id="dlCa">${Object.keys(S.unidades).sort(porNum).map(d=>`<option value="${esc(d)}">`).join('')}</datalist></label>
+    <label class="f"><span>Qué se constató</span><textarea name="descripcion" required placeholder="Qué pasó, cuándo y dónde. Solo hechos.">${esc(pre.descripcion||'')}</textarea></label>
+    <label class="f"><span>Fotos de evidencia (opcional)</span><input type="file" name="fotos" accept="image/*" multiple></label>
+    <p class="small muted">Abrir un caso no es multar: la administración decide si formula cargos, la unidad puede presentar descargos y solo después se resuelve.</p><button class="btn full">Abrir caso</button></form>`);
+  $('#fCa',m).addEventListener('submit', async e=>{ e.preventDefault(); const b=$('button.full',e.target); busy(b,true);
+    try{ const fotos=await subirFotos($('[name=fotos]',m),'multas'); const d=formData(e.target);
+      const id=await q(sb.rpc('abrir_infraccion',{p_descripcion:d.descripcion.trim(), p_depto:d.depto.trim()||null, p_evidencias:fotos, p_origen:pre.origen||null})); closeModal(); toast('Caso abierto'); listo?.(id); }
+    catch(err){ toast('Error: '+errMsg(err)); busy(b,false); } });
+}
+VIEWS.multas = function(param){
+  const r=role(), adm=isAdmin(), resid=['residente','propietario'].includes(r), puedeAbrir=['admin','comite','conserje'].includes(r);
+  const TABS=resid?{curso:'Mis casos'}:{curso:'En curso', cerrados:'Cerrados', ...(adm||r==='comite'?{catalogo:'Catálogo y ajustes'}:{})};
+  let tab=TABS[param]?param:'curso', casos=[], cat=[], ind=[], votos=[];
+  setMain(`<h1>Multas</h1>${puedeAbrir?'<div style="margin-bottom:10px"><button class="btn" id="bCaso">+ Nuevo caso</button></div>':''}<div class="tabs" id="mTabs">${Object.entries(TABS).map(([k,v])=>`<button data-t="${k}" class="${k===tab?'on':''}">${v}</button>`).join('')}</div><div id="mBody"><div class="empty">Cargando…</div></div>`);
+  const w=watch(['infracciones','infraccion_eventos','infraccion_votos','multas_catalogo','indicadores','edificios'], async()=>{ const [c,k,i,v]=await Promise.all([q(T('infracciones').select('*').order('folio',{ascending:false}).limit(1000)), q(T('multas_catalogo').select('*').order('conducta')), q(T('indicadores').select('*').order('desde',{ascending:false})), q(T('infraccion_votos').select('*')).catch(()=>[])]); return {c,k,i,v}; },
+    ({c,k,i,v})=>{ casos=c; cat=k; ind=i; votos=v; if(!$('.modal')) draw(); });
+  const listo=()=>w.reload(), catDe=c=>cat.find(x=>x.id===c.catalogo_id), hoy=todayStr();
+  const plazo=c=>c.estado==='abierto'?`decidir antes del ${fmtDay(c.decidir_antes)}${c.decidir_antes<hoy?' (vencido)':''}`:c.estado==='cargos'?(c.descargos_at?'descargos recibidos: listo para resolver':`descargos hasta el ${fmtDay(c.descargos_hasta)}${c.descargos_hasta<hoy?' (vencido: listo para resolver)':''}`):c.estado==='en_comite'?`${votos.filter(x=>x.infraccion_id===c.id&&x.ronda===c.ronda&&x.aprueba).length} de ${Number(S.cfg?.multas?.aprobaciones_comite??1)} aprobaciones`:c.multa_monto&&c.estado==='resuelto'?`${montoUnidad(c.multa_monto,c.multa_unidad)} · ${clp(c.multa_clp)}${c.restituir_antes&&!c.restituido_el?' · se repite cada mes hasta restituir':''}`:'';
+  const fila=c=>`<div class="item" data-caso="${c.id}"><div class="hd"><b>Nº ${c.folio}${c.depto?' · Depto '+esc(c.depto):''} · ${esc(catDe(c)?.conducta||c.descripcion.slice(0,70))}</b>${pillOf(EST_INF,c.estado)}</div><div class="meta">${esc(ORIGEN_INF[c.origen]||c.origen)} · ${fmtDate(c.ts)}${plazo(c)?' · '+esc(plazo(c)):''}</div></div>`;
+  const draw=()=>{ const el=$('#mBody'); if(!el) return;
+    if(tab==='catalogo'){ dibujarCatalogo(el); return; }
+    const d=casos.filter(c=>tab==='curso'?(resid?true:enCurso(c)):!enCurso(c));
+    el.innerHTML=`${resid?'<p class="small muted">Aquí aparecen los casos de tu unidad cuando la administración formula cargos. Tienes un plazo para presentar descargos antes de que se resuelva.</p>':''}<div class="list">${d.map(fila).join('')||`<div class="empty">${tab==='curso'?'No hay casos en curso':'Sin casos cerrados'}</div>`}</div>
+      ${tab==='curso'&&!resid?'<p class="small muted">Plazos en días hábiles (sin fines de semana ni feriados). Solo se aplican multas del catálogo; nada se multa sin cargos, plazo de descargos y resolución fundada.</p>':''}`; };
+  const dibujarCatalogo=el=>{ const cfg=S.cfg?.multas||{}, ult=c=>ind.find(x=>x.codigo===c);
+    el.innerHTML=`<div class="card"><h3>Procedimiento</h3><form id="fMcfg"><div class="row wrap"><label class="f grow"><span>Plazo para decidir si se formulan cargos (días hábiles)</span><input type="text" inputmode="numeric" name="plazo_decision" value="${Number(cfg.plazo_decision??5)}" ${adm?'':'disabled'}></label><label class="f grow"><span>Plazo de descargos (días hábiles)</span><input type="text" inputmode="numeric" name="plazo_descargos" value="${Number(cfg.plazo_descargos??5)}" ${adm?'':'disabled'}></label></div>
+      <div class="row wrap"><label class="f grow"><span>Aprobaciones del comité para aplicar una multa (0 = no se requieren)</span><input type="text" inputmode="numeric" name="aprobaciones_comite" value="${Number(cfg.aprobaciones_comite??1)}" ${adm?'':'disabled'}></label><label class="f grow"><span>Lo cobrado por multas</span><select name="destino" ${adm?'':'disabled'}><option value="fondo_reserva" ${(cfg.destino||'fondo_reserva')==='fondo_reserva'?'selected':''}>Va al fondo de reserva</option><option value="gasto" ${cfg.destino==='gasto'?'selected':''}>Queda en la caja del gasto común</option></select></label></div>
+      ${adm?'<button class="btn sec sm">Guardar</button>':''}</form><p class="small muted">Los valores por defecto (5 días hábiles, multas al fondo de reserva) vienen del reglamento de Los Cactus; ajústalos al reglamento de tu edificio.</p></div>
+      <div class="card"><h3>UTM y UF</h3><div class="kpi"><div class="k"><b>${ult('UTM')?clp(ult('UTM').valor):'—'}</b><span>UTM${ult('UTM')?' desde '+fmtDay(ult('UTM').desde):' · falta'}</span></div><div class="k"><b>${ult('UF')?clp(ult('UF').valor):'—'}</b><span>UF${ult('UF')?' desde '+fmtDay(ult('UF').desde):' · falta'}</span></div></div>
+      ${adm?`<form id="fInd" class="row wrap" style="margin-top:10px;align-items:flex-end"><label class="f" style="margin:0"><span>Indicador</span><select name="codigo"><option>UTM</option><option>UF</option></select></label><label class="f" style="margin:0"><span>Valor en pesos</span><input type="text" inputmode="numeric" data-clp name="valor" required style="width:130px"></label><label class="f" style="margin:0"><span>Desde</span><input type="date" name="desde" value="${todayStr()}" required></label><button class="btn sec sm">Agregar</button></form><p class="small muted">La multa se convierte a pesos con el valor vigente el día que se aplica. Actualízalos según el SII (UTM) y el Banco Central (UF).</p>`:''}</div>
+      <div class="card"><div class="row" style="justify-content:space-between"><h3 style="margin:0">Catálogo de conductas</h3>${adm?'<button class="btn sec sm" id="bConducta">+ Conducta</button>':''}</div>
+      ${!cat.length&&adm?'<div class="info" style="margin-top:10px">El catálogo está vacío. <button class="btn sec sm" id="bCatEj">Cargar catálogo de ejemplo</button><br><span class="small">Es el de Los Cactus (borrador de su reglamento, octubre 2026): revisa conductas, artículos y montos con el reglamento de tu edificio antes de usarlo.</span></div>':''}
+      <div class="list" style="margin-top:10px">${cat.filter(x=>!x.retirado).map(x=>`<div class="item ${adm?'':'static'}" ${adm?`data-conducta="${x.id}"`:''}><div class="hd"><b>${esc(x.conducta)}</b><span class="pill ${x.jpl?'mu':'in'}">${x.jpl?'Juzgado de Policía Local':montoUnidad(x.monto,x.unidad)}</span></div><div class="meta">Art. ${esc(x.articulo||'—')}${x.categoria?' · '+x.categoria:''}${x.por_evento?' · por evento':''}${x.permanente?' · permanente (se repite cada mes)':''}${x.evidencia?' · evidencia mínima: '+esc(x.evidencia):''}${x.nota?' · '+esc(x.nota):''}</div></div>`).join('')||'<div class="empty">Sin conductas</div>'}</div></div>
+      ${adm?`<div class="card"><h3>Feriados</h3><p class="small muted">Para calcular los días hábiles. Uno por línea, con formato AAAA-MM-DD.</p><form id="fFer"><textarea name="f" style="min-height:120px">${esc((S.cfg?.feriados||[]).join('\n'))}</textarea><button class="btn sec sm" style="margin-top:6px">Guardar feriados</button></form></div>`:''}`; };
+  const formConducta=(x={})=>{ const m=modal(`<h3>${x.id?'Editar':'Nueva'} conducta</h3><form id="fCo"><label class="f"><span>Conducta</span><input type="text" name="conducta" value="${esc(x.conducta||'')}" required></label>
+      <div class="row"><label class="f grow"><span>Artículo del reglamento</span><input type="text" name="articulo" value="${esc(x.articulo||'')}"></label><label class="f grow"><span>Categoría (opcional)</span><select name="categoria"><option value="">—</option>${['leve','grave','gravisima'].map(k=>`<option value="${k}" ${x.categoria===k?'selected':''}>${k==='gravisima'?'gravísima':k}</option>`).join('')}</select></label></div>
+      <div class="row"><label class="f grow"><span>Monto</span><input type="text" inputmode="decimal" data-dec name="monto" value="${x.monto!=null?aDec(x.monto):''}"></label><label class="f grow"><span>Unidad</span><select name="unidad">${['UTM','UF'].map(u=>`<option ${x.unidad===u?'selected':''}>${u}</option>`).join('')}</select></label></div>
+      <label class="sw"><input type="checkbox" name="por_evento" ${x.por_evento?'checked':''}> Por cada evento</label><label class="sw"><input type="checkbox" name="permanente" ${x.permanente?'checked':''}> Permanente: se repite cada mes hasta restituir</label><label class="sw" style="margin-bottom:10px"><input type="checkbox" name="jpl" ${x.jpl?'checked':''}> La conoce el Juzgado de Policía Local (no la multa el comité)</label>
+      <label class="f"><span>Evidencia mínima (opcional)</span><input type="text" name="evidencia" value="${esc(x.evidencia||'')}" placeholder="Ej: denuncia de 2 unidades"></label><label class="f"><span>Nota (opcional)</span><input type="text" name="nota" value="${esc(x.nota||'')}"></label>
+      <label class="f"><span>Borrador de la notificación de cargos</span><textarea name="plantilla" placeholder="Se le notifican cargos por… [hechos]…">${esc(x.plantilla||'')}</textarea></label>
+      <div class="row" style="justify-content:flex-end;gap:6px">${x.id?'<button type="button" class="btn dan sm" id="bRet">Retirar del catálogo</button>':''}<button class="btn">Guardar</button></div></form>`);
+    $('#bRet',m)?.addEventListener('click', async()=>{ try{ await q(T('multas_catalogo').update({retirado:todayStr()}).eq('id',x.id)); closeModal(); toast('Conducta retirada'); listo(); }catch(err){ toast('Error: '+errMsg(err)); } });
+    $('#fCo',m).addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); const o={conducta:d.conducta.trim(), articulo:d.articulo.trim(), categoria:d.categoria||null, monto:d.jpl?null:(Number(d.monto)||null), unidad:d.unidad, por_evento:!!d.por_evento, permanente:!!d.permanente, jpl:!!d.jpl, evidencia:d.evidencia.trim()||null, nota:d.nota.trim()||null, plantilla:d.plantilla.trim()};
+      try{ await q(x.id?T('multas_catalogo').update(o).eq('id',x.id):T('multas_catalogo').insert(o)); closeModal(); toast('Conducta guardada'); listo(); }catch(err){ toast('Error: '+errMsg(err)); } }); };
+  const detalle=async id=>{ const c=casos.find(x=>x.id===id); if(!c) return; const k=catDe(c);
+    let ev=[]; try{ ev=await q(T('infraccion_eventos').select('*').eq('infraccion_id',id).order('ts')); }catch(e){}
+    const mio=resid&&c.depto===myDepto(), vence=c.descargos_hasta&&c.descargos_hasta<hoy, puedeResolver=c.estado==='cargos'&&(c.descargos_at||vence), vs=votos.filter(x=>x.infraccion_id===c.id&&x.ronda===c.ronda), yaVote=vs.some(x=>x.uid===S.uid);
+    const fotos=a=>(a||[]).length?`<div class="photos">${a.map(f=>`<img data-f="${esc(f)}" data-img="${esc(f)}">`).join('')}</div>`:'';
+    const acc=[];
+    if(adm&&c.estado==='abierto') acc.push('<button class="btn" data-a="cargos">Formular cargos</button>','<button class="btn sec" data-a="archivar">Archivar</button>','<button class="btn sec" data-a="jpl">Derivar al JPL</button>');
+    if(enCurso(c)&&c.estado!=='en_comite'&&(['admin','comite'].includes(r)||(r==='conserje'&&c.creado_por===S.uid))) acc.push('<button class="btn sec" data-a="evidencia">Agregar evidencia</button>');
+    if(c.estado==='cargos'&&mio&&!vence) acc.push('<button class="btn" data-a="descargos">Presentar descargos</button>');
+    if(c.estado==='cargos'&&adm){ acc.push('<button class="btn sec" data-a="descargos">Registrar descargos escritos</button>'); acc.push(puedeResolver?'<button class="btn" data-a="resolver">Resolver</button>':`<span class="small muted">Podrás resolver cuando lleguen los descargos o venza el plazo (${fmtDay(c.descargos_hasta)}).</span>`); }
+    if(c.estado==='en_comite'&&r==='comite'&&!yaVote) acc.push('<button class="btn ok" data-a="aprobar">Aprobar multa</button>','<button class="btn dan" data-a="rechazar">Rechazar</button>');
+    if(adm&&c.estado==='resuelto'&&c.restituir_antes&&!c.restituido_el) acc.push('<button class="btn sec" data-a="restituido">Marcar restituido</button>');
+    if(c.cargos_at) acc.push('<button class="btn sec" data-a="pdfCargos">Notificación de cargos (PDF)</button>');
+    if(['resuelto','absuelto'].includes(c.estado)) acc.push('<button class="btn sec" data-a="pdfRes">Resolución (PDF)</button>');
+    const m=modal(`<h3>Caso nº ${c.folio}${c.depto?' · Depto '+esc(c.depto):''}</h3><div class="row wrap" style="gap:6px;margin-bottom:8px">${pillOf(EST_INF,c.estado)}<span class="small muted">${esc(ORIGEN_INF[c.origen]||'')} · ${fmtDate(c.ts)}${plazo(c)?' · '+esc(plazo(c)):''}</span></div>
+      <h2 style="margin-top:6px">Hechos</h2><p style="white-space:pre-wrap">${esc(c.descripcion)}</p>${fotos(c.evidencias)}
+      ${c.cargos_texto?`<h2>Cargos</h2><p class="small"><b>${esc(k?.conducta||'')}</b>${k?.articulo?' · Art. '+esc(k.articulo):''} · multa posible ${k?montoUnidad(k.monto,k.unidad):'—'}</p><p style="white-space:pre-wrap">${esc(c.cargos_texto)}</p>`:''}
+      ${c.descargos_texto?`<h2>Descargos</h2><p style="white-space:pre-wrap">${esc(c.descargos_texto)}</p>${fotos(c.descargos_fotos)}`:''}
+      ${c.resolucion_texto?`<h2>${c.estado==='archivado'?'Motivo del archivo':c.estado==='derivado_jpl'?'Derivación':'Resolución'}</h2><p style="white-space:pre-wrap">${esc(c.resolucion_texto)}</p>${c.multa_monto?`<p class="small"><b>Multa: ${montoUnidad(c.multa_monto,c.multa_unidad)}${c.multa_clp?' · '+clp(c.multa_clp):''}</b>${c.reincidencia?' · reincidencia':''}${c.restituir_antes?' · restituir antes del '+fmtDay(c.restituir_antes)+(c.restituido_el?' · restituido el '+fmtDay(c.restituido_el):''):''}</p>`:''}`:''}
+      ${vs.length?`<p class="small muted">Comité: ${vs.map(x=>esc(userName(x.uid))+(x.aprueba?' aprueba':' rechaza'+(x.comentario?' ('+esc(x.comentario)+')':''))).join(' · ')}</p>`:''}
+      <h2>Expediente</h2><div class="timeline">${ev.map(x=>`<div><b>${esc(EV_INF[x.tipo]||x.tipo)}</b> <span class="muted">· ${esc(userName(x.uid))} · ${fmtDate(x.ts)}</span>${x.texto&&!['apertura','cargos','descargos'].includes(x.tipo)?`<br>${esc(x.texto)}`:''}</div>`).join('')}</div>
+      <div class="row wrap" style="justify-content:flex-end;margin-top:12px;gap:6px">${acc.join('')}<button class="btn sec" data-close>Cerrar</button></div>`);
+    m.addEventListener('click', async e=>{ const img=e.target.closest('[data-img]'); if(img){ viewImg(img.dataset.img); return; } const b=e.target.closest('[data-a]'); if(!b) return; const a=b.dataset.a;
+      const rpc=async(fn,args,ok)=>{ try{ await q(sb.rpc(fn,args)); closeModal(); toast(ok); listo(); }catch(err){ toast('Error: '+errMsg(err)); } };
+      if(a==='cargos') formCargosCaso(c);
+      else if(a==='resolver') formResolver(c);
+      else if(a==='pdfCargos') imprimirCaso('cargos',c,k); else if(a==='pdfRes') imprimirCaso('resolucion',c,k);
+      else if(a==='archivar'){ const t=await askText('Motivo para archivar (no se formulan cargos)'); if(t) rpc('archivar_infraccion',{p_id:c.id, p_motivo:t},'Caso archivado'); }
+      else if(a==='jpl'){ const t=await askText('Nota de la derivación al Juzgado de Policía Local','Corresponde al Juzgado de Policía Local (art. 27 de la Ley 21.442).'); if(t) rpc('derivar_jpl',{p_id:c.id, p_nota:t},'Caso derivado'); }
+      else if(a==='aprobar') rpc('votar_multa',{p_id:c.id, p_aprueba:true},'Aprobaste la multa');
+      else if(a==='rechazar'){ const t=await askText('¿Por qué rechazas la multa?'); if(t) rpc('votar_multa',{p_id:c.id, p_aprueba:false, p_comentario:t},'Rechazaste la multa'); }
+      else if(a==='restituido') rpc('marcar_restituido',{p_id:c.id, p_fecha:todayStr()},'Marcado como restituido');
+      else if(a==='descargos'||a==='evidencia'){ const ds=a==='descargos'; const m2=modal(`<h3>${ds?(adm?'Registrar descargos presentados por escrito':'Presentar descargos'):'Agregar evidencia'}</h3><form id="fDs"><label class="f"><span>${ds?'Descargos':'Nota'}</span><textarea name="t" ${ds?'required':''}></textarea></label><label class="f"><span>Fotos o documentos escaneados (opcional)</span><input type="file" name="fotos" accept="image/*" multiple></label>${ds&&!adm?`<p class="small muted">Plazo hasta el ${fmtDay(c.descargos_hasta)}. La administración los considerará antes de resolver.</p>`:''}<button class="btn full">Enviar</button></form>`);
+        $('#fDs',m2).addEventListener('submit', async ev=>{ ev.preventDefault(); const bb=$('button.full',ev.target); busy(bb,true); try{ const fotos=await subirFotos($('[name=fotos]',m2),'multas'); const t=$('[name=t]',m2).value.trim();
+          await q(ds?sb.rpc('presentar_descargos',{p_id:c.id, p_texto:t, p_fotos:fotos}):sb.rpc('agregar_evidencia',{p_id:c.id, p_nota:t, p_fotos:fotos})); closeModal(); toast(ds?'Descargos registrados':'Evidencia agregada'); listo(); }catch(err){ toast('Error: '+errMsg(err)); busy(bb,false); } }); } }); };
+  const formCargosCaso=c=>{ const act=cat.filter(x=>!x.retirado&&!x.jpl); if(!act.length){ toast('Primero carga el catálogo de conductas (pestaña Catálogo y ajustes)'); return; }
+    const m=modal(`<h3>Formular cargos · caso nº ${c.folio}</h3><form id="fFc"><label class="f"><span>Conducta del catálogo</span><select name="cat">${act.map(x=>`<option value="${x.id}">${esc(x.conducta)} · ${montoUnidad(x.monto,x.unidad)}</option>`).join('')}</select></label>
+      <label class="f"><span>Unidad</span><input type="text" name="depto" list="dlFc" value="${esc(c.depto||'')}" required><datalist id="dlFc">${Object.keys(S.unidades).sort(porNum).map(d=>`<option value="${esc(d)}">`).join('')}</datalist></label>
+      <div id="fcProp" class="info"></div><label class="sw" id="fcEv" style="margin-bottom:10px"><input type="checkbox" name="ev"> <span></span></label>
+      <label class="f"><span>Notificación de cargos (la recibe la unidad)</span><textarea name="t" style="min-height:160px" required></textarea></label>
+      <p class="small muted">Al formular cargos se avisa a la unidad y empieza a correr el plazo de descargos (${Number(S.cfg?.multas?.plazo_descargos??5)} días hábiles). Imprime la notificación para entregarla a quien no use la app.</p><button class="btn full">Formular cargos</button></form>`);
+    const sel=$('[name=cat]',m), tx=$('[name=t]',m); let tocado=false; tx.addEventListener('input',()=>tocado=true);
+    const act2=async()=>{ const k=cat.find(x=>x.id===sel.value); if(!tocado) tx.value=(k.plantilla||'').replace(/\[Describa aquí los hechos[^\]]*\]/, c.descripcion);
+      $('#fcEv',m).style.display=k.evidencia?'':'none'; $('#fcEv span',m).textContent='Se cumple la evidencia mínima: '+(k.evidencia||''); $('#fcEv input',m).checked=false;
+      try{ const p=(await q(sb.rpc('propuesta_multa',{p_id:c.id, p_catalogo:k.id})))[0]; $('#fcProp',m).innerHTML=`Multa posible: <b>${montoUnidad(k.monto,k.unidad)}</b>${p?.clp?' ≈ '+clp(p.clp)+' hoy':' (falta el valor de la '+esc(k.unidad)+')'}${p?.reincidencia?`<br><b>${esc(p.motivo)}</b>: ${montoUnidad(p.monto,p.unidad)}`:''}`; }catch(err){ $('#fcProp',m).textContent=errMsg(err); } };
+    sel.addEventListener('change',act2); act2();
+    $('#fFc',m).addEventListener('submit', async e=>{ e.preventDefault(); const b=$('button.full',e.target); busy(b,true); try{ await q(sb.rpc('formular_cargos',{p_id:c.id, p_catalogo:sel.value, p_depto:$('[name=depto]',m).value.trim(), p_texto:tx.value.trim(), p_evidencia_ok:$('#fcEv input',m).checked})); closeModal(); toast('Cargos formulados y notificados'); listo(); }catch(err){ toast('Error: '+errMsg(err)); busy(b,false); } }); };
+  const formResolver=async c=>{ const k=catDe(c); let p=null; try{ p=(await q(sb.rpc('propuesta_multa',{p_id:c.id, p_catalogo:c.catalogo_id})))[0]; }catch(e){}
+    const m=modal(`<h3>Resolver · caso nº ${c.folio}</h3><form id="fRs"><label class="sw"><input type="radio" name="s" value="1" checked> Sancionar: ${montoUnidad(k.monto,k.unidad)}${p?.clp?' ≈ '+clp(p.clp):''}</label><label class="sw" style="margin-bottom:10px"><input type="radio" name="s" value="0"> Absolver, sin multa</label>
+      ${p?.reincidencia?`<label class="sw" style="margin-bottom:10px"><input type="checkbox" name="rep" checked> ${esc(p.motivo)}: ${montoUnidad(p.monto,p.unidad)}</label>`:''}
+      ${k?.permanente?`<label class="f"><span>Plazo para restituir (mientras no se restituya, la multa se repite cada mes)</span><input type="date" name="rest" min="${todayStr()}"></label>`:''}
+      <label class="f"><span>Fundamentos: antecedentes considerados, incluidos los descargos</span><textarea name="t" required style="min-height:140px"></textarea></label>
+      <p class="small muted">${Number(S.cfg?.multas?.aprobaciones_comite??1)>0?`Una sanción necesita ${Number(S.cfg?.multas?.aprobaciones_comite??1)} aprobación(es) del comité antes de cobrarse.`:'La sanción se cobra de inmediato en el próximo gasto común abierto.'}</p><button class="btn full">Resolver</button></form>`);
+    $('#fRs',m).addEventListener('submit', async e=>{ e.preventDefault(); const b=$('button.full',e.target); busy(b,true); const sanc=$('[name=s]:checked',m).value==='1';
+      try{ await q(sb.rpc('resolver_infraccion',{p_id:c.id, p_sancion:sanc, p_texto:$('[name=t]',m).value.trim(), p_reincidencia:!!$('[name=rep]',m)?.checked, p_restituir:$('[name=rest]',m)?.value||null})); closeModal(); toast(sanc?'Resolución registrada':'Caso absuelto'); listo(); }catch(err){ toast('Error: '+errMsg(err)); busy(b,false); } }); };
+  $('#bCaso')?.addEventListener('click',()=>formCaso({},()=>listo()));
+  $('#mTabs').addEventListener('click',e=>{ const b=e.target.closest('button'); if(!b) return; $$('#mTabs button').forEach(x=>x.classList.remove('on')); b.classList.add('on'); tab=b.dataset.t; draw(); });
+  $('#mBody').addEventListener('click', async e=>{ const t=x=>e.target.closest(x); let b;
+    if(b=t('[data-caso]')) detalle(b.dataset.caso);
+    else if(b=t('[data-conducta]')) formConducta(cat.find(x=>x.id===b.dataset.conducta));
+    else if(t('#bConducta')) formConducta();
+    else if(t('#bCatEj')){ try{ const n=await q(sb.rpc('cargar_catalogo_ejemplo')); toast(n+' conductas cargadas: revísalas con tu reglamento'); listo(); }catch(err){ toast('Error: '+errMsg(err)); } } });
+  $('#mBody').addEventListener('submit', async e=>{ e.preventDefault(); const f=e.target, d=formData(f);
+    try{
+      if(f.id==='fMcfg'){ const o={plazo_decision:Math.max(1,parseInt(d.plazo_decision)||5), plazo_descargos:Math.max(1,parseInt(d.plazo_descargos)||5), aprobaciones_comite:Math.max(0,parseInt(d.aprobaciones_comite)||0), destino:d.destino}; await q(T('edificios').update({multas:o}).eq('id',S.cfg.id)); S.cfg.multas=o; toast('Procedimiento guardado'); }
+      else if(f.id==='fInd'){ await q(T('indicadores').upsert({codigo:d.codigo, desde:d.desde, valor:Number(d.valor)})); toast(d.codigo+' guardada'); f.reset(); }
+      else if(f.id==='fFer'){ const arr=[...new Set(d.f.split(/\s+/).filter(x=>/^\d{4}-\d{2}-\d{2}$/.test(x)))].sort(); await q(T('edificios').update({feriados:arr}).eq('id',S.cfg.id)); S.cfg.feriados=arr; toast(arr.length+' feriados guardados'); }
+      listo(); }catch(err){ toast('Error: '+errMsg(err)); } });
+};
+
 // LECTURAS de medidores individuales. Conserjería y administración las ingresan; el comité las ve.
 VIEWS.lecturas = function(){
   const puede=['conserje','admin'].includes(role()); let per=monthStr(), med='', filas=[], prev={}, pub=false;
@@ -721,10 +861,10 @@ function detalleConvenio(c, listo){
 async function formCargo(pre={}, listo){
   let gs=[]; try{ gs=await q(T('gastos').select('periodo,publicado')); }catch(e){}
   const pub=new Set(gs.filter(x=>x.publicado).map(x=>x.periodo)); let p=monthStr(); for(let k=0;k<36&&pub.has(p);k++){ const [y,mm]=p.split('-').map(Number); const d=new Date(y,mm,1); p=d.getFullYear()+'-'+pad(d.getMonth()+1); }
-  const m=modal(`<h3>Nuevo cargo</h3><form id="fCg"><div class="row"><label class="f grow"><span>Unidad</span><input type="text" name="depto" list="dlCg" value="${esc(pre.depto||'')}" required><datalist id="dlCg">${Object.keys(S.unidades).sort(porNum).map(d=>`<option value="${esc(d)}">`).join('')}</datalist></label><label class="f grow"><span>Tipo</span><select name="tipo">${Object.entries(TIPO_CARGO).map(([k,v])=>`<option value="${k}" ${pre.tipo===k?'selected':''}>${v}</option>`).join('')}</select></label></div>
+  const m=modal(`<h3>Nuevo cargo</h3><form id="fCg"><div class="row"><label class="f grow"><span>Unidad</span><input type="text" name="depto" list="dlCg" value="${esc(pre.depto||'')}" required><datalist id="dlCg">${Object.keys(S.unidades).sort(porNum).map(d=>`<option value="${esc(d)}">`).join('')}</datalist></label><label class="f grow"><span>Tipo</span><select name="tipo">${Object.entries(TIPO_CARGO).filter(([k])=>k!=='multa').map(([k,v])=>`<option value="${k}" ${pre.tipo===k?'selected':''}>${v}</option>`).join('')}</select></label></div>
     <label class="f"><span>Detalle</span><input type="text" name="descripcion" value="${esc(pre.descripcion||'')}" placeholder="Ej: ruidos molestos 12-11, art. 15 del reglamento" required></label>
     <div class="row"><label class="f grow"><span>Monto</span><input type="text" inputmode="numeric" data-clp name="monto" value="${pre.monto||''}" required></label><label class="f grow"><span>Se cobra en el gasto común de</span><select name="periodo" required>${opcionesMes(p,{min:p,atras:0,adelante:24})}</select></label></div>
-    <p class="small muted">Se suma al cobro de la unidad en ese período. Solo se pueden usar períodos aún no publicados. Para multas, aplica lo que diga el reglamento de copropiedad.</p><button class="btn full">Registrar cargo</button></form>`);
+    <p class="small muted">Se suma al cobro de la unidad en ese período. Solo se pueden usar períodos aún no publicados. Las multas no se cargan aquí: se aplican desde un caso en <a href="#multas">Multas</a>, con cargos, descargos y resolución.</p><button class="btn full">Registrar cargo</button></form>`);
   $('#fCg',m).addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); if(!S.unidades[d.depto.trim()]){ toast('Esa unidad no existe'); return; } const b=$('button.full',e.target); busy(b,true);
     try{ await q(T('cargos').insert({depto:d.depto.trim(), tipo:d.tipo, descripcion:d.descripcion.trim(), monto:Number(d.monto), periodo:d.periodo})); closeModal(); toast('Cargo registrado'); listo?.(); }catch(err){ toast('Error: '+errMsg(err)); busy(b,false); } });
 }
@@ -762,7 +902,7 @@ VIEWS.finanzas = function(param){
       <div class="kpi"><div class="k"><b>${clp(cargos.filter(c=>c.estado==='vigente'&&c.tipo==='multa').reduce((a,c)=>a+Number(c.monto),0))}</b><span>Multas vigentes</span></div><div class="k"><b>${clp(cargos.filter(c=>c.estado==='vigente'&&c.tipo==='arriendo').reduce((a,c)=>a+Number(c.monto),0))}</b><span>Arriendos</span></div><div class="k"><b>${clp(cargos.filter(c=>c.estado==='anulado'||Number(c.monto)<Number(c.monto_original)).reduce((a,c)=>a+Number(c.monto_original)-(c.estado==='anulado'?0:Number(c.monto)),0))}</b><span>Condonado o rebajado</span></div></div>
       <div class="list" style="margin-top:12px">${cs.map(c=>`<div class="item static"><div class="hd"><b>Depto ${esc(c.depto)} · ${esc(TIPO_CARGO[c.tipo])} · ${clp(c.estado==='anulado'?c.monto_original:c.monto)}</b><span class="row" style="gap:4px">${c.estado==='anulado'?'<span class="pill mu">Anulado</span>':Number(c.monto)<Number(c.monto_original)?'<span class="pill wa">Rebajado</span>':''}<span class="muted small">${esc(fmtMonth(c.periodo))}</span></span></div>
         <div class="meta">${esc(c.descripcion||'')}${c.descripcion?' · ':''}se cobra en el gasto común de ${esc(fmtMonth(c.periodo))}${Number(c.monto)<Number(c.monto_original)&&c.estado!=='anulado'?' · rebajado desde '+clp(c.monto_original):''}${c.motivo?' · motivo: '+esc(c.motivo):''}</div>${adm&&c.estado==='vigente'?`<div class="row acc"><button class="btn sec sm" data-rebajar="${c.id}">Rebajar</button><button class="btn sec sm" data-anularc="${c.id}">Anular</button></div>`:''}</div>`).join('')||'<div class="empty">Sin cargos</div>'}</div>
-      <p class="small muted">Multas, arriendo de espacios comunes y otros cobros a una unidad. Se suman a su gasto común del período indicado. El arriendo de un espacio con costo se carga solo al aprobarse la reserva, y se anula si se cancela. Un cargo no se borra: se rebaja o se anula (condonación) con un motivo, y queda el registro.</p>`; }
+      <p class="small muted">Multas (aplicadas desde un caso en Multas), arriendo de espacios comunes y otros cobros a una unidad. Se suman a su gasto común del período indicado. El arriendo de un espacio con costo se carga solo al aprobarse la reserva, y se anula si se cancela. Un cargo no se borra: se rebaja o se anula (condonación) con un motivo, y queda el registro.</p>`; }
     else if(tab==='fondos'){ const sd=id=>saldos.find(x=>x.fondo_id===id)||{aportes:0,usos:0,ajustes:0,saldo:0};
       el.innerHTML=`${adm?'<div style="margin-bottom:10px"><button class="btn" id="bFondo">+ Nuevo fondo</button></div>':''}
       ${!fondos.some(f=>f.reserva)?`<div class="note" style="margin-bottom:10px">No hay un fondo común de reserva. La Ley de Copropiedad Inmobiliaria exige formarlo con un recargo sobre los gastos comunes; el porcentaje lo fija el reglamento dentro del mínimo legal.${adm?' Créalo con "+ Nuevo fondo" y márcalo como fondo de reserva.':''}</div>`:''}
@@ -1108,7 +1248,7 @@ VIEWS.estacionamientos = function(param){
   let usos=[], visHoy=[], tab='ahora', pend=null;
   const minDe=u=>(new Date(u.fin||Date.now())-new Date(u.inicio))/60000;
   const nivel=u=>{ const {a,m}=lim(), x=minDe(u); return m&&x>=m?'er':a&&x>=a?'wa':''; };
-  const filaUso=u=>`<div class="item ${u.fin?'static':''}" ${u.fin?'':`data-u="${u.id}"`}><div class="hd"><b>${esc(u.est_nombre||'—')} · Depto ${esc(u.depto)}${u.patente?' · '+esc(u.patente):''}</b><span class="row" style="gap:4px">${u.aviso_admin_at?'<span class="pill er">Excedido</span>':''}<span class="pill ${u.fin?'mu':'in'}">${u.fin?'Liberado':'Ocupado'}</span></span></div><div class="meta">${fmtDate(u.inicio)}${u.fin?' → '+fmtDate(u.fin):''} · ${durTxt(minDe(u)*60000)}${u.aviso_admin_at&&lim().m?' · excede el máximo de '+durTxt(lim().m*60000):''}${u.nota?' · '+esc(u.nota):''}</div>${tab==='exc'&&isAdmin()?`<div class="row acc"><button class="btn sec sm" data-multa="${u.id}">Cursar multa</button></div>`:''}</div>`;
+  const filaUso=u=>`<div class="item ${u.fin?'static':''}" ${u.fin?'':`data-u="${u.id}"`}><div class="hd"><b>${esc(u.est_nombre||'—')} · Depto ${esc(u.depto)}${u.patente?' · '+esc(u.patente):''}</b><span class="row" style="gap:4px">${u.aviso_admin_at?'<span class="pill er">Excedido</span>':''}<span class="pill ${u.fin?'mu':'in'}">${u.fin?'Liberado':'Ocupado'}</span></span></div><div class="meta">${fmtDate(u.inicio)}${u.fin?' → '+fmtDate(u.fin):''} · ${durTxt(minDe(u)*60000)}${u.aviso_admin_at&&lim().m?' · excede el máximo de '+durTxt(lim().m*60000):''}${u.nota?' · '+esc(u.nota):''}</div>${tab==='exc'&&['admin','comite','conserje'].includes(role())?`<div class="row acc"><button class="btn sec sm" data-multa="${u.id}">Abrir caso de multa</button></div>`:''}</div>`;
   const draw=()=>{ const el=$('#esBody'); if(!el) return; const sp=estOrden(); const ab={}; usos.filter(u=>!u.fin).forEach(u=>ab[u.estacionamiento_id]=u); const {a,m}=lim();
     $('#esPend').innerHTML=pend?`<div class="info">Elige un estacionamiento libre para <b>${esc(pend.nombre)}</b> · Depto ${esc(pend.depto)}${pend.patente?' · '+esc(pend.patente):''}. <a href="#" id="esNoPend">Cancelar</a></div>`:'';
     if(tab==='ahora'){
@@ -1130,7 +1270,7 @@ VIEWS.estacionamientos = function(param){
     $('#esLib',m)?.addEventListener('click', async()=>{ try{ await q(T('estacionamiento_usos').update({fin:now()}).eq('id',u.id)); closeModal(); toast(u.est_nombre+' liberado'); w.reload(); }catch(err){ toast('Error: '+errMsg(err)); } }); };
   $('#esTabs').addEventListener('click',e=>{ const b=e.target.closest('button'); if(!b) return; $$('#esTabs button').forEach(x=>x.classList.remove('on')); b.classList.add('on'); tab=b.dataset.t; draw(); });
   $('#esPend').addEventListener('click',e=>{ if(e.target.id==='esNoPend'){ e.preventDefault(); pend=null; draw(); } });
-  $('#esBody').addEventListener('click',e=>{ const mu=e.target.closest('[data-multa]'); if(mu){ e.preventDefault(); const u=usos.find(x=>x.id===mu.dataset.multa); formCargo({depto:u.depto, tipo:'multa', descripcion:`Estacionamiento de visita ${u.est_nombre}${u.patente?' ('+u.patente+')':''} el ${fmtDate(u.inicio)}: ${durTxt(minDe(u)*60000)}, máximo ${durTxt(lim().m*60000)}`}); return; }
+  $('#esBody').addEventListener('click',e=>{ const mu=e.target.closest('[data-multa]'); if(mu){ e.preventDefault(); const u=usos.find(x=>x.id===mu.dataset.multa); formCaso({depto:u.depto, origen:'estacionamiento', descripcion:`Estacionamiento de visita ${u.est_nombre}${u.patente?' (patente '+u.patente+')':''} ocupado desde ${fmtDate(u.inicio)} durante ${durTxt(minDe(u)*60000)}; el máximo es ${durTxt(lim().m*60000)}. Registró ${userName(u.registrado_por)}.`}); return; }
     const t=e.target.closest('[data-e]'), it=e.target.closest('[data-u]');
     if(it){ const u=usos.find(x=>x.id===it.dataset.u); if(u) ficha(u); return; } if(!t) return;
     const u=usos.find(x=>!x.fin&&x.estacionamiento_id===t.dataset.e); if(u) ficha(u); else if(opera) ocupar(S.estac[t.dataset.e]); });

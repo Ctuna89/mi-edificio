@@ -166,8 +166,9 @@ select t.falla(format($$select public.usar_fondo(%L, 1, null, 'x')$$, :'fres'), 
 select t.soy(:'a1');
 insert into gastos (periodo, total, publicado, items) values ('2030-04', 1000, false, '[{"categoria":"Aseo","monto":1000}]');
 select public.recalcular_prorrateo('2030-04');
-insert into cargos (depto, periodo, tipo, descripcion, monto) values ('102', '2030-04', 'multa', 'Ruidos molestos', 25000) returning id as multa \gset
-select t.ok((select monto = 400 + 25000 and detalle->1->>'tipo' = 'multa' from gasto_unidades where periodo = '2030-04' and depto = '102'), 'el cargo se suma al cobro de la unidad');
+select t.falla($$insert into cargos (depto, periodo, tipo, descripcion, monto) values ('102', '2030-04', 'multa', 'Ruidos', 25000)$$, 'una multa directa, sin caso de infracción');
+insert into cargos (depto, periodo, tipo, descripcion, monto) values ('102', '2030-04', 'otro', 'Reposición de control del portón', 25000) returning id as multa \gset
+select t.ok((select monto = 400 + 25000 and detalle->1->>'tipo' = 'otro' from gasto_unidades where periodo = '2030-04' and depto = '102'), 'el cargo se suma al cobro de la unidad');
 select t.falla($$insert into cargos (depto, periodo, tipo, monto) values ('101', '2030-03', 'otro', 5000)$$, 'cargo en un período publicado');
 reset role; select t.ok(privado.periodo_abierto(:'ea', '2030-03') = '2030-04', 'el primer período abierto salta los publicados'); select t.soy(:'a1');
 select t.falla(format($$update cargos set monto = 20000 where id = %L$$, :'multa'), 'rebajar sin motivo');
@@ -189,3 +190,100 @@ select t.ok((select monto = 400 + 15000 from gasto_unidades where periodo = '203
 update reservas set estado = 'cancelada' where id = :'rq';
 select t.ok((select estado = 'anulado' from cargos where reserva_id = :'rq') and (select monto = 400 from gasto_unidades where periodo = '2030-04' and depto = '102'), 'al cancelar la reserva el cargo se anula solo');
 \echo 'OK: medidores, reparto por consumo, fondos y cargos'
+
+-- ---------- multas con debido proceso ----------
+\set a5 '00000000-0000-0000-0000-0000000000a5'
+\set a6 '00000000-0000-0000-0000-0000000000a6'
+reset role; insert into auth.users (id) values (:'a5'), (:'a6');
+select t.soy(:'a5'); insert into usuarios (id, edificio_id, nombre, rol) values (:'a5', :'ea', 'Cora Comité', 'comite');
+select t.soy(:'a6'); insert into usuarios (id, edificio_id, nombre, rol) values (:'a6', :'ea', 'Cata Comité', 'comite');
+select t.soy(:'a1'); update usuarios set estado = 'activo', rol = 'comite' where id in (:'a5', :'a6');
+reset role; select t.ok(privado.dias_habiles(:'ea', '2026-12-04', 5) = '2026-12-14', '5 días hábiles saltan el fin de semana y el feriado del 8 de diciembre'); select t.soy(:'a1');
+update edificios set multas = multas || '{"aprobaciones_comite":2}';
+select public.cargar_catalogo_ejemplo();
+select t.falla($$select public.cargar_catalogo_ejemplo()$$, 'cargar el ejemplo sobre un catálogo con conductas');
+select id as c_ruido from multas_catalogo where conducta like 'Ruidos de mascota%' \gset
+select id as c_jpl from multas_catalogo where jpl \gset
+select id as c_obra from multas_catalogo where permanente limit 1 \gset
+select t.falla($$insert into multas_catalogo (conducta, monto) values ('Sin monto', null)$$, 'conducta sin monto que no es del Juzgado de Policía Local');
+-- conserjería abre un caso; la unidad aún no lo ve
+select t.soy(:'a4');
+select public.abrir_infraccion('Perro ladrando de 23 a 02 h, 3 noches seguidas', '101') as caso \gset
+select t.ok((select folio = 1 and estado = 'abierto' and origen = 'conserjeria' from infracciones where id = :'caso'), 'conserjería abre el caso nº 1');
+select t.soy(:'a2');
+select t.ok((select count(*) = 0 from infracciones), 'antes de los cargos la unidad no ve el caso');
+select t.falla(format($$select public.formular_cargos(%L, %L, '101', 'x', true)$$, :'caso', :'c_ruido'), 'un residente formula cargos');
+select t.soy(:'a1');
+select t.falla(format($$select public.formular_cargos(%L, %L, '101', 'Cargos', false)$$, :'caso', :'c_ruido'), 'cargos sin confirmar la evidencia mínima');
+select t.falla(format($$select public.formular_cargos(%L, %L, '101', 'Cargos', true)$$, :'caso', :'c_jpl'), 'multar una conducta del Juzgado de Policía Local');
+select t.falla(format($$select public.formular_cargos(%L, %L, '101', 'Cargos', true)$$, :'caso', :'c_ruido'), 'cargos sin el valor de la UTM');
+insert into indicadores (codigo, desde, valor) values ('UTM', '2026-01-01', 69500), ('UF', '2026-01-01', 39800);
+select public.formular_cargos(:'caso', :'c_ruido', '101', 'Se le notifican cargos por ruidos de mascota persistentes.', true);
+reset role; select t.ok((select estado = 'cargos' and descargos_hasta = privado.dias_habiles(edificio_id, public.hoy(), 5) from infracciones where id = :'caso'), 'cargos notificados, con plazo de descargos en días hábiles'); select t.soy(:'a1');
+select t.falla(format($$select public.resolver_infraccion(%L, true, 'Fundamentos')$$, :'caso'), 'resolver mientras corre el plazo de descargos sin descargos');
+select t.soy(:'a3');
+select t.falla(format($$select public.presentar_descargos(%L, 'No es mi perro')$$, :'caso'), 'otra unidad presenta descargos');
+select t.soy(:'a2');
+select t.ok((select count(*) = 1 from infracciones), 'con cargos, la unidad ve su caso');
+select public.presentar_descargos(:'caso', 'El perro estaba enfermo, ya fue al veterinario.');
+select t.soy(:'a1');
+select t.falla(format($$select public.resolver_infraccion(%L, true, '')$$, :'caso'), 'resolución sin fundamentos');
+select public.resolver_infraccion(:'caso', true, 'Se consideraron 3 constancias de conserjería y los descargos; la conducta está acreditada.');
+select t.ok((select estado = 'en_comite' and multa_monto = 1 and multa_unidad = 'UTM' from infracciones where id = :'caso'), 'la sanción espera al comité');
+select t.ok((select count(*) = 0 from cargos where infraccion_id = :'caso'), 'sin aprobación del comité no hay cobro');
+select t.falla(format($$select public.votar_multa(%L, true)$$, :'caso'), 'la administración vota como comité');
+select t.soy(:'a5'); select public.votar_multa(:'caso', true);
+select t.falla(format($$select public.votar_multa(%L, true)$$, :'caso'), 'votar dos veces');
+select t.soy(:'a6'); select public.votar_multa(:'caso', true);
+select t.ok((select estado = 'resuelto' and multa_clp = 69500 from infracciones where id = :'caso'), 'con 2 aprobaciones se aplica: 1 UTM = $69.500');
+select t.ok((select count(*) = 1 and bool_and(tipo = 'multa' and monto = 69500 and estado = 'vigente') from cargos where infraccion_id = :'caso'), 'la multa queda como cargo en el gasto común de la unidad');
+select t.ok((select count(*) >= 6 from infraccion_eventos where infraccion_id = :'caso'), 'el expediente guarda cada paso');
+-- reincidencia: misma conducta en 6 meses → el doble (no tiene categoría)
+select t.soy(:'a1');
+select public.abrir_infraccion('De nuevo ladridos nocturnos', '101') as caso2 \gset
+select t.ok((select reincidencia and monto = 2 from public.propuesta_multa(:'caso2', :'c_ruido')), 'reincidencia en 6 meses propone el doble');
+-- rechazo del comité: vuelve a la administración
+select public.formular_cargos(:'caso2', :'c_ruido', '101', 'Cargos', true);
+select public.presentar_descargos(:'caso2', 'Descargos entregados en papel');
+select public.resolver_infraccion(:'caso2', true, 'Fundamentos', false);
+select t.soy(:'a5');
+select t.falla(format($$select public.votar_multa(%L, false)$$, :'caso2'), 'rechazar sin motivo');
+select public.votar_multa(:'caso2', false, 'Falta evidencia de esta vez');
+select t.soy(:'a6'); select public.votar_multa(:'caso2', false, 'Concuerdo');
+select t.ok((select estado = 'cargos' and multa_monto is null from infracciones where id = :'caso2'), 'rechazada por el comité, vuelve a la administración');
+select t.soy(:'a1');
+select public.resolver_infraccion(:'caso2', false, 'No se acreditó esta vez');
+select t.ok((select estado = 'absuelto' from infracciones where id = :'caso2'), 'absuelto con resolución fundada');
+-- archivar y derivar
+select public.abrir_infraccion('Reporte sin antecedentes suficientes') as caso3 \gset
+select t.falla(format($$select public.archivar_infraccion(%L, '')$$, :'caso3'), 'archivar sin motivo');
+select public.archivar_infraccion(:'caso3', 'No se pudo identificar la unidad');
+select public.abrir_infraccion('Se negó a la revisión del gas', '102') as caso4 \gset
+select public.derivar_jpl(:'caso4', 'Art. 77: corresponde al Juzgado de Policía Local');
+select t.ok((select estado from infracciones where id = :'caso3') = 'archivado' and (select estado from infracciones where id = :'caso4') = 'derivado_jpl', 'archivar y derivar al Juzgado de Policía Local');
+-- infracción permanente: se repite cada mes hasta restituir
+update edificios set multas = multas || '{"aprobaciones_comite":0}';
+select public.abrir_infraccion('Cierre de terraza sin autorización', '102') as caso5 \gset
+select public.formular_cargos(:'caso5', :'c_obra', '102', 'Cargos', true);
+select public.presentar_descargos(:'caso5', 'Lo retiraré');
+select t.falla(format($$select public.resolver_infraccion(%L, true, 'Fundamentos')$$, :'caso5'), 'permanente sin plazo para restituir');
+select public.resolver_infraccion(:'caso5', true, 'Fundamentos', true, public.hoy() + 30);
+select t.ok((select estado = 'resuelto' from infracciones where id = :'caso5'), 'sin aprobaciones del comité configuradas se aplica de inmediato');
+reset role;
+select t.ok(privado.multas_permanentes() = 0, 'la repetición no duplica la multa del mes en curso');
+alter table cargos disable trigger cargos_antes; update cargos set periodo = '2001-01' where infraccion_id = :'caso5'; alter table cargos enable trigger cargos_antes;
+select t.ok(privado.multas_permanentes() = 1, 'el mes siguiente, la multa permanente se repite');
+select t.soy(:'a1'); select public.marcar_restituido(:'caso5', public.hoy());
+reset role; alter table cargos disable trigger cargos_antes; update cargos set periodo = '2001-02' where infraccion_id = :'caso5' and periodo <> '2001-01'; alter table cargos enable trigger cargos_antes;
+select t.ok(privado.multas_permanentes() = 0, 'restituida, deja de repetirse');
+-- multas al fondo de reserva al publicar el período
+select t.soy(:'a1');
+select periodo as pmulta from cargos where infraccion_id = :'caso' \gset
+insert into gastos (periodo, total, publicado, items) values (:'pmulta', 1000, false, '[{"categoria":"Aseo","monto":1000}]') on conflict (edificio_id, periodo) do nothing;
+select public.recalcular_prorrateo(:'pmulta');
+update gastos set publicado = true where periodo = :'pmulta';
+select t.ok((select count(*) = 1 and sum(monto) = 69500 from fondo_movimientos where periodo = :'pmulta' and descripcion like 'Multas%' and fondo_id = :'fres'), 'al publicar, las multas del período van al fondo de reserva');
+select t.soy(:'a3');
+select t.ok((select count(*) = 0 from infracciones where depto <> '102') and (select count(*) = 2 from infracciones), 'el 102 ve solo sus casos (con cargos o cerrados), no los de otra unidad');
+\echo 'OK: multas con debido proceso'
+

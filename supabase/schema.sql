@@ -45,6 +45,11 @@ create table if not exists public.edificios (
 );
 alter table public.edificios add column if not exists privacidad text default '';
 alter table public.edificios add column if not exists medidores jsonb not null default '[]'::jsonb;   -- tipos de medidor: [{id, nombre, unidad}]
+-- Feriados de Chile (editables) para los plazos en días hábiles; sábado y domingo nunca cuentan.
+alter table public.edificios add column if not exists feriados jsonb not null default jsonb_build_array('2026-01-01','2026-04-03','2026-04-04','2026-05-01','2026-05-21','2026-06-21','2026-06-29','2026-07-16','2026-08-15','2026-09-18','2026-09-19','2026-10-12','2026-10-31','2026-11-01','2026-12-08','2026-12-25','2027-01-01','2027-03-26','2027-03-27','2027-05-01','2027-05-21','2027-06-21','2027-06-28','2027-07-16','2027-08-15','2027-09-18','2027-09-19','2027-10-11','2027-10-31','2027-11-01','2027-12-08','2027-12-25');
+-- Procedimiento de multas: plazos en días hábiles, aprobaciones del comité (0 = no se requieren) y destino del cobro
+alter table public.edificios add column if not exists multas jsonb not null default
+  '{"plazo_decision":5,"plazo_descargos":5,"aprobaciones_comite":1,"destino":"fondo_reserva"}'::jsonb;
 alter table public.edificios add column if not exists mora_tasa numeric(6,3) not null default 0;   -- interés por mora, % mensual (0 = no se cobra)
 alter table public.edificios add column if not exists mora_desde date;                             -- la mora se cuenta desde esta fecha (o desde el vencimiento, si es posterior)
 alter table public.edificios drop column if exists codigo;   -- los códigos de invitación eran de la versión multi-edificio
@@ -519,6 +524,87 @@ create table if not exists public.cargos (
 );
 create unique index if not exists cargos_reserva_idx on public.cargos (reserva_id) where reserva_id is not null and estado = 'vigente';
 
+-- Multas con debido proceso (adaptado del módulo E2 de CactusOne). Solo se aplican multas del catálogo, en
+-- UTM o UF. Un caso pasa por: apertura con la evidencia → cargos (conducta del catálogo, notificación escrita)
+-- → descargos dentro del plazo → resolución fundada (absolver o sancionar) → aprobación del comité si así se
+-- configura → cargo en el gasto común de la unidad. Los casos y su historial son permanentes.
+create table if not exists public.indicadores (
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  codigo      text not null check (codigo in ('UTM','UF')),
+  desde       date not null,
+  valor       numeric(12,2) not null check (valor > 0),
+  primary key (edificio_id, codigo, desde)
+);
+create table if not exists public.multas_catalogo (
+  id          uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  conducta    text not null,
+  articulo    text not null default '',
+  categoria   text check (categoria in ('leve','grave','gravisima')),   -- para subir de categoría si reincide
+  monto       numeric(6,2),
+  unidad      text not null default 'UTM' check (unidad in ('UTM','UF')),
+  por_evento  boolean not null default false,
+  permanente  boolean not null default false,   -- se repite cada mes hasta restituir
+  jpl         boolean not null default false,   -- la conoce el Juzgado de Policía Local, no el comité
+  evidencia   text,                             -- evidencia mínima exigida
+  nota        text,
+  plantilla   text not null default '',         -- borrador de la notificación de cargos
+  retirado    date,
+  creado      timestamptz default now(),
+  check (jpl or coalesce(monto, 0) > 0)
+);
+create table if not exists public.infracciones (
+  id          uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  folio       int not null,
+  depto       text,
+  origen      text not null default 'administracion' check (origen in ('administracion','comite','conserjeria','estacionamiento','reclamo')),
+  descripcion text not null,
+  evidencias  text[] not null default '{}',
+  estado      text not null default 'abierto' check (estado in ('abierto','cargos','en_comite','resuelto','absuelto','archivado','derivado_jpl')),
+  decidir_antes date not null,
+  catalogo_id uuid references public.multas_catalogo(id),
+  cargos_texto text,
+  cargos_at   timestamptz,
+  descargos_hasta date,
+  descargos_texto text,
+  descargos_at timestamptz,
+  descargos_fotos text[] not null default '{}',
+  reincidencia boolean not null default false,
+  resolucion_texto text,
+  resuelto_at timestamptz,
+  resuelto_por uuid,
+  ronda       int not null default 0,           -- veces que pasó al comité
+  multa_monto numeric(8,2),
+  multa_unidad text check (multa_unidad in ('UTM','UF')),
+  multa_clp   numeric(14,0),
+  restituir_antes date,
+  restituido_el date,
+  creado_por  uuid default auth.uid(),
+  ts          timestamptz default now(),
+  unique (edificio_id, folio)
+);
+create table if not exists public.infraccion_eventos (
+  id          uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  infraccion_id uuid not null references public.infracciones(id) on delete cascade,
+  tipo        text not null check (tipo in ('apertura','evidencia','cargos','descargos','resolucion','voto','cobro','derivacion','restitucion','archivo')),
+  texto       text,
+  fotos       text[] not null default '{}',
+  uid         uuid default auth.uid(),
+  ts          timestamptz default now()
+);
+create table if not exists public.infraccion_votos (
+  infraccion_id uuid not null references public.infracciones(id) on delete cascade,
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  ronda       int not null,
+  uid         uuid not null default auth.uid(),
+  aprueba     boolean not null,
+  comentario  text,
+  ts          timestamptz default now(),
+  primary key (infraccion_id, ronda, uid)
+);
+
 -- Archivos de filas borradas por plazo de conservación, pendientes de eliminar del bucket.
 -- Los elimina la app de la administración (la base de datos no puede borrar archivos de Storage).
 create table if not exists public.archivos_por_borrar (
@@ -557,7 +643,7 @@ begin
   end if;
 
   select id into def from public.edificios order by creado, id limit 1;
-  foreach t in array array['empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos']
+  foreach t in array array['empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos']
   loop
     execute format('alter table public.%I add column if not exists edificio_id uuid references public.edificios(id) on delete cascade', t);
     execute format('select count(*) from public.%I where edificio_id is null', t) into n;
@@ -611,6 +697,7 @@ end $$;
 -- Desglose del cobro de cada unidad: [{i: índice del ítem, monto, consumo?}]. Vacío en períodos anteriores
 -- a esta función (se repartían solo por alícuota).
 alter table public.gasto_unidades add column if not exists detalle jsonb not null default '[]'::jsonb;
+alter table public.cargos add column if not exists infraccion_id uuid references public.infracciones(id);
 alter table public.pagos add column if not exists concepto text not null default 'gasto';   -- gasto (capital) | interes
 
 -- Código del QR de acceso de cada visita (las visitas ya existentes reciben uno)
@@ -669,7 +756,7 @@ $$;
 do $$
 declare t text;
 begin
-  foreach t in array array['empresas','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos']
+  foreach t in array array['empresas','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos']
   loop
     execute format('alter table public.%I alter column edificio_id set default public.mi_edificio()', t);
   end loop;
@@ -1214,6 +1301,9 @@ begin
     if new.periodo is null or new.periodo = '' then new.periodo := privado.periodo_abierto(new.edificio_id, to_char(public.hoy(), 'YYYY-MM')); end if;
     if new.periodo !~ '^\d{4}-(0[1-9]|1[0-2])$' then raise exception 'Período no válido'; end if;
     if not exists (select 1 from public.unidades where edificio_id = new.edificio_id and depto = new.depto) then raise exception 'La unidad % no existe', new.depto; end if;
+    if new.tipo = 'multa' and new.infraccion_id is null then
+      raise exception 'Las multas se aplican desde un caso de infracción (módulo Multas), con cargos, descargos y resolución';
+    end if;
     if exists (select 1 from public.gastos where edificio_id = new.edificio_id and periodo = new.periodo and publicado) then
       raise exception 'El período % ya está publicado: el cargo debe ir en un período siguiente', new.periodo;
     end if;
@@ -1222,7 +1312,7 @@ begin
     return new;
   end if;
   new.depto := old.depto; new.periodo := old.periodo; new.tipo := old.tipo; new.monto_original := old.monto_original;
-  new.reserva_id := old.reserva_id; new.registrado_por := old.registrado_por; new.ts := old.ts;
+  new.reserva_id := old.reserva_id; new.infraccion_id := old.infraccion_id; new.registrado_por := old.registrado_por; new.ts := old.ts;
   if old.estado = 'anulado' then raise exception 'El cargo ya está anulado'; end if;
   pub := exists (select 1 from public.gastos where edificio_id = old.edificio_id and periodo = old.periodo and publicado);
   if new.estado = 'anulado' or new.monto < old.monto then
@@ -1245,6 +1335,7 @@ begin
   if exists (select 1 from public.gastos where edificio_id = new.edificio_id and periodo = new.periodo) then
     perform set_config('mi_edificio.interno', '1', true);
     perform privado.repartir(new.edificio_id, new.periodo);
+    perform privado.sync_aportes(new.edificio_id, new.periodo);
     perform set_config('mi_edificio.interno', '', true);
   end if;
   return null;
@@ -1287,6 +1378,15 @@ begin
   where g.edificio_id = p_e and g.periodo = p_periodo and g.publicado and coalesce(x->>'fondo', '') <> '' and coalesce((x->>'monto')::numeric, 0) > 0
     and exists (select 1 from public.fondos f where f.id::text = x->>'fondo' and f.edificio_id = p_e)
   group by x->>'fondo', g.vence;
+  -- multas cobradas en el período, al fondo de reserva si así está configurado
+  insert into public.fondo_movimientos (edificio_id, fondo_id, tipo, fecha, monto, descripcion, periodo)
+  select p_e, f.id, 'aporte', coalesce(g.vence, to_date(p_periodo || '-01', 'YYYY-MM-DD')), sum(c.monto), 'Multas cobradas en gastos comunes ' || p_periodo, p_periodo
+  from public.gastos g
+  join public.edificios ed on ed.id = g.edificio_id and coalesce(ed.multas->>'destino', 'fondo_reserva') = 'fondo_reserva'
+  join lateral (select id from public.fondos where edificio_id = p_e and reserva and activo order by creado limit 1) f on true
+  join public.cargos c on c.edificio_id = p_e and c.periodo = p_periodo and c.tipo = 'multa' and c.estado = 'vigente'
+  where g.edificio_id = p_e and g.periodo = p_periodo and g.publicado
+  group by f.id, g.vence having sum(c.monto) > 0;
 end $$;
 create or replace function privado.tg_gastos_fondos() returns trigger
 language plpgsql security definer set search_path = public as $$
@@ -1354,6 +1454,310 @@ language sql stable security definer set search_path = public as $$
   where f.edificio_id = public.mi_edificio() and public.mi_rol() in ('residente','propietario','comite','admin')
   group by f.id
 $$;
+
+-- ---------- Multas con debido proceso ----------
+-- Fecha que resulta de sumar p_n días hábiles (sin sábados, domingos ni feriados del edificio)
+create or replace function privado.dias_habiles(p_e uuid, p_desde date, p_n int) returns date
+language plpgsql stable security definer set search_path = public as $$
+declare d date := p_desde; quedan int := p_n; fer text[];
+begin
+  select coalesce(array(select jsonb_array_elements_text(feriados)), '{}') into fer from public.edificios where id = p_e;
+  while quedan > 0 loop
+    d := d + 1;
+    if extract(isodow from d) < 6 and not (d::text = any(fer)) then quedan := quedan - 1; end if;
+  end loop;
+  return d;
+end $$;
+
+create or replace function privado.multas_cfg(p_e uuid, k text, def int) returns int
+language sql stable security definer set search_path = public as $$
+  select coalesce((select (multas->>k)::int from public.edificios where id = p_e), def)
+$$;
+
+create or replace function privado.indicador(p_e uuid, p_codigo text, p_fecha date) returns numeric
+language sql stable security definer set search_path = public as $$
+  select valor from public.indicadores where edificio_id = p_e and codigo = p_codigo and desde <= p_fecha order by desde desc limit 1
+$$;
+
+create or replace function privado.evento_infraccion(p_id uuid, p_tipo text, p_texto text, p_fotos text[] default '{}') returns void
+language sql security definer set search_path = public as $$
+  insert into public.infraccion_eventos (edificio_id, infraccion_id, tipo, texto, fotos)
+  select edificio_id, id, p_tipo, p_texto, coalesce(p_fotos, '{}') from public.infracciones where id = p_id
+$$;
+
+create or replace function privado.fotos_validas(p_e uuid, p_fotos text[]) returns boolean
+language sql immutable as $$
+  select not exists (select 1 from unnest(coalesce(p_fotos, '{}')) x where x not like p_e::text || '/multas/%')
+$$;
+
+create or replace function public.abrir_infraccion(p_descripcion text, p_depto text default null, p_evidencias text[] default '{}', p_origen text default null) returns uuid
+language plpgsql security definer set search_path = public as $$
+declare e uuid := public.mi_edificio(); r rol_t := public.mi_rol(); f int; nid uuid;
+begin
+  if r is null or r not in ('admin','comite','conserje') then raise exception 'No autorizado'; end if;
+  if coalesce(trim(p_descripcion), '') = '' then raise exception 'Describe lo constatado: qué, cuándo y dónde'; end if;
+  if not privado.fotos_validas(e, p_evidencias) then raise exception 'Evidencia no válida'; end if;
+  if nullif(trim(p_depto), '') is not null and not exists (select 1 from public.unidades where edificio_id = e and depto = trim(p_depto)) then
+    raise exception 'La unidad % no existe', p_depto;
+  end if;
+  perform pg_advisory_xact_lock(hashtextextended('infracciones:' || e::text, 0));
+  select coalesce(max(folio), 0) + 1 into f from public.infracciones where edificio_id = e;
+  insert into public.infracciones (edificio_id, folio, depto, origen, descripcion, evidencias, decidir_antes)
+  values (e, f, nullif(trim(p_depto), ''),
+          coalesce(p_origen, case r when 'conserje' then 'conserjeria' when 'comite' then 'comite' else 'administracion' end),
+          trim(p_descripcion), coalesce(p_evidencias, '{}'), privado.dias_habiles(e, public.hoy(), privado.multas_cfg(e, 'plazo_decision', 5)))
+  returning id into nid;
+  perform privado.evento_infraccion(nid, 'apertura', trim(p_descripcion), p_evidencias);
+  perform privado.push(e, privado.usuarios_de(e, '{admin}', null, null, auth.uid()), '⚖️ Caso de infracción nº ' || f,
+    'Decidir si se formulan cargos: ' || left(trim(p_descripcion), 120), '#multas');
+  return nid;
+end $$;
+
+create or replace function public.agregar_evidencia(p_id uuid, p_nota text, p_fotos text[] default '{}') returns void
+language plpgsql security definer set search_path = public as $$
+declare c public.infracciones;
+begin
+  select * into c from public.infracciones where id = p_id and edificio_id = public.mi_edificio();
+  if not found or not (public.mi_rol() in ('admin','comite') or (public.mi_rol() = 'conserje' and c.creado_por = auth.uid())) then raise exception 'No autorizado'; end if;
+  if c.estado not in ('abierto','cargos') then raise exception 'El caso ya está cerrado'; end if;
+  if coalesce(trim(p_nota), '') = '' and cardinality(coalesce(p_fotos, '{}')) = 0 then raise exception 'Agrega una nota o una foto'; end if;
+  if not privado.fotos_validas(c.edificio_id, p_fotos) then raise exception 'Evidencia no válida'; end if;
+  update public.infracciones set evidencias = evidencias || coalesce(p_fotos, '{}') where id = p_id;
+  perform privado.evento_infraccion(p_id, 'evidencia', nullif(trim(p_nota), ''), p_fotos);
+end $$;
+
+-- Monto propuesto: el del catálogo, o si la unidad fue sancionada por la misma conducta en los 6 meses
+-- anteriores, la categoría superior (si tiene categoría) o el doble.
+create or replace function public.propuesta_multa(p_id uuid, p_catalogo uuid)
+returns table (reincidencia boolean, monto numeric, unidad text, clp numeric, motivo text)
+language plpgsql stable security definer set search_path = public as $$
+declare c public.infracciones; i public.multas_catalogo; rep boolean; m numeric;
+begin
+  select * into c from public.infracciones where id = p_id and edificio_id = public.mi_edificio();
+  select * into i from public.multas_catalogo where id = p_catalogo and edificio_id = c.edificio_id;
+  if c.id is null or i.id is null or not public.es_admin() then raise exception 'No autorizado'; end if;
+  rep := c.depto is not null and exists (select 1 from public.infracciones x where x.edificio_id = c.edificio_id and x.depto = c.depto
+          and x.catalogo_id = p_catalogo and x.estado = 'resuelto' and x.id <> c.id and x.resuelto_at > now() - interval '6 months');
+  m := i.monto;
+  if rep and not i.jpl then
+    m := case when i.categoria in ('leve','grave') then (case i.categoria when 'leve' then 1 else 2 end) * 1.0 else i.monto * 2 end;
+  end if;
+  return query select rep, m, i.unidad, round(m * privado.indicador(c.edificio_id, i.unidad, public.hoy())),
+    case when rep then case when i.categoria in ('leve','grave') then 'Reincidencia en 6 meses: categoría superior' else 'Reincidencia en 6 meses: el doble' end end;
+end $$;
+
+create or replace function public.formular_cargos(p_id uuid, p_catalogo uuid, p_depto text, p_texto text, p_evidencia_ok boolean default false) returns void
+language plpgsql security definer set search_path = public as $$
+declare c public.infracciones; i public.multas_catalogo;
+begin
+  select * into c from public.infracciones where id = p_id and edificio_id = public.mi_edificio() for update;
+  if not found or not public.es_admin() then raise exception 'No autorizado'; end if;
+  if c.estado <> 'abierto' then raise exception 'Los cargos ya se formularon'; end if;
+  select * into i from public.multas_catalogo where id = p_catalogo and edificio_id = c.edificio_id and retirado is null;
+  if not found then raise exception 'Elige una conducta del catálogo'; end if;
+  if i.jpl then raise exception 'Esta conducta no la multa el comité: derívala al Juzgado de Policía Local'; end if;
+  if i.evidencia is not null and not p_evidencia_ok then raise exception 'Confirma que se cumple la evidencia mínima: %', i.evidencia; end if;
+  if not exists (select 1 from public.unidades where edificio_id = c.edificio_id and depto = trim(p_depto)) then raise exception 'Indica la unidad'; end if;
+  if coalesce(trim(p_texto), '') = '' then raise exception 'Escribe la notificación de cargos'; end if;
+  if privado.indicador(c.edificio_id, i.unidad, public.hoy()) is null then raise exception 'Falta el valor de la % (Multas → Catálogo)', i.unidad; end if;
+  update public.infracciones set estado = 'cargos', catalogo_id = p_catalogo, depto = trim(p_depto), cargos_texto = trim(p_texto), cargos_at = now(),
+    descargos_hasta = privado.dias_habiles(c.edificio_id, public.hoy(), privado.multas_cfg(c.edificio_id, 'plazo_descargos', 5))
+  where id = p_id returning * into c;
+  perform privado.evento_infraccion(p_id, 'cargos', trim(p_texto));
+  perform privado.push(c.edificio_id, privado.usuarios_de(c.edificio_id, '{residente,propietario}', c.depto), '⚖️ Notificación de cargos nº ' || c.folio,
+    'Puedes presentar descargos hasta el ' || to_char(c.descargos_hasta, 'DD-MM-YYYY') || '.', '#multas');
+end $$;
+
+-- Descargos: la unidad en la app dentro del plazo, o la administración registra los presentados por escrito
+create or replace function public.presentar_descargos(p_id uuid, p_texto text, p_fotos text[] default '{}') returns void
+language plpgsql security definer set search_path = public as $$
+declare c public.infracciones; adm boolean := public.es_admin();
+begin
+  select * into c from public.infracciones where id = p_id and edificio_id = public.mi_edificio() for update;
+  if not found or not (adm or (public.es_residente() and c.depto = public.mi_depto())) then raise exception 'No autorizado'; end if;
+  if c.estado <> 'cargos' then raise exception 'El caso no está en plazo de descargos'; end if;
+  if not adm and public.hoy() > c.descargos_hasta then raise exception 'El plazo de descargos venció el %', to_char(c.descargos_hasta, 'DD-MM-YYYY'); end if;
+  if coalesce(trim(p_texto), '') = '' then raise exception 'Escribe los descargos'; end if;
+  if not privado.fotos_validas(c.edificio_id, p_fotos) then raise exception 'Archivo no válido'; end if;
+  update public.infracciones set descargos_texto = coalesce(descargos_texto || E'\n\n', '') || trim(p_texto), descargos_at = now(),
+    descargos_fotos = descargos_fotos || coalesce(p_fotos, '{}') where id = p_id;
+  perform privado.evento_infraccion(p_id, 'descargos', case when adm then '(Presentados por escrito) ' else '' end || trim(p_texto), p_fotos);
+  if not adm then
+    perform privado.push(c.edificio_id, privado.usuarios_de(c.edificio_id, '{admin}'), '⚖️ Descargos recibidos: caso nº ' || c.folio, left(trim(p_texto), 120), '#multas');
+  end if;
+end $$;
+
+create or replace function privado.aplicar_multa(p_id uuid) returns void
+language plpgsql security definer set search_path = public as $$
+declare c public.infracciones; i public.multas_catalogo; v numeric; per text;
+begin
+  select * into c from public.infracciones where id = p_id for update;
+  select * into i from public.multas_catalogo where id = c.catalogo_id;
+  v := privado.indicador(c.edificio_id, c.multa_unidad, public.hoy());
+  if v is null then raise exception 'Falta el valor de la % (Multas → Catálogo)', c.multa_unidad; end if;
+  per := privado.periodo_abierto(c.edificio_id, to_char(public.hoy(), 'YYYY-MM'));
+  update public.infracciones set estado = 'resuelto', multa_clp = round(c.multa_monto * v) where id = p_id returning * into c;
+  insert into public.cargos (edificio_id, depto, periodo, tipo, descripcion, monto, infraccion_id)
+  values (c.edificio_id, c.depto, per, 'multa', 'Multa caso nº ' || c.folio || ': ' || i.conducta, c.multa_clp, c.id);
+  perform privado.evento_infraccion(p_id, 'cobro', 'Multa de ' || trim(to_char(c.multa_monto, 'FM999990.##')) || ' ' || c.multa_unidad || ' ($' || c.multa_clp
+    || ') en el gasto común de ' || per || '.');
+  perform privado.push(c.edificio_id, privado.usuarios_de(c.edificio_id, '{residente,propietario}', c.depto), '⚖️ Resolución del caso nº ' || c.folio,
+    'Multa de ' || trim(to_char(c.multa_monto, 'FM999990.##')) || ' ' || c.multa_unidad || ', se cobra con los gastos comunes.', '#multas');
+end $$;
+
+-- Resolución fundada: absolver, o sancionar con el monto del catálogo (o el de reincidencia)
+create or replace function public.resolver_infraccion(p_id uuid, p_sancion boolean, p_texto text, p_reincidencia boolean default true, p_restituir date default null) returns void
+language plpgsql security definer set search_path = public as $$
+declare c public.infracciones; i public.multas_catalogo; pr record; n int;
+begin
+  select * into c from public.infracciones where id = p_id and edificio_id = public.mi_edificio() for update;
+  if not found or not public.es_admin() then raise exception 'No autorizado'; end if;
+  if c.estado <> 'cargos' then raise exception 'Primero se formulan cargos'; end if;
+  if c.descargos_at is null and public.hoy() <= c.descargos_hasta then
+    raise exception 'Aún corre el plazo de descargos (hasta el %)', to_char(c.descargos_hasta, 'DD-MM-YYYY');
+  end if;
+  if coalesce(trim(p_texto), '') = '' then raise exception 'La resolución debe ser fundada: indica los antecedentes considerados'; end if;
+  update public.infracciones set resolucion_texto = trim(p_texto), resuelto_at = now(), resuelto_por = auth.uid() where id = p_id;
+  if not p_sancion then
+    update public.infracciones set estado = 'absuelto' where id = p_id;
+    perform privado.evento_infraccion(p_id, 'resolucion', 'Absuelto. ' || trim(p_texto));
+    perform privado.push(c.edificio_id, privado.usuarios_de(c.edificio_id, '{residente,propietario}', c.depto), '⚖️ Resolución del caso nº ' || c.folio, 'Sin multa.', '#multas');
+    return;
+  end if;
+  select * into i from public.multas_catalogo where id = c.catalogo_id;
+  if i.permanente and p_restituir is null then raise exception 'Infracción permanente: indica el plazo para restituir'; end if;
+  select * into pr from public.propuesta_multa(p_id, c.catalogo_id);
+  if pr.clp is null then raise exception 'Falta el valor de la % (Multas → Catálogo)', i.unidad; end if;
+  update public.infracciones set reincidencia = pr.reincidencia and p_reincidencia,
+    multa_monto = case when pr.reincidencia and p_reincidencia then pr.monto else i.monto end, multa_unidad = i.unidad,
+    restituir_antes = case when i.permanente then p_restituir end
+  where id = p_id;
+  perform privado.evento_infraccion(p_id, 'resolucion', 'Sanción. ' || trim(p_texto));
+  n := privado.multas_cfg(c.edificio_id, 'aprobaciones_comite', 1);
+  if n > 0 then
+    update public.infracciones set estado = 'en_comite', ronda = ronda + 1 where id = p_id;
+    perform privado.push(c.edificio_id, privado.usuarios_de(c.edificio_id, '{comite}'), '⚖️ Multa por aprobar: caso nº ' || c.folio, i.conducta, '#multas');
+  else
+    perform privado.aplicar_multa(p_id);
+  end if;
+end $$;
+
+create or replace function public.votar_multa(p_id uuid, p_aprueba boolean, p_comentario text default null) returns void
+language plpgsql security definer set search_path = public as $$
+declare c public.infracciones; n int; si int; no_ int;
+begin
+  select * into c from public.infracciones where id = p_id and edificio_id = public.mi_edificio() for update;
+  if not found or public.mi_rol() is distinct from 'comite' then raise exception 'Solo el comité aprueba multas'; end if;
+  if c.estado <> 'en_comite' then raise exception 'La multa no está esperando al comité'; end if;
+  if not p_aprueba and coalesce(trim(p_comentario), '') = '' then raise exception 'Indica el motivo del rechazo'; end if;
+  if exists (select 1 from public.infraccion_votos where infraccion_id = p_id and ronda = c.ronda and uid = auth.uid()) then raise exception 'Ya votaste esta multa'; end if;
+  insert into public.infraccion_votos (infraccion_id, edificio_id, ronda, aprueba, comentario) values (p_id, c.edificio_id, c.ronda, p_aprueba, nullif(trim(p_comentario), ''));
+  perform privado.evento_infraccion(p_id, 'voto', case when p_aprueba then 'Aprueba' else 'Rechaza: ' || trim(p_comentario) end);
+  n := privado.multas_cfg(c.edificio_id, 'aprobaciones_comite', 1);
+  select count(*) filter (where aprueba), count(*) filter (where not aprueba) into si, no_ from public.infraccion_votos where infraccion_id = p_id and ronda = c.ronda;
+  if si >= n then
+    perform privado.aplicar_multa(p_id);
+  elsif no_ >= n then
+    update public.infracciones set estado = 'cargos', multa_monto = null, multa_unidad = null, resolucion_texto = null, resuelto_at = null, resuelto_por = null, reincidencia = false
+    where id = p_id;
+    perform privado.push(c.edificio_id, privado.usuarios_de(c.edificio_id, '{admin}'), '⚖️ El comité no aprobó la multa del caso nº ' || c.folio, nullif(trim(p_comentario), ''), '#multas');
+  end if;
+end $$;
+
+create or replace function public.derivar_jpl(p_id uuid, p_nota text) returns void
+language plpgsql security definer set search_path = public as $$
+declare c public.infracciones;
+begin
+  select * into c from public.infracciones where id = p_id and edificio_id = public.mi_edificio() for update;
+  if not found or not public.es_admin() then raise exception 'No autorizado'; end if;
+  if c.estado not in ('abierto','cargos') then raise exception 'El caso ya está cerrado'; end if;
+  update public.infracciones set estado = 'derivado_jpl', resolucion_texto = nullif(trim(p_nota), ''), resuelto_at = now(), resuelto_por = auth.uid() where id = p_id;
+  perform privado.evento_infraccion(p_id, 'derivacion', coalesce(nullif(trim(p_nota), ''), 'Derivado al Juzgado de Policía Local.'));
+end $$;
+
+create or replace function public.archivar_infraccion(p_id uuid, p_motivo text) returns void
+language plpgsql security definer set search_path = public as $$
+declare c public.infracciones;
+begin
+  select * into c from public.infracciones where id = p_id and edificio_id = public.mi_edificio() for update;
+  if not found or not public.es_admin() then raise exception 'No autorizado'; end if;
+  if c.estado <> 'abierto' then raise exception 'Solo se archiva un caso sin cargos'; end if;
+  if coalesce(trim(p_motivo), '') = '' then raise exception 'Indica el motivo'; end if;
+  update public.infracciones set estado = 'archivado', resolucion_texto = trim(p_motivo), resuelto_at = now(), resuelto_por = auth.uid() where id = p_id;
+  perform privado.evento_infraccion(p_id, 'archivo', trim(p_motivo));
+end $$;
+
+create or replace function public.marcar_restituido(p_id uuid, p_fecha date, p_nota text default null) returns void
+language plpgsql security definer set search_path = public as $$
+declare c public.infracciones;
+begin
+  select * into c from public.infracciones where id = p_id and edificio_id = public.mi_edificio() for update;
+  if not found or not public.es_admin() or c.restituir_antes is null then raise exception 'No autorizado'; end if;
+  update public.infracciones set restituido_el = coalesce(p_fecha, public.hoy()) where id = p_id;
+  perform privado.evento_infraccion(p_id, 'restitucion', coalesce(nullif(trim(p_nota), ''), 'Restituido'));
+end $$;
+
+-- Infracciones permanentes sin restituir: la multa se repite cada mes (tarea diaria; una vez por período)
+create or replace function privado.multas_permanentes() returns int
+language plpgsql security definer set search_path = public as $$
+declare c record; per text; v numeric; n int := 0;
+begin
+  for c in select x.*, i.conducta from public.infracciones x join public.multas_catalogo i on i.id = x.catalogo_id
+           where x.estado = 'resuelto' and x.restituir_antes is not null and x.restituido_el is null loop
+    per := privado.periodo_abierto(c.edificio_id, to_char(public.hoy(), 'YYYY-MM'));
+    continue when exists (select 1 from public.cargos where infraccion_id = c.id and periodo >= per);
+    v := privado.indicador(c.edificio_id, c.multa_unidad, public.hoy());
+    continue when v is null;
+    insert into public.cargos (edificio_id, depto, periodo, tipo, descripcion, monto, infraccion_id)
+    values (c.edificio_id, c.depto, per, 'multa', 'Multa mensual caso nº ' || c.folio || ': ' || c.conducta, round(c.multa_monto * v), c.id);
+    perform privado.evento_infraccion(c.id, 'cobro', 'Multa mensual por infracción permanente sin restituir, en el gasto común de ' || per || '.');
+    n := n + 1;
+  end loop;
+  return n;
+end $$;
+
+-- Tareas diarias (pg_cron en Supabase; el servidor local llama a esta misma función)
+create or replace function privado.tareas_diarias() returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  begin perform privado.multas_permanentes(); exception when others then raise warning 'multas_permanentes: %', sqlerrm; end;
+  perform privado.depurar();
+end $$;
+
+-- Catálogo de ejemplo: el de Los Cactus (borrador de su reglamento, oct-2026). Hay que ajustarlo al reglamento propio.
+create or replace function public.cargar_catalogo_ejemplo() returns int
+language plpgsql security definer set search_path = public as $$
+declare e uuid := public.mi_edificio(); n int;
+begin
+  if not public.es_admin() then raise exception 'Solo administración'; end if;
+  if exists (select 1 from public.multas_catalogo where edificio_id = e) then raise exception 'El catálogo ya tiene conductas'; end if;
+  insert into public.multas_catalogo (edificio_id, conducta, articulo, categoria, monto, unidad, por_evento, permanente, jpl, evidencia, nota, plantilla)
+  select e, v.c, v.a, v.cat, v.m, v.u, v.pe, v.pm, v.j, v.ev, v.nt,
+    'Se le notifican cargos por: ' || lower(v.c) || ', conducta prohibida por el artículo ' || v.a || ' del reglamento de copropiedad. '
+    || '[Describa aquí los hechos: fecha, hora, lugar y evidencia.] La multa posible es '
+    || case when v.j then 'la que determine el Juzgado de Policía Local' else trim(to_char(v.m, 'FM990.##')) || ' ' || v.u end
+    || '. Puede presentar sus descargos dentro del plazo indicado en esta notificación. Infractor y propietario responden solidariamente.'
+  from (values
+    ('Ruidos de mascota persistentes', '15 nº 24', null, 1, 'UTM', false, false, false, 'Denuncia de 2 unidades, o 1 residente + constatación de conserjería', '2 UTM si reincide en 6 meses'),
+    ('Ataque de mascota con lesiones o daño a otro animal', '15 nº 24', null, 3, 'UTM', false, false, false, null, null),
+    ('Otras obligaciones de mascotas (correa, fecas, suelta)', '15 nº 24', null, 1, 'UTM', false, false, false, null, null),
+    ('Exceso de velocidad en estacionamientos', '15 nº 25', null, 1, 'UTM', false, false, false, null, null),
+    ('Mudanza sin cumplir requisitos', '15 nº 26', null, 3, 'UTM', false, false, false, null, null),
+    ('Sala de basura: envases sin lavar, cajas sin desarmar, bolsas fuera del ducto', '15 nº 28', null, 1, 'UTM', true, false, false, null, null),
+    ('Sala de basura: vidrios, aceite, pilas, escombros u otros', '15 nº 28', null, 3, 'UTM', true, false, false, null, 'Además debe retirar los residuos'),
+    ('Violencia contra personal, comité o administración', '15 nº 31', null, 3, 'UTM', false, false, false, null, null),
+    ('Uso indebido de estacionamiento de visita', '15', 'grave', 1, 'UTM', true, false, false, null, null),
+    ('Arriendo temporal menor a 30 días', '19', null, 3, 'UTM', true, false, false, null, 'Por cada arriendo'),
+    ('No actualizar el registro de copropietarios', '20', 'leve', 0.5, 'UTM', false, false, false, null, null),
+    ('Inasistencia injustificada a la asamblea', '49', null, 2, 'UF', false, false, false, 'Previo descargo', null),
+    ('Negarse a revisiones o certificaciones', '77', null, null, 'UTM', false, false, true, null, 'Juzgado de Policía Local'),
+    ('Obras, cierres o instalaciones no autorizadas en bienes comunes o fachada', '15', 'grave', 1, 'UTM', false, true, false, null, 'Se repite cada mes hasta restituir'),
+    ('Resto de prohibiciones del reglamento (ruidos, fachadas, etc.)', '15', 'grave', 1, 'UTM', false, false, false, null, null),
+    ('Otras obligaciones sin monto propio', 'varios', 'leve', 0.5, 'UTM', false, false, false, null, null)
+  ) as v(c, a, cat, m, u, pe, pm, j, ev, nt);
+  get diagnostics n = row_count;
+  return n;
+end $$;
 
 -- Lecturas: la anterior se completa sola con la última lectura de ese medidor y unidad. Una vez publicado
 -- el período, sus lecturas ya no cambian (para corregir, se despublica, se corrige y se recalcula).
@@ -1805,7 +2209,7 @@ end $$;
 -- Ejecución diaria con pg_cron (07:23 UTC, madrugada en Chile)
 do $$ begin
   create extension if not exists pg_cron;
-  perform cron.schedule('mi-edificio-depurar', '23 7 * * *', 'select privado.depurar()');
+  perform cron.schedule('mi-edificio-depurar', '23 7 * * *', 'select privado.tareas_diarias()');
 exception when others then
   raise notice 'pg_cron no disponible: el borrado por plazo solo corre con el botón "Aplicar ahora" de la administración';
 end $$;
@@ -1856,6 +2260,11 @@ alter table public.lecturas         enable row level security;
 alter table public.fondos           enable row level security;
 alter table public.fondo_movimientos enable row level security;
 alter table public.cargos           enable row level security;
+alter table public.indicadores      enable row level security;
+alter table public.multas_catalogo  enable row level security;
+alter table public.infracciones     enable row level security;
+alter table public.infraccion_eventos enable row level security;
+alter table public.infraccion_votos enable row level security;
 
 -- helper para (re)crear políticas sin errores. Salvo que se indique lo contrario, toda
 -- política queda además limitada a las filas del edificio del usuario.
@@ -2013,6 +2422,18 @@ select public._pol('fondo_movimientos','fm_del','delete','public.es_admin()');
 select public._pol('cargos','car_sel','select','public.mi_rol() in (''comite'',''admin'') or (public.es_residente() and depto = public.mi_depto())');
 select public._pol('cargos','car_ins','insert','public.es_admin()');
 select public._pol('cargos','car_upd','update','public.es_admin()');
+-- multas: catálogo e indicadores visibles para la comunidad; los casos, para administración y comité, para quien
+-- los abrió, y para la unidad una vez formulados los cargos. Los casos solo cambian por las funciones del procedimiento.
+select public._pol('indicadores','ind_sel','select','public.mi_rol() is not null');
+select public._pol('indicadores','ind_ins','insert','public.es_admin()');
+select public._pol('indicadores','ind_upd','update','public.es_admin()');
+select public._pol('indicadores','ind_del','delete','public.es_admin()');
+select public._pol('multas_catalogo','mc_sel','select','public.mi_rol() is not null and public.mi_rol() <> ''mantencion''');
+select public._pol('multas_catalogo','mc_ins','insert','public.es_admin()');
+select public._pol('multas_catalogo','mc_upd','update','public.es_admin()');
+select public._pol('infracciones','inf_sel','select','public.mi_rol() in (''comite'',''admin'') or creado_por = auth.uid() or (public.es_residente() and depto = public.mi_depto() and estado not in (''abierto'',''archivado''))');
+select public._pol('infraccion_eventos','ie_sel','select','exists (select 1 from public.infracciones i where i.id = infraccion_id)');
+select public._pol('infraccion_votos','iv_sel','select','public.mi_rol() in (''comite'',''admin'')');
 
 -- archivos_por_borrar: la administración los lee y los quita de la cola al borrarlos del bucket
 select public._pol('archivos_por_borrar','apb_sel','select','public.es_admin()');
@@ -2056,6 +2477,11 @@ begin
                          select 1 from jsonb_array_elements(i.historial) h where jsonb_typeof(h->'fotos') = 'array' and h->'fotos' ? p_name)))
       or (r = 'mantencion' and exists (select 1 from public.ot o where o.edificio_id = e and o.empresa_id = public.mi_empresa() and p_name = any(o.fotos_antes)));
   end if;
+  if c = 'multas' then
+    return r in ('comite','admin') or exists (select 1 from public.infracciones x where x.edificio_id = e
+      and (p_name = any(x.evidencias) or p_name = any(x.descargos_fotos))
+      and (x.creado_por = auth.uid() or (r in ('residente','propietario') and x.depto = public.mi_depto() and x.estado not in ('abierto','archivado'))));
+  end if;
   if c = 'ot' then
     return r in ('comite','admin') or (r = 'mantencion' and exists (
       select 1 from public.ot o where o.edificio_id = e and o.empresa_id = public.mi_empresa()
@@ -2079,7 +2505,7 @@ create policy "fotos_delete" on storage.objects for delete to authenticated usin
 do $$
 declare t text;
 begin
-  foreach t in array array['edificios','empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos']
+  foreach t in array array['edificios','empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos']
   loop
     begin
       execute format('alter publication supabase_realtime add table public.%I', t);

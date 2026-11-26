@@ -544,7 +544,7 @@ async function tareas() {
     const hoy = new Date(); const dia = diaLocal(hoy);
     if (dia !== CFG.diarioHecho && hoy.getHours() >= horaDiaria()) {
       CFG.diarioHecho = dia; guardarCfg();   // se anota antes: si algo falla no se reintenta cada 5 minutos
-      await db.query(`select privado.depurar()`);
+      await db.query(`select privado.tareas_diarias()`);
       const pend = await db.query(`delete from public.archivos_por_borrar returning path`);
       for (const x of pend.rows) { if (rutaValida(x.path)) { fs.rmSync(enDisco(x.path), { force: true }); await db.query(`delete from storage.objects where name = $1`, [x.path]); } }
       log('Respaldo diario:', await respaldar());
