@@ -409,3 +409,33 @@ select t.ok((select cuotas = 2 from public.unidades_morosas() where depto = '104
 select t.falla($$select public.proponer_suspension('104')$$, 'con el período excluido ya no alcanza el umbral');
 \echo 'OK: suspensión de luz'
 
+-- ---------- registro de copropietarios ----------
+select t.soy(:'a1');
+select t.ok(public.rut_normalizado('12.345.678-5') = '12345678-5' and public.rut_normalizado('12345678-9') is null and public.rut_normalizado('10.000.013-k') = '10000013-K', 'el RUT se normaliza y se valida el dígito verificador');
+select t.falla($$insert into registro_personas (depto, relacion, nombre, rut) values ('101', 'copropietario', 'Rita Rojas', '12345678-9')$$, 'RUT inválido');
+select t.falla($$insert into registro_personas (depto, relacion, nombre) values ('101', 'copropietario', 'Sin RUT')$$, 'copropietario sin RUT');
+select t.falla($$insert into registro_personas (depto, relacion, nombre, rut, persona_juridica) values ('101', 'copropietario', 'Inmobiliaria X', '76.086.428-5', true)$$, 'persona jurídica sin representante');
+insert into registro_personas (depto, relacion, nombre, rut, correo, domicilio) values ('101', 'copropietario', 'Rita Rojas', '12.345.678-5', 'RITA@correo.cl', 'Los Olmos 1234, depto 101');
+select t.ok((select prop = 'Rita Rojas' from unidades where depto = '101'), 'el nombre del copropietario se refleja en la unidad');
+select t.ok((select rut = '12345678-5' and correo = 'rita@correo.cl' from registro_personas where nombre = 'Rita Rojas'), 'RUT y correo quedan normalizados');
+select t.ok((select faltantes = '{}' and not confirmado from public.registro_estado() where depto = '101'), 'el 101 tiene lo mínimo, pero aún no confirma este año');
+select t.ok((select 'Sin copropietario registrado' = any(faltantes) from public.registro_estado() where depto = '103'), 'el 103 aparece sin copropietario');
+-- el propietario informa un arrendatario: queda pendiente
+select t.soy(:'a3');
+insert into registro_personas (depto, relacion, nombre, rut, correo, domicilio, arriendo_hasta, estado) values ('102', 'arrendatario', 'Ana Arriendo', '11.111.111-1', 'ana@correo.cl', 'Los Olmos 1234, depto 102', public.hoy() + 300, 'vigente') returning id as rp \gset
+select t.ok((select estado = 'pendiente' from registro_personas where id = :'rp'), 'lo que informa el propietario queda pendiente de revisión');
+select t.falla($$insert into registro_personas (depto, relacion, nombre) values ('101', 'ocupante', 'Intruso')$$, 'informar cambios de otra unidad');
+select t.falla(format($$delete from registro_personas where id = %L$$, :'rp'), 'borrar del registro');
+select t.soy(:'a2'); select t.ok((select count(*) = 0 from registro_personas where depto = '102'), 'otra unidad no ve el registro del 102');
+select t.soy(:'a1'); update registro_personas set estado = 'vigente' where id = :'rp';
+select t.soy(:'a3'); update registro_personas set hasta = public.hoy() where id = :'rp';
+select t.ok((select baja_solicitada and hasta is null from registro_personas where id = :'rp'), 'el propietario solo pide la baja; la aplica la administración');
+select public.confirmar_registro(false);
+select t.ok((select confirmado from public.registro_estado() where depto = '102') and (select not arrendatario_representa from unidades where depto = '102'), 'confirma el registro y declara que el arrendatario no lo representa');
+select t.soy(:'a1'); update registro_personas set hasta = public.hoy() where id = :'rp';
+select t.falla(format($$update registro_personas set hasta = null where id = %L$$, :'rp'), 'reabrir una relación terminada');
+select t.ok(public.requerir_registro() >= 1, 'requerimiento anual a los propietarios');
+select t.soy(:'a5'); select t.ok((select count(*) >= 2 from registro_personas), 'el comité ve el registro');
+select t.soy(:'a4'); select t.ok((select count(*) = 0 from registro_personas), 'conserjería no ve el registro');
+\echo 'OK: registro de copropietarios'
+

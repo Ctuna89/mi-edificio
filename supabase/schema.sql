@@ -56,6 +56,10 @@ alter table public.edificios add column if not exists seguros_obligatorios jsonb
 -- días corridos de aviso previo y períodos que no cuentan (estado de catástrofe).
 alter table public.edificios add column if not exists suspension jsonb not null default
   '{"umbral":3,"aprobaciones_comite":1,"dias_aviso":5,"periodos_excluidos":[]}'::jsonb;
+-- Módulos que usa el edificio: {modulo: 'on' | 'personal' (solo personal, para pilotear) | 'off'}; sin clave = activo
+alter table public.edificios add column if not exists modulos jsonb not null default '{}'::jsonb;
+-- Registro de copropietarios: días para informar cambios (Decreto 7, art. 5: 60) y año del último requerimiento anual
+alter table public.edificios add column if not exists registro jsonb not null default '{"plazo_dias":60}'::jsonb;
 alter table public.edificios add column if not exists mora_tasa numeric(6,3) not null default 0;   -- interés por mora, % mensual (0 = no se cobra)
 alter table public.edificios add column if not exists mora_desde date;                             -- la mora se cuenta desde esta fecha (o desde el vencimiento, si es posterior)
 alter table public.edificios drop column if exists codigo;   -- los códigos de invitación eran de la versión multi-edificio
@@ -126,6 +130,9 @@ create table if not exists public.unidades (
   prop      text default '',
   primary key (edificio_id, depto)
 );
+
+-- Si el arrendatario u ocupante representa al copropietario en asambleas cuando este no asiste ni da poder (Ley 21.442, art. 5)
+alter table public.unidades add column if not exists arrendatario_representa boolean not null default true;
 
 create table if not exists public.gastos (
   edificio_id uuid references public.edificios(id) on delete cascade,
@@ -777,6 +784,42 @@ create table if not exists public.suspension_eventos (
   ts          timestamptz default now()
 );
 
+-- Registro de Copropietarios, Arrendatarios y demás Ocupantes (Ley 21.442 y Decreto 7, arts. 5 a 7; adaptado de
+-- CactusOne). Lo mantiene la administración; cada copropietario informa los cambios de su unidad y confirma
+-- sus datos cada año. Es reservado: administración y comité, y cada unidad lo suyo.
+create table if not exists public.registro_personas (
+  id          uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  depto       text not null,
+  relacion    text not null check (relacion in ('copropietario','arrendatario','ocupante')),
+  nombre      text not null,
+  rut         text,                         -- normalizado 12345678-5; no se pide a menores
+  menor       boolean not null default false,
+  domicilio   text default '',
+  correo      text default '',              -- domicilio para citaciones y notificaciones
+  permanente  boolean not null default true, -- ocupante permanente (30 días o más) o transitorio
+  arriendo_hasta date,
+  persona_juridica boolean not null default false,
+  representante text default '',           -- representante legal, si es persona jurídica
+  uid         uuid references public.usuarios(id) on delete set null,
+  estado      text not null default 'vigente' check (estado in ('pendiente','vigente','rechazado')),
+  motivo      text,
+  baja_solicitada boolean not null default false,
+  desde       date not null default current_date,
+  hasta       date,                         -- fin de la relación (venta, término de arriendo): el historial queda
+  creado_por  uuid default auth.uid(),
+  ts          timestamptz default now()
+);
+create table if not exists public.registro_confirmaciones (
+  id          uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  depto       text not null,
+  anio        int not null,
+  uid         uuid not null default auth.uid(),
+  ts          timestamptz default now(),
+  unique (edificio_id, depto, anio)
+);
+
 -- Archivos de filas borradas por plazo de conservación, pendientes de eliminar del bucket.
 -- Los elimina la app de la administración (la base de datos no puede borrar archivos de Storage).
 create table if not exists public.archivos_por_borrar (
@@ -815,7 +858,7 @@ begin
   end if;
 
   select id into def from public.edificios order by creado, id limit 1;
-  foreach t in array array['empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos']
+  foreach t in array array['empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones']
   loop
     execute format('alter table public.%I add column if not exists edificio_id uuid references public.edificios(id) on delete cascade', t);
     execute format('select count(*) from public.%I where edificio_id is null', t) into n;
@@ -928,7 +971,7 @@ $$;
 do $$
 declare t text;
 begin
-  foreach t in array array['empresas','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos']
+  foreach t in array array['empresas','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones']
   loop
     execute format('alter table public.%I alter column edificio_id set default public.mi_edificio()', t);
   end loop;
@@ -1654,7 +1697,7 @@ declare t text;
 begin
   -- tablas con datos personales o de dinero (no los votos: el voto de un sondeo es secreto)
   foreach t in array array['edificios','usuarios','contactos','unidades','gastos','pagos','convenios','cargos','caja_movimientos','fondos','fondo_movimientos',
-                           'lecturas','multas_catalogo','indicadores','consentimientos','solicitudes_datos','estacionamientos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones'] loop
+                           'lecturas','multas_catalogo','indicadores','consentimientos','solicitudes_datos','estacionamientos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','registro_personas','registro_confirmaciones'] loop
     execute format('drop trigger if exists %I on public.%I', t || '_auditoria', t);
     execute format('create trigger %I after insert or update or delete on public.%I for each row execute function privado.auditar()', t || '_auditoria', t);
   end loop;
@@ -2076,6 +2119,134 @@ begin
   if coalesce(trim(p_motivo), '') = '' then raise exception 'Indica el motivo'; end if;
   update public.suspensiones set estado = 'cancelada', motivo_cierre = trim(p_motivo) where id = p_id;
   perform privado.evento_susp(p_id, 'cancelacion', trim(p_motivo));
+end $$;
+
+-- ---------- Registro de copropietarios ----------
+-- RUT chileno: normaliza a 12345678-5 y valida el dígito verificador (módulo 11)
+create or replace function public.rut_normalizado(p text) returns text
+language plpgsql immutable as $$
+declare t text := upper(regexp_replace(coalesce(p, ''), '[^0-9kK]', '', 'g')); cuerpo text; dv text; suma int := 0; m int := 2; r int; esp text;
+begin
+  if length(t) < 2 then return null; end if;
+  cuerpo := left(t, -1); dv := right(t, 1);
+  if cuerpo !~ '^\d+$' then return null; end if;
+  for i in reverse length(cuerpo)..1 loop suma := suma + substr(cuerpo, i, 1)::int * m; m := case when m = 7 then 2 else m + 1 end; end loop;
+  r := 11 - (suma % 11); esp := case r when 11 then '0' when 10 then 'K' else r::text end;
+  if esp <> dv then return null; end if;
+  return ltrim(cuerpo, '0') || '-' || dv;
+end $$;
+
+create or replace function public.registro_antes() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare adm boolean := auth.uid() is null or public.es_admin();
+begin
+  if tg_op = 'DELETE' then raise exception 'El registro no se borra: indica el término de la relación'; end if;
+  new.nombre := trim(new.nombre); new.correo := lower(trim(coalesce(new.correo, ''))); new.domicilio := trim(coalesce(new.domicilio, ''));
+  if new.nombre = '' then raise exception 'Indica el nombre'; end if;
+  if not new.menor and new.relacion <> 'ocupante' and coalesce(trim(new.rut), '') = '' then raise exception 'Indica el RUT de %', new.nombre; end if;
+  if coalesce(trim(new.rut), '') <> '' then
+    if new.menor then raise exception 'A los menores no se les registra RUT'; end if;
+    new.rut := public.rut_normalizado(new.rut);
+    if new.rut is null then raise exception 'El RUT de % no es válido', new.nombre; end if;
+  else new.rut := null;
+  end if;
+  if new.correo <> '' and new.correo !~ '^[^@\s]+@[^@\s]+\.[^@\s]+$' then raise exception 'El correo de % no es válido', new.nombre; end if;
+  if new.persona_juridica and coalesce(trim(new.representante), '') = '' then raise exception 'Indica el representante legal de %', new.nombre; end if;
+  if tg_op = 'INSERT' then
+    if not exists (select 1 from public.unidades where edificio_id = new.edificio_id and depto = new.depto) then raise exception 'La unidad % no existe', new.depto; end if;
+    if not adm then
+      -- el copropietario informa altas de su unidad; la administración las revisa y aplica
+      if public.mi_rol() is distinct from 'propietario' or new.depto is distinct from public.mi_depto() then raise exception 'Solo los propietarios informan cambios de su unidad'; end if;
+      new.estado := 'pendiente'; new.motivo := null; new.hasta := null; new.baja_solicitada := false;
+    end if;
+    new.creado_por := auth.uid(); new.ts := now();
+    return new;
+  end if;
+  new.depto := old.depto; new.creado_por := old.creado_por; new.ts := old.ts;
+  if not adm then
+    -- quien figura en el registro puede corregir su propio contacto; el copropietario solo puede pedir la baja
+    if old.uid = auth.uid() then
+      new.relacion := old.relacion; new.estado := old.estado; new.hasta := old.hasta; new.desde := old.desde; new.rut := old.rut; new.nombre := old.nombre; new.uid := old.uid;
+    elsif public.mi_rol() = 'propietario' and old.depto = public.mi_depto() then
+      new := old; new.baja_solicitada := true;
+    else raise exception 'No autorizado';
+    end if;
+  elsif new.estado = 'rechazado' and old.estado <> 'rechazado' and coalesce(trim(new.motivo), '') = '' then raise exception 'Indica el motivo del rechazo';
+  end if;
+  if old.hasta is not null and new.hasta is null then raise exception 'Una relación terminada no se reabre: registra una nueva'; end if;
+  if new.hasta is not null then new.baja_solicitada := false; end if;
+  return new;
+end $$;
+drop trigger if exists registro_antes on public.registro_personas;
+create trigger registro_antes before insert or update or delete on public.registro_personas for each row execute function public.registro_antes();
+
+-- El nombre de los copropietarios vigentes se refleja en la unidad (lo usan prorrateos, avisos y exportaciones)
+create or replace function privado.tg_registro_prop() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare n text;
+begin
+  select string_agg(nombre, ', ' order by desde, nombre) into n from public.registro_personas
+  where edificio_id = new.edificio_id and depto = new.depto and relacion = 'copropietario' and estado = 'vigente' and hasta is null;
+  if n is not null then update public.unidades set prop = n where edificio_id = new.edificio_id and depto = new.depto and prop is distinct from n; end if;
+  if tg_op = 'INSERT' and new.estado = 'pendiente' then
+    perform privado.push(new.edificio_id, privado.usuarios_de(new.edificio_id, '{admin}'), '📇 Cambio en el registro por revisar', 'Depto ' || new.depto || ': ' || new.nombre || ' (' || new.relacion || ')', '#registro');
+  elsif tg_op = 'UPDATE' and new.baja_solicitada and not old.baja_solicitada then
+    perform privado.push(new.edificio_id, privado.usuarios_de(new.edificio_id, '{admin}'), '📇 Baja informada en el registro', 'Depto ' || new.depto || ': ' || new.nombre, '#registro');
+  end if;
+  return null;
+end $$;
+drop trigger if exists registro_prop on public.registro_personas;
+create trigger registro_prop after insert or update on public.registro_personas for each row execute function privado.tg_registro_prop();
+
+-- Lo que le falta al registro de cada unidad (contenido mínimo del Decreto 7, art. 6) y si se confirmó este año
+create or replace function public.registro_estado() returns table (depto text, faltantes text[], confirmado boolean, pendientes int)
+language sql stable security definer set search_path = public as $$
+  select u.depto,
+    array_remove(array[
+      case when not exists (select 1 from public.registro_personas r where r.edificio_id = u.edificio_id and r.depto = u.depto and r.relacion = 'copropietario' and r.estado = 'vigente' and r.hasta is null) then 'Sin copropietario registrado' end,
+      case when exists (select 1 from public.registro_personas r where r.edificio_id = u.edificio_id and r.depto = u.depto and r.estado = 'vigente' and r.hasta is null and r.relacion in ('copropietario','arrendatario') and (coalesce(r.correo, '') = '' or coalesce(r.domicilio, '') = '')) then 'Falta correo o domicilio' end,
+      case when exists (select 1 from public.registro_personas r where r.edificio_id = u.edificio_id and r.depto = u.depto and r.estado = 'vigente' and r.hasta is null and r.relacion = 'arrendatario' and r.arriendo_hasta is not null and r.arriendo_hasta < public.hoy()) then 'Arriendo vencido sin actualizar' end
+    ], null),
+    exists (select 1 from public.registro_confirmaciones c where c.edificio_id = u.edificio_id and c.depto = u.depto and c.anio = extract(year from public.hoy())::int),
+    (select count(*)::int from public.registro_personas r where r.edificio_id = u.edificio_id and r.depto = u.depto and (r.estado = 'pendiente' or (r.baja_solicitada and r.hasta is null)))
+  from public.unidades u
+  where u.edificio_id = public.mi_edificio() and (public.mi_rol() in ('comite','admin') or (public.es_residente() and u.depto = public.mi_depto()))
+  order by u.depto
+$$;
+
+-- Confirmación anual del copropietario: su declaración de que los datos de la unidad están al día
+create or replace function public.confirmar_registro(p_arrendatario_representa boolean default null) returns void
+language plpgsql security definer set search_path = public as $$
+declare e uuid := public.mi_edificio(); d text := public.mi_depto();
+begin
+  if public.mi_rol() is distinct from 'propietario' or coalesce(d, '') = '' then raise exception 'Solo los propietarios confirman el registro de su unidad'; end if;
+  insert into public.registro_confirmaciones (edificio_id, depto, anio) values (e, d, extract(year from public.hoy())::int)
+  on conflict (edificio_id, depto, anio) do update set ts = now(), uid = auth.uid();
+  if p_arrendatario_representa is not null then
+    update public.unidades set arrendatario_representa = p_arrendatario_representa where edificio_id = e and depto = d;
+    perform privado.push(e, privado.usuarios_de(e, '{admin,comite}'), '📇 Representación en asambleas', 'Depto ' || d || ': el arrendatario u ocupante ' ||
+      case when p_arrendatario_representa then 'puede' else 'no puede' end || ' representar al copropietario.', '#registro');
+  end if;
+end $$;
+
+-- Exportar el registro completo queda en la bitácora (es un registro reservado)
+create or replace function public.registrar_exportacion(p_que text) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  if public.mi_rol() is null or public.mi_rol() not in ('comite','admin') then raise exception 'No autorizado'; end if;
+  insert into public.auditoria (edificio_id, accion, tabla, registro, motivo) values (public.mi_edificio(), 'consultar', 'registro_personas', 'exportación', left(coalesce(p_que, ''), 200));
+end $$;
+
+-- Requerimiento anual a todos los copropietarios (Decreto 7, art. 5)
+create or replace function public.requerir_registro() returns int
+language plpgsql security definer set search_path = public as $$
+declare e uuid := public.mi_edificio(); u uuid[];
+begin
+  if not public.es_admin() then raise exception 'Solo administración'; end if;
+  u := privado.usuarios_de(e, '{propietario}');
+  update public.edificios set registro = registro || jsonb_build_object('requerido', public.hoy()) where id = e;
+  perform privado.push(e, u, '📇 Actualiza el registro de tu unidad', 'Revisa los datos de copropietarios, arrendatarios y ocupantes y confírmalos (Ley de Copropiedad).', '#registro');
+  return coalesce(cardinality(u), 0);
 end $$;
 
 -- ---------- Multas con debido proceso ----------
@@ -2908,6 +3079,8 @@ alter table public.condiciones_especiales enable row level security;
 alter table public.suspensiones     enable row level security;
 alter table public.suspension_votos enable row level security;
 alter table public.suspension_eventos enable row level security;
+alter table public.registro_personas enable row level security;
+alter table public.registro_confirmaciones enable row level security;
 
 -- helper para (re)crear políticas sin errores. Salvo que se indique lo contrario, toda
 -- política queda además limitada a las filas del edificio del usuario.
@@ -3101,6 +3274,11 @@ select public._pol('condiciones_especiales','ce_sel','select','public.es_admin()
 -- suspensiones: administración y comité; la unidad, desde el aviso previo
 select public._pol('suspensiones','su_sel','select','public.mi_rol() in (''comite'',''admin'') or (public.es_residente() and depto = public.mi_depto() and estado in (''avisada'',''solicitada'',''suspendida'',''por_reponer'',''repuesta''))');
 select public._pol('suspension_votos','sv_sel','select','public.mi_rol() in (''comite'',''admin'')');
+-- registro de copropietarios: reservado (administración y comité); cada unidad ve lo suyo
+select public._pol('registro_personas','rp_sel','select','public.mi_rol() in (''comite'',''admin'') or (public.es_residente() and depto = public.mi_depto())');
+select public._pol('registro_personas','rp_ins','insert','public.es_admin() or (public.mi_rol() = ''propietario'' and depto = public.mi_depto())');
+select public._pol('registro_personas','rp_upd','update','public.es_admin() or uid = auth.uid() or (public.mi_rol() = ''propietario'' and depto = public.mi_depto())');
+select public._pol('registro_confirmaciones','rc_sel','select','public.mi_rol() in (''comite'',''admin'') or (public.es_residente() and depto = public.mi_depto())');
 select public._pol('suspension_eventos','se_sel','select','exists (select 1 from public.suspensiones x where x.id = suspension_id)');
 
 -- archivos_por_borrar: la administración los lee y los quita de la cola al borrarlos del bucket
@@ -3176,7 +3354,7 @@ create policy "fotos_delete" on storage.objects for delete to authenticated usin
 do $$
 declare t text;
 begin
-  foreach t in array array['edificios','empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos']
+  foreach t in array array['edificios','empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones']
   loop
     begin
       execute format('alter publication supabase_realtime add table public.%I', t);

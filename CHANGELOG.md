@@ -2,6 +2,8 @@
 
 ## Sin publicar
 
+- **Registro de copropietarios, arrendatarios y ocupantes** (Ley 21.442 y Decreto 7; adaptado de CactusOne): RUT validado, correo para notificaciones, permanencia y arriendo; los propietarios informan cambios y confirman cada año; requerimiento anual, panel de faltantes, exportación registrada y declaración de representación en asambleas.
+- **Módulos activables**: cada módulo opcional puede estar activo, solo para el personal o apagado.
 - **Suspensión de luz por morosidad** (adaptado de CactusOne): solo con 3 o más cuotas de gasto común impagas, nunca a unidades con electrodependientes u oxígeno medicinal, con aprobación del comité, aviso previo de 5 días corridos y reposición al día hábil siguiente del pago o convenio; avisos y cartas imprimibles. **Registro reservado de condiciones especiales** con consentimiento expreso, consultable por conserjería en emergencias con motivo registrado.
 - **Seguros** (adaptado de CactusOne): pólizas del edificio con alerta si falta la de incendio obligatoria, avisos a 60, 30 y 15 días y cada día la última semana, y registro de siniestros; documentos de cada unidad (póliza propia, certificado de dominio) revisados por la administración, con panel de cumplimiento y aviso al propietario 30 días antes del vencimiento.
 - **Ley 21.719 de datos personales** (adaptado de CactusOne): bitácora de auditoría que no se puede modificar, teléfonos visibles solo para la persona y la administración (conserjería y comité los consultan con un motivo registrado), consentimientos con el texto aceptado, y solicitudes de acceso, rectificación, supresión, oposición, portabilidad o bloqueo con plazo de 30 días.

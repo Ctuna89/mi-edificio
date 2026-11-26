@@ -213,6 +213,20 @@ Cada ítem se redondea al peso y la diferencia de redondeo se asigna a las unida
 
 **Cargos individuales.** Multas, arriendo de espacios comunes y otros cobros a una unidad se registran en Finanzas → Cargos y **se suman al gasto común de esa unidad** en el período indicado (por defecto, el primero sin publicar; no se pueden agregar a uno publicado). El **arriendo** se carga solo al aprobarse la reserva de un espacio con costo, y se anula solo si la reserva se cancela. Desde Estacionamientos → Excedidos se puede **cursar una multa** con los datos del uso. Un cargo no se borra: se **rebaja o se anula (condonación) con un motivo**, y queda el registro de multas condonadas o rebajadas.
 
+## Registro de copropietarios
+
+La Ley 21.442 y su reglamento (Decreto 7, arts. 5 a 7) exigen un **Registro de Copropietarios, Arrendatarios y demás Ocupantes**. En el módulo **Registro**:
+
+- Por cada unidad: copropietarios, arrendatarios y ocupantes con nombre, RUT (validado, sin guardar copia de la cédula), correo (el domicilio para citaciones y notificaciones), domicilio, si es ocupante permanente o transitorio, vigencia del arriendo y, si es una empresa, su representante legal. A los menores no se les pide RUT.
+- La administración lo mantiene. Los propietarios **informan los cambios** de su unidad desde la app (quedan por revisar) y **confirman los datos una vez al año**; la administración envía el requerimiento anual con un botón y ve qué unidades confirmaron y a cuáles les falta información.
+- Nada se borra: al vender o terminar un arriendo se registra la fecha de término y el historial queda.
+- El propietario puede declarar que su arrendatario u ocupante **no** lo representa en asambleas (por ley lo representa si el dueño no asiste ni da poder).
+- Es reservado: lo ven la administración y el comité, y cada unidad lo suyo. La exportación a Excel queda en la bitácora. El nombre de los copropietarios vigentes se usa automáticamente en el resto de la app.
+
+## Módulos activables
+
+En Administración → Edificio → **Módulos**, cada módulo opcional puede quedar activo, **solo para el personal** (para probarlo antes de abrirlo a los residentes) o **apagado**. Apagar no borra datos. Inicio, Gastos comunes, Finanzas, Administración y Mi cuenta siempre están. Es un ajuste de la interfaz: los permisos de cada dato siguen en la base de datos.
+
 ## Suspensión de luz por morosidad
 
 La Ley 21.442 (art. 20 nº 9) permite suspender o pedir la suspensión del suministro eléctrico de una unidad con deuda de gastos comunes, y los tribunales han anulado cortes que no cumplieron cada requisito. En Finanzas → **Suspensión de luz** la app detecta y prepara, pero **nunca corta sola**, y la base de datos exige cada resguardo:

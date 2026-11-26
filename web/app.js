@@ -161,6 +161,7 @@ const MODULES = [
   {id:'visitas', ic:'🚪', t:'Visitas', d:'Anunciar y registrar', roles:['residente','propietario','conserje','admin']},
   {id:'estacionamientos', ic:'🅿️', t:'Estacionamientos', d:'Visitas: ocupación y tiempos', roles:['conserje','comite','admin']},
   {id:'lecturas', ic:'🔢', t:'Lecturas', d:'Medidores de agua caliente, calefacción…', roles:['conserje','comite','admin']},
+  {id:'registro', ic:'📇', t:'Registro', d:'Copropietarios, arrendatarios y ocupantes', roles:['residente','propietario','comite','admin']},
   {id:'seguros', ic:'🛡️', t:'Seguros', d:'Pólizas del edificio y de cada unidad', roles:['propietario','comite','admin']},
   {id:'multas', ic:'⚖️', t:'Multas', d:'Casos de infracción: cargos, descargos y resolución', roles:['residente','propietario','conserje','comite','admin']},
   {id:'documentos', ic:'📁', t:'Documentos', d:'Reglamento, actas, balances', roles:['residente','propietario','conserje','comite','admin']},
@@ -169,6 +170,12 @@ const MODULES = [
   {id:'admin', ic:'⚙️', t:'Administración', d:'Edificio, usuarios, espacios', roles:['admin']},
   {id:'perfil', ic:'👤', t:'Mi cuenta', d:'Datos y cerrar sesión', roles:Object.keys(ROLES)},
 ];
+// Módulos activables por edificio (adaptado de CactusOne): la administración apaga los que no usa, o los deja
+// solo para el personal mientras los prueba. Los básicos siempre están.
+const MOD_BASICOS=['inicio','perfil','admin','gastos','finanzas'];
+const modEstado=id=>MOD_BASICOS.includes(id)?'on':((S.cfg?.modulos||{})[id]||'on');
+const modAbierto=(id,r=role())=>{ const e=modEstado(id); return e==='on'||(e==='personal'&&['conserje','comite','admin','mantencion'].includes(r)); };
+const puedeVer=(m,r=role())=>m.roles.includes(r)&&modAbierto(m.id,r);
 const BOTTOM = { residente:['inicio','gastos','reservas','incidencias','mensajes'], propietario:['inicio','gastos','reservas','incidencias','mensajes'], conserje:['inicio','rondas','incidencias','encomiendas','mensajes'], comite:['inicio','gastos','incidencias','mensajes','mantencion'], admin:['inicio','incidencias','mensajes','mantencion','admin'], mantencion:['inicio','mantencion','comunicados','perfil'] };
 
 // ---------- notificaciones push ----------
@@ -235,7 +242,7 @@ async function start(){
   watch('estacionamientos', ()=>q(T('estacionamientos').select('*')), rows=>{ S.estac={}; rows.forEach(u=>S.estac[u.id]=u); refreshView(); }, {global:true, silent:true});
 }
 function meKey(){ const m=S.me||{}; return [m.edificio_id,m.rol,m.estado,m.nombre,m.depto,m.empresa_id].join('|'); }
-function cfgKey(){ const c=S.cfg||{}; return [c.id,c.nombre,c.direccion,c.logo,c.color,JSON.stringify(c.espacios||[]),JSON.stringify(c.medidores||[])].join('|'); }
+function cfgKey(){ const c=S.cfg||{}; return [c.id,c.nombre,c.direccion,c.logo,c.color,JSON.stringify(c.espacios||[]),JSON.stringify(c.medidores||[]),JSON.stringify(c.modulos||{})].join('|'); }
 function gate(){ if(S.ready) return; if(!S.cfgLoaded || !S.meLoaded) return; S.ready=true; routeNow(); pushSync(); limpiarArchivos(); }
 // Borra del bucket los archivos de filas eliminadas por plazo de conservación (solo administración)
 async function limpiarArchivos(){ try{ if(realRole()!=='admin' || S.me.estado!=='activo') return; const rows=await q(T('archivos_por_borrar').select('id,path').limit(500)); if(!rows.length) return; await sb.storage.from('fotos').remove(rows.map(r=>r.path)); await q(T('archivos_por_borrar').delete().in('id',rows.map(r=>r.id))); }catch(e){ console.warn('limpiarArchivos',e); } }
@@ -249,7 +256,7 @@ function routeNow(){
   if(!S.me) return viewCrearPerfil();
   if(S.me.estado!=='activo') return render(shellLess(`<div class="card"><h3>${S.me.estado==='pendiente'?'Solicitud enviada':'Acceso bloqueado'}</h3><p>Hola ${esc(S.me.nombre)}. ${S.me.estado==='pendiente'?`Tu acceso para ${esc(S.me.depto||'el edificio')} está <b>pendiente de aprobación</b> por la administración.`:'Tu cuenta fue bloqueada por la administración.'}</p><button class="btn sec" id="out">Cerrar sesión</button></div>`), $('#out').addEventListener('click',()=>salir()));
   const h=(location.hash||'#inicio').replace('#',''); const [v,p]=h.split('--');
-  const mod=MODULES.find(m=>m.id===v && m.roles.includes(role()));
+  const mod=MODULES.find(m=>m.id===v && puedeVer(m));
   currentView = mod? v : 'inicio'; currentParam=p||null;
   renderShell();
   VIEWS[currentView](currentParam);
@@ -271,9 +278,9 @@ function shellLess(inner){ return `<div style="max-width:560px;margin:40px auto;
 function logoHtml(){ return S.cfg?.logo? `<img data-f="${esc(S.cfg.logo)}" alt="">` : esc((S.cfg?.nombre||'E').trim()[0]||'E').toUpperCase(); }
 function updateBrand(){ $$('.brand b, header.top .t b').forEach(b=>b.textContent=S.cfg?.nombre||''); $$('.brand small').forEach(s=>s.textContent=S.cfg?.direccion||''); $$('.brand .logo, header.top .logo').forEach(l=>l.innerHTML=logoHtml()); }
 function renderShell(){
-  const r=role(); const mods=MODULES.filter(m=>m.roles.includes(r));
+  const r=role(); const mods=MODULES.filter(m=>puedeVer(m,r));
   const side = mods.map(m=>`<a href="#${m.id}" class="${currentView===m.id?'on':''}"><span class="ic">${m.ic}</span>${m.t}</a>`).join('');
-  const bot = (BOTTOM[r]||['inicio']).map(id=>{const m=MODULES.find(x=>x.id===id); return m?`<a href="#${m.id}" class="${currentView===m.id?'on':''}"><span class="ic">${m.ic}</span>${m.t.split(' ')[0]}</a>`:'';}).join('');
+  const bot = (BOTTOM[r]||['inicio']).map(id=>{const m=MODULES.find(x=>x.id===id&&puedeVer(x,r)); return m?`<a href="#${m.id}" class="${currentView===m.id?'on':''}"><span class="ic">${m.ic}</span>${m.t.split(' ')[0]}</a>`:'';}).join('');
   const sel=id=>`<select id="${id}" style="width:auto;padding:6px 8px;font-size:12px">${Object.entries(ROLES).map(([k,v])=>`<option value="${k}" ${role()===k?'selected':''}>${v}</option>`).join('')}</select>`;
   render(`
   <nav class="side"><div class="brand"><div class="logo">${logoHtml()}</div><div><b>${esc(S.cfg?.nombre||'')}</b><small>${esc(S.cfg?.direccion||'')}</small></div></div>${side}<div class="sp"></div>${realRole()==='admin'?`<div style="padding:10px"><label class="f"><span>Ver como (vista de prueba)</span>${sel('verComo')}</label></div>`:''}<div style="padding:10px;font-size:12px;color:var(--mu)">${esc(S.me.nombre)}${S.me.depto?' · '+esc(S.me.depto):''}<br><span class="pill mu">${ROLES[r]}</span></div></nav>
@@ -377,13 +384,13 @@ function inicioEstado(r){
   const lecturasFaltan=async per=>{ if(!mds.length) return []; const l=await q(T('lecturas').select('medidor,depto').eq('periodo',per)).catch(()=>[]); return mds.map(md=>({md, n:l.filter(x=>x.medidor===md.id&&S.unidades[x.depto]).length})).filter(x=>x.n<nU()); };
   if(['residente','propietario'].includes(r)){
     if(!dep) return;
-    watch(['gastos','gasto_unidades','pagos','convenios','encomiendas','conversaciones','encuestas','votos','reservas','infracciones','unidad_documentos','suspensiones'], async()=>{
-      const [D,enc,msj,encs,votos,res,infs,udocs,sps]=await Promise.all([finDatos(dep).catch(()=>null), cuenta(q(T('encomiendas').select('id').eq('depto',dep).eq('entregado',false))), cuenta(q(T('conversaciones').select('id').eq('depto',dep).eq('no_leido_residente',true))),
+    watch(['gastos','gasto_unidades','pagos','convenios','encomiendas','conversaciones','encuestas','votos','reservas','infracciones','unidad_documentos','suspensiones','registro_confirmaciones'], async()=>{
+      const [D,enc,msj,encs,votos,res,infs,udocs,sps,regs]=await Promise.all([finDatos(dep).catch(()=>null), cuenta(q(T('encomiendas').select('id').eq('depto',dep).eq('entregado',false))), cuenta(q(T('conversaciones').select('id').eq('depto',dep).eq('no_leido_residente',true))),
         q(T('encuestas').select('id,cierra,solo_propietarios').eq('estado','abierta')).catch(()=>[]), q(T('votos').select('encuesta_id').eq('depto',dep)).catch(()=>[]),
         q(T('reservas').select('*').eq('depto',dep).gte('fecha',hoy).order('fecha',{ascending:true})).catch(()=>[]), q(T('infracciones').select('id,estado,descargos_hasta,descargos_at')).catch(()=>[]),
-        r==='propietario'?q(T('unidad_documentos').select('*').order('ts',{ascending:false})).catch(()=>[]):[], q(T('suspensiones').select('*')).catch(()=>[])]);
-      return {D,enc,msj,encs,votos,res,infs,udocs,sps}; },
-    ({D,enc,msj,encs,votos,res,infs,udocs,sps})=>{
+        r==='propietario'?q(T('unidad_documentos').select('*').order('ts',{ascending:false})).catch(()=>[]):[], q(T('suspensiones').select('*')).catch(()=>[]), r==='propietario'?q(sb.rpc('registro_estado')).catch(()=>[]):[]]);
+      return {D,enc,msj,encs,votos,res,infs,udocs,sps,regs}; },
+    ({D,enc,msj,encs,votos,res,infs,udocs,sps,regs})=>{
       const spA=(sps||[]).find(x=>['avisada','solicitada','suspendida','por_reponer'].includes(x.estado));
       const ultPol=(udocs||[]).filter(x=>x.tipo==='poliza_incendio')[0], polAviso=ultPol&&(ultPol.estado==='rechazado'||(ultPol.estado==='aceptado'&&ultPol.vence&&diasA(ultPol.vence)<=30)); const el=$('#homeEstado'); if(!el) return;
       const z=D?.U[dep], pubs=(D?.gastos||[]).filter(g=>g.publicado).sort((a,b)=>a.periodo<b.periodo?1:-1), g=pubs[0], mio=g&&z?.rows.find(x=>x.periodo===g.periodo);
@@ -396,14 +403,15 @@ function inicioEstado(r){
           ${otros>0?`<div class="note" style="margin:10px 0 0">Además tienes ${clp(otros)} pendientes de meses anteriores${z?.interes?' e intereses por mora':''}. Total por pagar: <b>${clp(total)}</b>.</div>`:''}
           <div class="row wrap" style="margin-top:12px;gap:8px"><a class="btn" href="#gastos">Ver desglose</a>${S.cfg?.datos_bancarios&&!mio.pagado?'<a class="btn sec" href="#gastos">Datos para transferir</a>':''}</div></div>`
         :`<div class="card resumen"><div class="small muted">Gastos comunes · Depto ${esc(dep)}</div><div style="margin-top:6px">${total>0?`Tienes ${clp(total)} por pagar. <a href="#gastos">Ver detalle</a>`:'Aún no hay un período de gastos comunes publicado.'}</div></div>`;
-      const items=[spA?fila('⚡',spA.estado==='por_reponer'?'Se repondrá tu suministro eléctrico':spA.estado==='avisada'?'Aviso previo de suspensión de luz':'Suministro eléctrico suspendido','#gastos','er',spA.estado==='por_reponer'?'A más tardar el '+fmtDay(spA.reponer_antes):spA.estado==='avisada'?`Por ${spA.cuotas} cuotas impagas, desde el ${fmtDay(spA.fecha_prevista)}. Regulariza con un pago o un convenio.`:'Regulariza con un pago o un convenio para reponerlo.'):'', polAviso?fila('🛡️',ultPol.estado==='rechazado'?'Tu póliza de incendio fue rechazada':'Tu póliza de incendio vence pronto','#seguros',ultPol.estado==='rechazado'?'er':'wa',ultPol.estado==='rechazado'?(ultPol.motivo||''):'Vence el '+fmtDay(ultPol.vence)+'. Sube la renovación.'):'', cargosInf.length?fila(cargosInf.length,cargosInf.length===1?'Notificación de cargos':'Notificaciones de cargos','#multas','er','Puedes presentar descargos hasta el '+fmtDay(cargosInf[0].descargos_hasta)):'', conv?fila(conv,'Convenio de pago por revisar','#gastos','wa','La administración te propuso un convenio'):'', enc?fila(enc,enc===1?'Encomienda por retirar':'Encomiendas por retirar','#encomiendas','in','En conserjería'):'',
+      const regPend=r==='propietario'&&modAbierto('registro')&&regs&&regs[0]&&!regs[0].confirmado;
+      const items=[regPend?fila('📇','Confirma el registro de tu unidad','#registro','wa','Revisa los datos de copropietarios, arrendatarios y ocupantes (una vez al año)'):'', spA?fila('⚡',spA.estado==='por_reponer'?'Se repondrá tu suministro eléctrico':spA.estado==='avisada'?'Aviso previo de suspensión de luz':'Suministro eléctrico suspendido','#gastos','er',spA.estado==='por_reponer'?'A más tardar el '+fmtDay(spA.reponer_antes):spA.estado==='avisada'?`Por ${spA.cuotas} cuotas impagas, desde el ${fmtDay(spA.fecha_prevista)}. Regulariza con un pago o un convenio.`:'Regulariza con un pago o un convenio para reponerlo.'):'', polAviso?fila('🛡️',ultPol.estado==='rechazado'?'Tu póliza de incendio fue rechazada':'Tu póliza de incendio vence pronto','#seguros',ultPol.estado==='rechazado'?'er':'wa',ultPol.estado==='rechazado'?(ultPol.motivo||''):'Vence el '+fmtDay(ultPol.vence)+'. Sube la renovación.'):'', cargosInf.length?fila(cargosInf.length,cargosInf.length===1?'Notificación de cargos':'Notificaciones de cargos','#multas','er','Puedes presentar descargos hasta el '+fmtDay(cargosInf[0].descargos_hasta)):'', conv?fila(conv,'Convenio de pago por revisar','#gastos','wa','La administración te propuso un convenio'):'', enc?fila(enc,enc===1?'Encomienda por retirar':'Encomiendas por retirar','#encomiendas','in','En conserjería'):'',
         msj?fila(msj,msj===1?'Mensaje sin leer':'Mensajes sin leer','#mensajes','in'):'', porVotar?fila(porVotar,porVotar===1?'Votación abierta':'Votaciones abiertas','#encuestas','wa','Tu unidad aún no vota'):'',
         prox?fila('📅',`Reserva: ${prox.espacio_nombre}`,'#reservas','mu',`${fmtDay(prox.fecha)} de ${pad(prox.h_ini)}:00 a ${pad(prox.h_fin)}:00${prox.estado==='pendiente'?' · por aprobar':''}`):''].filter(Boolean);
       el.innerHTML=cobro+`<h2>Pendiente</h2><div class="list">${items.join('')||nada}</div>`; }, {silent:true});
     return;
   }
   const canal=Object.keys(canalRol).find(c=>canalRol[c]===r);
-  const tablas=['suspensiones','suspension_votos','polizas','unidad_documentos','solicitudes_datos','usuarios','reservas','incidencias','conversaciones','estacionamiento_usos','gastos','gasto_unidades','pagos','convenios','lecturas','encomiendas','visitas','ot','infracciones','infraccion_votos'];
+  const tablas=['registro_personas','suspensiones','suspension_votos','polizas','unidad_documentos','solicitudes_datos','usuarios','reservas','incidencias','conversaciones','estacionamiento_usos','gastos','gasto_unidades','pagos','convenios','lecturas','encomiendas','visitas','ot','infracciones','infraccion_votos'];
   watch(tablas, async()=>{ const L=[], add=(n,...a)=>{ if(typeof n==='string'||n>0) L.push(fila(n,...a)); };
     if(r==='mantencion'){ if(S.me.empresa_id) add(await cuenta(q(T('ot').select('id').eq('empresa_id',S.me.empresa_id).eq('estado','asignada'))),'Órdenes de trabajo asignadas','#mantencion','wa'); return L; }
     const [usu,resv,inc,msj,est,borr,enc,vis]=await Promise.all([
@@ -431,6 +439,7 @@ function inicioEstado(r){
       const porVencer=[...new Set(pols.map(p=>p.tipo))].map(t=>pols.filter(p=>p.tipo===t&&p.desde<=hoy).sort((a,b)=>a.desde<b.desde?1:-1)[0]).filter(p=>p&&p.hasta>=hoy&&diasA(p.hasta)<=60);
       porVencer.forEach(p=>add(diasA(p.hasta)+' d',`Póliza de ${(TIPO_POLIZA[p.tipo]||p.tipo).split(' (')[0].toLowerCase()} por vencer`,'#seguros',diasA(p.hasta)<=15?'er':'wa','Vence el '+fmtDay(p.hasta)));
       add(udocs.filter(x=>x.estado==='en_revision').length,'Documentos de unidades por revisar','#seguros--unidades','wa','Pólizas y certificados subidos por propietarios'); }
+    if(r==='admin'&&modAbierto('registro')){ const rp=await q(T('registro_personas').select('estado,baja_solicitada,hasta')).catch(()=>[]); add(rp.filter(p=>p.estado==='pendiente'||(p.baja_solicitada&&!p.hasta)).length,'Cambios en el registro de copropietarios','#registro','wa','Informados por propietarios'); }
     if(['admin','comite'].includes(r)){ const sps=await q(T('suspensiones').select('*')).catch(()=>[]), svs=r==='comite'?await q(T('suspension_votos').select('*')).catch(()=>[]):[];
       if(r==='comite') add(sps.filter(x=>x.estado==='en_comite'&&!svs.some(v=>v.suspension_id===x.id&&v.ronda===x.ronda&&v.uid===S.uid)).length,'Suspensiones de luz por aprobar','#finanzas--suspension','er','Cada unidad necesita la aprobación del comité');
       else { sps.filter(x=>x.estado==='por_reponer').forEach(x=>add('⚡',`Reponer la luz del depto ${x.depto}`,'#finanzas--suspension','er','A más tardar el '+fmtDay(x.reponer_antes)+' (art. 36)'));
@@ -448,7 +457,7 @@ function inicioEstado(r){
   L=>{ const el=$('#homeEstado'); if(!el) return; el.innerHTML=`<h2>Requiere tu atención</h2><div class="list">${L.join('')||nada}</div>${['conserje','admin'].includes(r)?'<div class="row acc"><button class="btn sec" id="bEmerg">🚨 Unidades con condiciones especiales (emergencias)</button></div>':''}`; }, {silent:true});
 }
 VIEWS.inicio = function(){
-  const r=role(); const mods=MODULES.filter(m=>m.roles.includes(r) && !['inicio','perfil'].includes(m.id));
+  const r=role(); const mods=MODULES.filter(m=>puedeVer(m,r) && !['inicio','perfil'].includes(m.id));
   const setupPend = realRole()==='admin' && S.cfg && !S.cfg.configurado_at;
   setMain(`<h1>Hola, ${esc(S.me.nombre.split(' ')[0])}</h1>
   ${setupPend?`<div class="note">Falta terminar la configuración inicial del edificio. <a href="#" id="bWizHome">Continuar con el asistente</a></div>`:''}
@@ -912,6 +921,67 @@ async function detalleSuspension(sp, vs, listo){
     else if(a==='repuesto') rpc('confirmar_reposicion',{p_id:sp.id, p_fecha:todayStr()},'Reposición registrada');
     else if(a==='cancelar'){ const t=await askText('Motivo de la cancelación'); if(t) rpc('cancelar_suspension',{p_id:sp.id, p_motivo:t},'Proceso cancelado'); }
     else if(a==='pAviso') imprimirSuspension('aviso',sp); else if(a==='pCarta') imprimirSuspension('carta',sp); else if(a==='pRepo') imprimirSuspension('reposicion',sp); });
+}
+
+// REGISTRO DE COPROPIETARIOS, ARRENDATARIOS Y OCUPANTES (Ley 21.442 y Decreto 7; adaptado de CactusOne).
+// La administración lo mantiene; los propietarios informan cambios (quedan pendientes) y lo confirman cada año.
+const REL_REG={copropietario:'Copropietario', arrendatario:'Arrendatario', ocupante:'Ocupante'};
+function formPersonaRegistro(depto, listo, adm){
+  const m=modal(`<h3>${adm?'Agregar al registro':'Informar una persona'} · Depto ${esc(depto)}</h3><form id="fRp"><label class="f"><span>Relación con la unidad</span><select name="relacion">${Object.entries(REL_REG).map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}</select></label>
+    <label class="f"><span>Nombre completo</span><input type="text" name="nombre" required></label>
+    <div class="row"><label class="f grow"><span>RUT</span><input type="text" name="rut" placeholder="12.345.678-5"></label><label class="sw" data-k="menor" style="align-self:center"><input type="checkbox" name="menor"> Menor de edad (sin RUT)</label></div>
+    <div class="row"><label class="f grow"><span>Correo (para citaciones y notificaciones)</span><input type="email" name="correo"></label><label class="f grow"><span>Domicilio</span><input type="text" name="domicilio"></label></div>
+    <label class="sw"><input type="checkbox" name="permanente" checked> Ocupante permanente (30 días o más)</label>
+    <label class="f" data-k="arr"><span>Arriendo vigente hasta</span><input type="date" name="arriendo_hasta"></label>
+    <div data-k="pj"><label class="sw"><input type="checkbox" name="persona_juridica"> Es una persona jurídica (empresa)</label><label class="f"><span>Representante legal</span><input type="text" name="representante"></label></div>
+    <p class="small muted">${adm?'Queda vigente de inmediato.':'La administración lo revisa antes de incorporarlo al registro.'} El RUT se valida y no se guarda copia de la cédula.</p><button class="btn full">${adm?'Agregar':'Informar'}</button></form>`);
+  const vis=()=>{ const r=$('[name=relacion]',m).value; $('[data-k=arr]',m).style.display=r==='arrendatario'?'':'none'; $('[data-k=pj]',m).style.display=r==='copropietario'?'':'none'; $('[data-k=menor]',m).style.display=r==='ocupante'?'':'none'; };
+  $('[name=relacion]',m).addEventListener('change',vis); vis();
+  $('#fRp',m).addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); const o={depto, relacion:d.relacion, nombre:d.nombre.trim(), rut:d.menor?null:(d.rut.trim()||null), menor:d.relacion==='ocupante'&&!!d.menor, correo:d.correo.trim(), domicilio:d.domicilio.trim(), permanente:!!d.permanente, arriendo_hasta:d.relacion==='arrendatario'?(d.arriendo_hasta||null):null, persona_juridica:d.relacion==='copropietario'&&!!d.persona_juridica, representante:d.representante.trim()};
+    try{ await q(T('registro_personas').insert(o)); closeModal(); toast(adm?'Agregado al registro':'Informado: la administración lo revisará'); listo?.(); }catch(err){ toast('Error: '+errMsg(err)); } }); }
+const filaRegistro=(p,acc='')=>`<div class="item static"><div class="hd"><b>${esc(p.nombre)}${p.persona_juridica?' (representada por '+esc(p.representante)+')':''}</b><span class="row" style="gap:4px">${p.estado==='pendiente'?'<span class="pill wa">Por revisar</span>':p.estado==='rechazado'?'<span class="pill mu">Rechazado</span>':p.hasta?'<span class="pill mu">Terminado</span>':p.baja_solicitada?'<span class="pill wa">Baja informada</span>':''}<span class="pill in">${REL_REG[p.relacion]}</span></span></div>
+  <div class="meta">${p.menor?'Menor de edad':p.rut?'RUT '+esc(p.rut):'Sin RUT'}${p.correo?' · '+esc(p.correo):''}${p.domicilio?' · '+esc(p.domicilio):''} · ${p.permanente?'permanente':'transitorio'}${p.arriendo_hasta?' · arriendo hasta '+fmtDay(p.arriendo_hasta):''} · desde ${fmtDay(p.desde)}${p.hasta?' hasta '+fmtDay(p.hasta):''}${p.motivo?' · '+esc(p.motivo):''}</div>${acc?`<div class="row acc">${acc}</div>`:''}</div>`;
+VIEWS.registro = function(){
+  const r=role(), adm=isAdmin(), staff=['comite','admin'].includes(r);
+  if(!staff) return registroUnidad();
+  let est=[], ps=[];
+  setMain(`<h1>Registro de copropietarios</h1><p class="small muted">Registro de Copropietarios, Arrendatarios y demás Ocupantes que exige la Ley 21.442 (Decreto 7, arts. 5 a 7). Es reservado: lo ven la administración y el comité, y cada unidad lo suyo. El correo registrado es el domicilio para citaciones y notificaciones.</p>
+    ${adm?'<div class="row wrap" style="margin-bottom:10px;gap:6px"><button class="btn" id="bReq">Requerir actualización anual</button><button class="btn sec" id="bRegX">Excel</button></div>':'<div style="margin-bottom:10px"><button class="btn sec" id="bRegX">Excel</button></div>'}<div id="rgBody"><div class="empty">Cargando…</div></div>`);
+  const w=watch(['registro_personas','registro_confirmaciones','unidades'], async()=>{ const [a,b]=await Promise.all([q(sb.rpc('registro_estado')), q(T('registro_personas').select('*').order('ts'))]); return {a,b}; }, ({a,b})=>{ est=a; ps=b; if(!$('.modal')) draw(); });
+  const listo=()=>w.reload();
+  const draw=()=>{ const el=$('#rgBody'); if(!el) return; const conf=est.filter(x=>x.confirmado).length, falt=est.filter(x=>x.faltantes.length).length, pend=ps.filter(p=>p.estado==='pendiente'||(p.baja_solicitada&&!p.hasta));
+    const vig=(d,rel)=>ps.filter(p=>p.depto===d&&p.relacion===rel&&p.estado==='vigente'&&!p.hasta);
+    el.innerHTML=`<div class="kpi"><div class="k"><b>${conf} de ${est.length}</b><span>Unidades que confirmaron en ${new Date().getFullYear()}</span></div><div class="k"><b style="color:${falt?'var(--er)':'inherit'}">${falt}</b><span>Unidades con datos faltantes</span></div><div class="k"><b>${pend.length}</b><span>Cambios por revisar</span></div></div>
+      ${S.cfg?.registro?.requerido?`<p class="small muted">Último requerimiento anual: ${fmtDay(S.cfg.registro.requerido)}.</p>`:''}
+      ${pend.length?`<h2>Por revisar</h2><div class="list">${pend.map(p=>filaRegistro({...p, nombre:'Depto '+p.depto+' · '+p.nombre}, adm?(p.estado==='pendiente'?`<button class="btn ok sm" data-ap="${p.id}">Incorporar</button><button class="btn sec sm" data-re="${p.id}">Rechazar</button>`:`<button class="btn sm" data-baja="${p.id}">Aplicar la baja</button>`):'')).join('')}</div>`:''}
+      <h2>Unidades</h2><div class="card" style="overflow:auto"><table><thead><tr><th>Unidad</th><th>Copropietarios</th><th>Arrendatarios y ocupantes</th><th>Confirmado</th><th>Revisar</th></tr></thead><tbody>${est.map(x=>`<tr data-ud="${esc(x.depto)}" style="cursor:pointer"><td><b>${esc(x.depto)}</b></td><td class="small">${vig(x.depto,'copropietario').map(p=>esc(p.nombre)).join(', ')||'—'}</td><td class="small">${vig(x.depto,'arrendatario').length+vig(x.depto,'ocupante').length||'—'}${S.unidades[x.depto]?.arrendatario_representa===false?' · <span class="muted">arrendatario no representa</span>':''}</td><td>${x.confirmado?'<span class="pill ok">✓</span>':'<span class="pill mu">No</span>'}</td><td>${x.faltantes.map(f=>`<span class="pill er">${esc(f)}</span>`).join(' ')}${x.pendientes?` <span class="pill wa">${x.pendientes} por revisar</span>`:''}</td></tr>`).join('')}</tbody></table></div>`; };
+  const unidad=d=>{ const lst=ps.filter(p=>p.depto===d).sort((a,b)=>(a.hasta?1:0)-(b.hasta?1:0)||a.relacion.localeCompare(b.relacion));
+    const m=modal(`<h3>Registro · Depto ${esc(d)}</h3><p class="small muted">${S.unidades[d]?.arrendatario_representa===false?'El copropietario declaró que el arrendatario u ocupante <b>no</b> lo representa en asambleas.':'Si el copropietario no asiste ni da poder, lo representa el arrendatario u ocupante (Ley 21.442, art. 5).'}</p>
+      <div class="list">${lst.map(p=>filaRegistro(p, adm&&p.estado==='vigente'&&!p.hasta?`<button class="btn sec sm" data-fin="${p.id}">Terminar relación</button>`:'')).join('')||'<div class="empty">Sin personas registradas</div>'}</div>
+      <div class="row wrap" style="justify-content:flex-end;gap:6px;margin-top:12px">${adm?'<button class="btn" id="rgAdd">+ Agregar persona</button>':''}<button class="btn sec" data-close>Cerrar</button></div>`);
+    $('#rgAdd',m)?.addEventListener('click',()=>formPersonaRegistro(d, listo, true));
+    m.addEventListener('click', async e=>{ const b=e.target.closest('[data-fin]'); if(!b) return; if(!await confirmBox('Se registra hoy como fecha de término (venta, fin del arriendo o mudanza). El historial queda. ¿Continuar?')) return; try{ await q(T('registro_personas').update({hasta:todayStr()}).eq('id',b.dataset.fin)); closeModal(); toast('Relación terminada'); listo(); }catch(err){ toast(errMsg(err)); } }); };
+  $('#bReq')?.addEventListener('click', async()=>{ if(!await confirmBox('Se pedirá a todos los propietarios revisar y confirmar los datos de su unidad (requerimiento anual del Decreto 7). ¿Enviar?')) return; try{ const n=await q(sb.rpc('requerir_registro')); toast(`Requerimiento enviado a ${n} propietario(s)`); }catch(err){ toast(errMsg(err)); } });
+  $('#bRegX').addEventListener('click', async()=>{ try{ await q(sb.rpc('registrar_exportacion',{p_que:'Registro de copropietarios (Excel)'})); }catch(err){ toast(errMsg(err)); return; } const B=v=>({v,b:true});
+    descargar(new Blob([window.MiniXlsx.build([{name:'Registro', widths:[10,16,30,14,28,34,12,14,14,14], rows:[[B(S.cfg?.nombre||'')],[B('Registro de copropietarios, arrendatarios y ocupantes')],[],[B('Unidad'),B('Relación'),B('Nombre'),B('RUT'),B('Correo'),B('Domicilio'),B('Permanencia'),B('Arriendo hasta'),B('Desde'),B('Hasta')],
+      ...ps.filter(p=>p.estado==='vigente').sort((a,b)=>porNum(a.depto,b.depto)).map(p=>[p.depto, REL_REG[p.relacion], p.nombre+(p.persona_juridica?' (rep. '+p.representante+')':''), p.menor?'menor de edad':(p.rut||''), p.correo||'', p.domicilio||'', p.permanente?'permanente':'transitorio', p.arriendo_hasta||'', p.desde, p.hasta||''])]}])],{type:window.MiniXlsx.MIME}), 'registro-copropietarios.xlsx'); });
+  $('#rgBody').addEventListener('click', async e=>{ const t=x=>e.target.closest(x); let b;
+    if(b=t('[data-ap]')){ try{ await q(T('registro_personas').update({estado:'vigente'}).eq('id',b.dataset.ap)); toast('Incorporado al registro'); listo(); }catch(err){ toast(errMsg(err)); } }
+    else if(b=t('[data-re]')){ const mo=await askText('Motivo del rechazo (lo ve la unidad)'); if(!mo) return; try{ await q(T('registro_personas').update({estado:'rechazado', motivo:mo.trim()}).eq('id',b.dataset.re)); toast('Rechazado'); listo(); }catch(err){ toast(errMsg(err)); } }
+    else if(b=t('[data-baja]')){ try{ await q(T('registro_personas').update({hasta:todayStr()}).eq('id',b.dataset.baja)); toast('Baja aplicada'); listo(); }catch(err){ toast(errMsg(err)); } }
+    else if(b=t('[data-ud]')) unidad(b.dataset.ud); });
+};
+function registroUnidad(){
+  const dep=myDepto(), prop=role()==='propietario';
+  setMain(`<h1>Registro de tu unidad</h1><p class="small muted">Depto ${esc(dep)}. La Ley de Copropiedad exige un registro de copropietarios, arrendatarios y ocupantes. ${prop?'Como propietario, informas los cambios dentro de 60 días y confirmas los datos una vez al año.':'Si algo no está al día, avísale al propietario o a la administración.'}</p><div id="ruBody"><div class="empty">Cargando…</div></div>`);
+  const w=watch(['registro_personas','registro_confirmaciones','unidades'], async()=>{ const [a,b]=await Promise.all([q(T('registro_personas').select('*').order('ts')), q(sb.rpc('registro_estado'))]); return {a,b}; }, ({a,b})=>{ const el=$('#ruBody'); if(!el) return; const st=b[0]||{faltantes:[],confirmado:false}, repr=S.unidades[dep]?.arrendatario_representa!==false;
+    el.innerHTML=`${st.faltantes.length?`<div class="note">${st.faltantes.map(esc).join(' · ')}</div>`:''}<div class="list">${a.filter(p=>!p.hasta&&p.estado!=='rechazado').map(p=>filaRegistro(p, prop&&p.estado==='vigente'&&!p.baja_solicitada?`<button class="btn sec sm" data-pbaja="${p.id}">Ya no vive / ya no es dueño</button>`:'')).join('')||'<div class="empty">Tu unidad aún no tiene personas registradas</div>'}</div>
+      ${a.some(p=>p.estado==='rechazado')?`<p class="small muted">Rechazados por la administración: ${a.filter(p=>p.estado==='rechazado').map(p=>esc(p.nombre)+' ('+esc(p.motivo||'')+')').join(', ')}</p>`:''}
+      ${prop?`<div class="row wrap" style="margin-top:10px;gap:6px"><button class="btn sec" id="ruAdd">+ Informar una persona</button></div>
+      <div class="card" style="margin-top:12px"><h3>Confirmación anual</h3><p class="small">${st.confirmado?`<span class="pill ok">Confirmado en ${new Date().getFullYear()}</span>`:'Aún no confirmas este año.'}</p><form id="fRc"><label class="sw" style="margin-bottom:10px"><input type="checkbox" name="repr" ${repr?'checked':''}> Si no asisto a una asamblea ni doy poder, me puede representar el arrendatario u ocupante de la unidad (así lo dice la ley salvo que lo excluyas; en materias de mayoría reforzada siempre necesita un poder)</label><button class="btn">Confirmo que los datos de mi unidad están al día</button></form></div>`:''}`; });
+  const listo=()=>w.reload();
+  $('#ruBody').addEventListener('click', async e=>{ if(e.target.id==='ruAdd') return formPersonaRegistro(dep, listo, false); const b=e.target.closest('[data-pbaja]'); if(!b) return; if(!await confirmBox('Se informará a la administración para que registre el término. ¿Continuar?')) return; try{ await q(T('registro_personas').update({hasta:todayStr()}).eq('id',b.dataset.pbaja)); toast('Baja informada a la administración'); listo(); }catch(err){ toast(errMsg(err)); } });
+  $('#ruBody').addEventListener('submit', async e=>{ e.preventDefault(); if(e.target.id!=='fRc') return; try{ await q(sb.rpc('confirmar_registro',{p_arrendatario_representa:$('[name=repr]',e.target).checked})); toast('Registro confirmado. ¡Gracias!'); listo(); }catch(err){ toast(errMsg(err)); } });
 }
 
 // LECTURAS de medidores individuales. Conserjería y administración las ingresan; el comité las ve.
@@ -1750,6 +1820,8 @@ ADMIN.edificio = function(el){
   <label class="f"><span>Aviso de privacidad (se muestra al registrarse y en Mi cuenta; vacío = texto por defecto)</span><textarea name="privacidad" placeholder="Quién es responsable de los datos, para qué se usan, por cuánto tiempo se guardan y cómo ejercer los derechos de acceso, rectificación y eliminación.">${esc(c.privacidad||'')}</textarea></label>
   <label class="f"><span>Color principal</span><input type="color" name="color" value="${esc(c.color||'#1e5eff')}" style="width:60px;height:36px;padding:2px;border:1px solid var(--bd);border-radius:8px"></label>
   <button class="btn">Guardar cambios</button></form></div>
+  <div class="card"><h3>Módulos</h3><p class="small muted">Apaga los que tu edificio no usa para que el menú quede más simple, o déjalos "solo personal" mientras los prueban conserjería, comité y administración. Apagar un módulo no borra sus datos. Inicio, Gastos comunes, Finanzas, Administración y Mi cuenta siempre están.</p>
+    <form id="fMod"><div style="overflow:auto"><table><tbody>${MODULES.filter(m=>!MOD_BASICOS.includes(m.id)).map(m=>`<tr><td>${m.ic} <b>${esc(m.t)}</b><br><span class="small muted">${esc(m.d||'')}</span></td><td style="width:200px"><select name="${m.id}">${[['on','Activo'],['personal','Solo personal (piloto)'],['off','Apagado']].map(([k,v])=>`<option value="${k}" ${modEstado(m.id)===k?'selected':''}>${v}</option>`).join('')}</select></td></tr>`).join('')}</tbody></table></div><button class="btn sec sm" style="margin-top:8px">Guardar módulos</button></form></div>
   ${CFG.LOCAL?'<div class="card"><h3>Versión y actualizaciones</h3><div id="verBody" class="small muted">Consultando…</div></div>':''}
   ${CFG.LOCAL?'<div class="card"><h3>Acceso desde internet</h3><div id="tunBody" class="small muted">Consultando…</div></div>':''}
   ${CFG.LOCAL?'<div class="card"><h3>Respaldo en la nube</h3><div id="respBody" class="small muted">Cargando…</div></div>':''}
@@ -1766,11 +1838,12 @@ ADMIN.edificio = function(el){
   $('#bLogo',el).addEventListener('click',()=>$('#logoIn',el).click());
   $('#logoIn',el).addEventListener('change', async e=>{ const f=e.target.files[0]; if(!f) return; try{ toast('Subiendo logo…'); newLogo=await uploadImage(f,'logo'); $('#logoPrev',el).innerHTML=`<img data-f="${esc(newLogo)}">`; toast('Logo listo, guarda los cambios'); }catch(err){ toast('Error: '+errMsg(err)); } });
   $('#bLogoDel',el)?.addEventListener('click',()=>{ newLogo=''; $('#logoPrev',el).innerHTML='🏢'; });
+  $('#fMod',el).addEventListener('submit', async e=>{ e.preventDefault(); const d=new FormData(e.target), o={}; d.forEach((v,k)=>{ if(v!=='on') o[k]=v; }); try{ await q(T('edificios').update({modulos:o}).eq('id',S.cfg.id)); S.cfg.modulos=o; toast('Módulos guardados'); routeNow(); }catch(err){ toast(errMsg(err)); } });
   $('#fEd',el).addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); try{ await q(T('edificios').update({nombre:d.nombre.trim(), direccion:d.direccion.trim(), comuna:d.comuna.trim(), telefono:d.telefono.trim(), email:d.email.trim(), datos_bancarios:d.datos_bancarios.trim(), privacidad:d.privacidad.trim(), visita_patente:!!d.visita_patente, mora_tasa:Math.max(0,Number(d.mora_tasa)||0), mora_desde:d.mora_desde||null, color:d.color, ...(newLogo!==null?{logo:newLogo}:{}), actualizado:now()}).eq('id',S.cfg.id)); toast('Guardado'); }catch(err){ toast('Error: '+errMsg(err)); } });
 };
 // Ley 21.719: solicitudes de derechos (30 días corridos) y bitácora de auditoría (solo la administración)
 const ACCION_AUD={crear:'creó', cambiar:'cambió', borrar:'borró', consultar:'consultó'};
-const TABLA_AUD={condiciones_especiales:'condiciones especiales', suspensiones:'suspensiones de luz', contactos:'teléfonos', usuarios:'usuarios', pagos:'pagos', cargos:'cargos', gastos:'gastos comunes', convenios:'convenios', caja_movimientos:'caja', fondos:'fondos', fondo_movimientos:'movimientos de fondos', lecturas:'lecturas', unidades:'unidades', edificios:'configuración', multas_catalogo:'catálogo de multas', indicadores:'UTM/UF', consentimientos:'consentimientos', solicitudes_datos:'solicitudes de datos', estacionamientos:'estacionamientos'};
+const TABLA_AUD={registro_personas:'registro de copropietarios', registro_confirmaciones:'confirmaciones del registro', condiciones_especiales:'condiciones especiales', suspensiones:'suspensiones de luz', contactos:'teléfonos', usuarios:'usuarios', pagos:'pagos', cargos:'cargos', gastos:'gastos comunes', convenios:'convenios', caja_movimientos:'caja', fondos:'fondos', fondo_movimientos:'movimientos de fondos', lecturas:'lecturas', unidades:'unidades', edificios:'configuración', multas_catalogo:'catálogo de multas', indicadores:'UTM/UF', consentimientos:'consentimientos', solicitudes_datos:'solicitudes de datos', estacionamientos:'estacionamientos'};
 ADMIN.datos = function(el){
   let sols=[], aud=[], filtro='';
   el.innerHTML=`<div class="card"><h3>Solicitudes sobre datos personales</h3><p class="small muted">Acceso, rectificación, supresión, oposición, portabilidad o bloqueo (Ley 21.719). Hay que responder dentro de 30 días corridos.</p><div id="dSol" class="list"></div></div>
