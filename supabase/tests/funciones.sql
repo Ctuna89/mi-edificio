@@ -699,3 +699,15 @@ update proveedor_ingresos set estado = 'dentro' where id = :'pi1';
 select t.ok((select ingreso_at is not null from proveedor_ingresos where id = :'pi1'), 'una visita programada se registra al llegar');
 select t.soy(:'a2'); select t.ok((select count(*) = 0 from proveedor_ingresos), 'los residentes no ven los ingresos de proveedores');
 \echo 'OK: ingresos de proveedores'
+
+-- ============ plantillas de documentos ============
+select t.soy(:'a1');
+insert into plantillas (nombre, tipo, asunto, cuerpo) values ('Cobranza', 'cobranza', 'Deuda', '…') returning id as pla \gset
+select public.enviar_documento(:'pla', '[{"depto":"102","asunto":"Deuda de gastos comunes · 102","texto":"La unidad 102 registra una deuda de $1.000."}]') as nenv \gset
+select t.ok(:nenv > 0 and (select bool_and(tipo = 'formal' and texto like 'Estimado/a %La unidad 102 registra%') from correos where referencia = 'plantillas/' || :'pla' || '/102'), 'una carta de cobranza sale como notificación formal a la unidad');
+select t.falla(format($$select public.enviar_documento(%L, '[{"depto":"999","asunto":"x","texto":"y"}]')$$, :'pla'), 'enviar a una unidad que no existe');
+select t.falla(format($$select public.enviar_documento(%L, '[{"depto":"102","asunto":"x","texto":" "}]')$$, :'pla'), 'enviar un texto vacío');
+select t.soy(:'a5'); select t.ok((select count(*) = 1 from plantillas), 'el comité ve las plantillas');
+select t.falla(format($$select public.enviar_documento(%L, '[]')$$, :'pla'), 'el comité envía documentos');
+select t.soy(:'a2'); select t.ok((select count(*) = 0 from plantillas), 'los residentes no ven las plantillas');
+\echo 'OK: plantillas de documentos'

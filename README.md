@@ -272,6 +272,12 @@ La conserjería anota cada novedad (seguridad, mantención, aseo, visitas, recla
 
 ![Libro de novedades](docs/capturas/novedades.png)
 
+## Plantillas de documentos
+
+En Administración → Plantillas se guardan cartas y documentos con variables que se completan solas para cada unidad: `{{depto}}`, `{{nombre}}`, `{{fecha}}`, `{{deuda}}`, `{{vencido}}`, `{{detalle_deuda}}` (la deuda por período), `{{edificio}}`, `{{direccion}}`, `{{datos_bancarios}}` y `{{correo_edificio}}`. Hay seis ejemplos para partir (dos cartas de cobranza, aviso de trabajos, bienvenida, citación y acta del comité); lo que está entre corchetes se completa a mano. Al usar una plantilla se eligen las unidades (una, las que tienen deuda vencida, todas o algunas), se ajusta el texto, se revisa la vista previa y se imprime (una página por unidad) o se envía por correo. Las cobranzas y citaciones salen como notificación formal, con constancia del envío.
+
+![Plantilla de cobranza](docs/capturas/plantillas.png)
+
 ## Varias unidades por persona
 
 Una cuenta puede tener varias unidades: un segundo depto, o un estacionamiento o una bodega que tengan su propia alícuota. La administración las agrega en Administración → Usuarios ("+ unidad"), con el rol de la persona en cada una (propietario o residente). La persona ve en su inicio el saldo de todas sus unidades y elige con un selector cuál está usando: el gasto común, el estado de cuenta, las reservas, los votos y lo demás se muestran y se hacen para esa unidad. Los avisos y correos de cualquiera de sus unidades le llegan siempre.

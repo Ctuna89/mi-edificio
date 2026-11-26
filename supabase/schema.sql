@@ -247,6 +247,19 @@ create table if not exists public.usuario_unidades (
   primary key (uid, depto)
 );
 
+-- Plantillas de documentos (cartas de cobranza, avisos, citaciones, actas) con variables {{depto}}, {{deuda}}…
+create table if not exists public.plantillas (
+  id          uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  nombre      text not null,
+  tipo        text not null default 'aviso' check (tipo in ('cobranza','aviso','citacion','acta','otro')),
+  por_unidad  boolean not null default true,     -- una por unidad (cartas) o un solo documento (actas)
+  asunto      text not null default '',
+  cuerpo      text not null default '',
+  actualizado timestamptz default now(),
+  unique (edificio_id, nombre)
+);
+
 -- Comunicados: por correo (opcional) y con lectura registrada. "importante" pide confirmar la lectura.
 alter table public.comunicados add column if not exists por_correo boolean not null default false;
 alter table public.comunicados add column if not exists importante boolean not null default false;
@@ -1198,7 +1211,7 @@ begin
   end if;
 
   select id into def from public.edificios order by creado, id limit 1;
-  foreach t in array array['empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos','certificados','banco_movimientos','banco_pagadores','presupuestos','emergencia_responsables','emergencia_simulacros','proveedores','contratos','turnos','novedades','unidad_vehiculos','unidad_mascotas','unidad_espacios','comunicado_lecturas','usuario_unidades','proveedor_ingresos']
+  foreach t in array array['empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos','certificados','banco_movimientos','banco_pagadores','presupuestos','emergencia_responsables','emergencia_simulacros','proveedores','contratos','turnos','novedades','unidad_vehiculos','unidad_mascotas','unidad_espacios','comunicado_lecturas','usuario_unidades','proveedor_ingresos','plantillas']
   loop
     execute format('alter table public.%I add column if not exists edificio_id uuid references public.edificios(id) on delete cascade', t);
     execute format('select count(*) from public.%I where edificio_id is null', t) into n;
@@ -1311,7 +1324,7 @@ $$;
 do $$
 declare t text;
 begin
-  foreach t in array array['empresas','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos','certificados','banco_movimientos','banco_pagadores','presupuestos','emergencia_responsables','emergencia_simulacros','proveedores','contratos','turnos','novedades','unidad_vehiculos','unidad_mascotas','unidad_espacios','comunicado_lecturas','usuario_unidades','proveedor_ingresos']
+  foreach t in array array['empresas','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos','certificados','banco_movimientos','banco_pagadores','presupuestos','emergencia_responsables','emergencia_simulacros','proveedores','contratos','turnos','novedades','unidad_vehiculos','unidad_mascotas','unidad_espacios','comunicado_lecturas','usuario_unidades','proveedor_ingresos','plantillas']
   loop
     execute format('alter table public.%I alter column edificio_id set default public.mi_edificio()', t);
   end loop;
@@ -2083,7 +2096,7 @@ declare t text;
 begin
   -- tablas con datos personales o de dinero (no los votos: el voto de un sondeo es secreto)
   foreach t in array array['edificios','usuarios','contactos','unidades','gastos','pagos','convenios','cargos','caja_movimientos','fondos','fondo_movimientos',
-                           'lecturas','multas_catalogo','indicadores','consentimientos','solicitudes_datos','estacionamientos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','certificados','banco_movimientos','presupuestos','emergencia_responsables','proveedores','contratos','turnos','unidad_vehiculos','unidad_mascotas','unidad_espacios','usuario_unidades','proveedor_ingresos'] loop
+                           'lecturas','multas_catalogo','indicadores','consentimientos','solicitudes_datos','estacionamientos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','certificados','banco_movimientos','presupuestos','emergencia_responsables','proveedores','contratos','turnos','unidad_vehiculos','unidad_mascotas','unidad_espacios','usuario_unidades','proveedor_ingresos','plantillas'] loop
     execute format('drop trigger if exists %I on public.%I', t || '_auditoria', t);
     execute format('create trigger %I after insert or update or delete on public.%I for each row execute function privado.auditar()', t || '_auditoria', t);
   end loop;
@@ -3461,6 +3474,28 @@ begin
     ts = case when excluded.confirmado and not comunicado_lecturas.confirmado then now() else comunicado_lecturas.ts end;
 end $$;
 
+-- Enviar por correo un documento hecho con una plantilla: un texto ya completado por unidad.
+-- Cobranzas y citaciones van como notificación formal; el resto, como aviso.
+create or replace function public.enviar_documento(p_plantilla uuid, p_envios jsonb) returns int
+language plpgsql security definer set search_path = public as $$
+declare e uuid := public.mi_edificio(); p public.plantillas; x jsonb; n int := 0; c record;
+begin
+  if not public.es_admin() then raise exception 'Solo administración'; end if;
+  select * into p from public.plantillas where id = p_plantilla and edificio_id = e;
+  if not found then raise exception 'Plantilla no encontrada'; end if;
+  if jsonb_typeof(p_envios) <> 'array' or jsonb_array_length(p_envios) > 2000 then raise exception 'Envío no válido'; end if;
+  for x in select * from jsonb_array_elements(p_envios) loop
+    if coalesce(trim(x->>'texto'), '') = '' or coalesce(trim(x->>'asunto'), '') = '' then raise exception 'Falta el asunto o el texto'; end if;
+    if not exists (select 1 from public.unidades where edificio_id = e and depto = x->>'depto') then raise exception 'La unidad % no existe', x->>'depto'; end if;
+    for c in select * from privado.correos_unidad(e, x->>'depto', p.tipo = 'cobranza') loop
+      perform privado.encolar_correo(e, c.correo, c.nombre, x->>'asunto', 'Estimado/a ' || coalesce(nullif(c.nombre, ''), 'copropietario/a') || ':' || E'\n\n' || (x->>'texto'),
+        case when p.tipo in ('cobranza','citacion') then 'formal' else 'aviso' end, 'plantillas/' || p.id || '/' || (x->>'depto'));
+      n := n + 1;
+    end loop;
+  end loop;
+  return n;
+end $$;
+
 -- La administración reintenta o descarta un correo con error
 create or replace function public.reintentar_correo(p_id uuid, p_descartar boolean default false) returns void
 language plpgsql security definer set search_path = public as $$
@@ -4342,6 +4377,7 @@ alter table public.unidad_espacios  enable row level security;
 alter table public.comunicado_lecturas enable row level security;
 alter table public.usuario_unidades enable row level security;
 alter table public.proveedor_ingresos enable row level security;
+alter table public.plantillas       enable row level security;
 
 -- helper para (re)crear políticas sin errores. Salvo que se indique lo contrario, toda
 -- política queda además limitada a las filas del edificio del usuario.
@@ -4567,6 +4603,10 @@ select public._pol('contratos','ctr_sel','select','public.mi_rol() in (''comite'
 select public._pol('contratos','ctr_ins','insert','public.es_admin()');
 select public._pol('contratos','ctr_upd','update','public.es_admin()');
 select public._pol('contratos','ctr_del','delete','public.es_admin()');
+select public._pol('plantillas','pla_sel','select','public.mi_rol() in (''comite'',''admin'')');
+select public._pol('plantillas','pla_ins','insert','public.es_admin()');
+select public._pol('plantillas','pla_upd','update','public.es_admin()');
+select public._pol('plantillas','pla_del','delete','public.es_admin()');
 select public._pol('proveedor_ingresos','pi_sel','select','public.mi_rol() in (''conserje'',''comite'',''admin'')');
 select public._pol('proveedor_ingresos','pi_ins','insert','public.mi_rol() in (''conserje'',''comite'',''admin'')');
 select public._pol('proveedor_ingresos','pi_upd','update','public.mi_rol() in (''conserje'',''comite'',''admin'')');
@@ -4674,7 +4714,7 @@ create policy "fotos_delete" on storage.objects for delete to authenticated usin
 do $$
 declare t text;
 begin
-  foreach t in array array['edificios','empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos','certificados','banco_movimientos','banco_pagadores','presupuestos','emergencia_responsables','emergencia_simulacros','proveedores','contratos','turnos','novedades','unidad_vehiculos','unidad_mascotas','unidad_espacios','comunicado_lecturas','usuario_unidades','proveedor_ingresos']
+  foreach t in array array['edificios','empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos','certificados','banco_movimientos','banco_pagadores','presupuestos','emergencia_responsables','emergencia_simulacros','proveedores','contratos','turnos','novedades','unidad_vehiculos','unidad_mascotas','unidad_espacios','comunicado_lecturas','usuario_unidades','proveedor_ingresos','plantillas']
   loop
     begin
       execute format('alter publication supabase_realtime add table public.%I', t);
