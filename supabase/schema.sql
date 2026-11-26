@@ -87,7 +87,7 @@ alter table public.edificios add column if not exists visita_patente boolean not
 alter table public.edificios add column if not exists est_alerta_min int not null default 0;
 alter table public.edificios add column if not exists est_aviso_min int not null default 0;
 -- Plazos de conservación en meses, definidos por la administración de cada edificio.
--- Claves: visitas, registros, encomiendas, mensajes, reservas, incidencias, estacionamientos, auditoria, correos. Sin clave o 0 = no se borra.
+-- Claves: visitas, registros, encomiendas, mensajes, reservas, incidencias, estacionamientos, auditoria, correos, novedades. Sin clave o 0 = no se borra.
 alter table public.edificios add column if not exists retencion jsonb not null default '{}'::jsonb;
 
 -- Ajustes de la instalación (1 fila). Sin políticas RLS: solo se edita desde el SQL Editor.
@@ -1033,6 +1033,69 @@ create table if not exists public.contratos (
   check (hasta is null or desde is null or hasta >= desde)
 );
 
+-- Libro de novedades de conserjería: lo anotado no se edita ni se borra (se corrige con otra anotación).
+-- Cada anotación queda en el turno abierto de quien la escribe.
+create table if not exists public.turnos (
+  id          uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  uid         uuid references public.usuarios(id),
+  inicio      timestamptz not null default now(),
+  fin         timestamptz,
+  entrega     text default '',                 -- lo que se deja pendiente para el turno siguiente
+  resumen     jsonb not null default '{}'::jsonb,
+  recibe_uid  uuid references public.usuarios(id),
+  recibido_at timestamptz
+);
+create table if not exists public.novedades (
+  id          uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  uid         uuid references public.usuarios(id) default auth.uid(),
+  turno_id    uuid references public.turnos(id) on delete set null,
+  categoria   text not null default 'novedad' check (categoria in ('novedad','seguridad','mantencion','aseo','visita','reclamo','instruccion','otro')),
+  texto       text not null check (length(trim(texto)) > 0),
+  depto       text,
+  foto        text default '',
+  importante  boolean not null default false,
+  ts          timestamptz default now()
+);
+create index if not exists novedades_ts_idx on public.novedades (edificio_id, ts desc);
+-- Fichas de la unidad: vehículos, mascotas, bodegas y estacionamientos asignados
+create table if not exists public.unidad_vehiculos (
+  id          uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  depto       text not null,
+  patente     text not null,
+  tipo        text not null default 'auto',
+  marca       text default '',
+  modelo      text default '',
+  color       text default '',
+  notas       text default '',
+  ts          timestamptz default now()
+);
+create table if not exists public.unidad_mascotas (
+  id          uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  depto       text not null,
+  nombre      text not null,
+  especie     text not null default 'perro',
+  raza        text default '',
+  color       text default '',
+  chip        text default '',                 -- n° de microchip (Ley 21.020)
+  notas       text default '',
+  foto        text default '',
+  ts          timestamptz default now()
+);
+create table if not exists public.unidad_espacios (
+  id          uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  depto       text not null,
+  tipo        text not null check (tipo in ('bodega','estacionamiento')),
+  numero      text not null,
+  notas       text default '',
+  ts          timestamptz default now(),
+  unique (edificio_id, tipo, numero)
+);
+
 -- Certificados de deuda (o de no deuda) de una unidad, con folio correlativo por edificio
 create table if not exists public.certificados (
   id          uuid primary key default gen_random_uuid(),
@@ -1087,7 +1150,7 @@ begin
   end if;
 
   select id into def from public.edificios order by creado, id limit 1;
-  foreach t in array array['empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos','certificados','banco_movimientos','banco_pagadores','presupuestos','emergencia_responsables','emergencia_simulacros','proveedores','contratos']
+  foreach t in array array['empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos','certificados','banco_movimientos','banco_pagadores','presupuestos','emergencia_responsables','emergencia_simulacros','proveedores','contratos','turnos','novedades','unidad_vehiculos','unidad_mascotas','unidad_espacios']
   loop
     execute format('alter table public.%I add column if not exists edificio_id uuid references public.edificios(id) on delete cascade', t);
     execute format('select count(*) from public.%I where edificio_id is null', t) into n;
@@ -1200,7 +1263,7 @@ $$;
 do $$
 declare t text;
 begin
-  foreach t in array array['empresas','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos','certificados','banco_movimientos','banco_pagadores','presupuestos','emergencia_responsables','emergencia_simulacros','proveedores','contratos']
+  foreach t in array array['empresas','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos','certificados','banco_movimientos','banco_pagadores','presupuestos','emergencia_responsables','emergencia_simulacros','proveedores','contratos','turnos','novedades','unidad_vehiculos','unidad_mascotas','unidad_espacios']
   loop
     execute format('alter table public.%I alter column edificio_id set default public.mi_edificio()', t);
   end loop;
@@ -1927,7 +1990,7 @@ declare t text;
 begin
   -- tablas con datos personales o de dinero (no los votos: el voto de un sondeo es secreto)
   foreach t in array array['edificios','usuarios','contactos','unidades','gastos','pagos','convenios','cargos','caja_movimientos','fondos','fondo_movimientos',
-                           'lecturas','multas_catalogo','indicadores','consentimientos','solicitudes_datos','estacionamientos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','certificados','banco_movimientos','presupuestos','emergencia_responsables','proveedores','contratos'] loop
+                           'lecturas','multas_catalogo','indicadores','consentimientos','solicitudes_datos','estacionamientos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','certificados','banco_movimientos','presupuestos','emergencia_responsables','proveedores','contratos','turnos','unidad_vehiculos','unidad_mascotas','unidad_espacios'] loop
     execute format('drop trigger if exists %I on public.%I', t || '_auditoria', t);
     execute format('create trigger %I after insert or update or delete on public.%I for each row execute function privado.auditar()', t || '_auditoria', t);
   end loop;
@@ -2980,6 +3043,51 @@ begin
   return n;
 end $$;
 
+-- ---------- Libro de novedades y turnos ----------
+create or replace function privado.novedades_antes() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if auth.uid() is null then return new; end if;
+  new.uid := auth.uid(); new.ts := now(); new.texto := trim(new.texto); new.depto := nullif(trim(coalesce(new.depto, '')), '');
+  select id into new.turno_id from public.turnos where edificio_id = new.edificio_id and uid = auth.uid() and fin is null order by inicio desc limit 1;
+  return new;
+end $$;
+drop trigger if exists novedades_antes on public.novedades;
+create trigger novedades_antes before insert on public.novedades for each row execute function privado.novedades_antes();
+
+-- Iniciar turno: quien llega recibe el turno anterior (queda registrado que leyó la entrega)
+create or replace function public.iniciar_turno() returns uuid
+language plpgsql security definer set search_path = public as $$
+declare e uuid := public.mi_edificio(); t uuid;
+begin
+  if public.mi_rol() not in ('conserje','admin') then raise exception 'Solo conserjería'; end if;
+  select id into t from public.turnos where edificio_id = e and uid = auth.uid() and fin is null;
+  if t is not null then return t; end if;
+  update public.turnos set recibe_uid = auth.uid(), recibido_at = now()
+  where id = (select id from public.turnos where edificio_id = e and fin is not null and recibe_uid is null and uid <> auth.uid() order by fin desc limit 1);
+  insert into public.turnos (edificio_id, uid) values (e, auth.uid()) returning id into t;
+  return t;
+end $$;
+create or replace function public.entregar_turno(p_entrega text, p_resumen jsonb default '{}') returns void
+language plpgsql security definer set search_path = public as $$
+declare t uuid;
+begin
+  select id into t from public.turnos where edificio_id = public.mi_edificio() and uid = auth.uid() and fin is null;
+  if t is null then raise exception 'No tienes un turno abierto'; end if;
+  update public.turnos set fin = now(), entrega = trim(coalesce(p_entrega, '')), resumen = coalesce(p_resumen, '{}') where id = t;
+end $$;
+
+-- Patentes en un solo formato (sin espacios, puntos ni guiones, en mayúsculas)
+create or replace function privado.vehiculos_antes() returns trigger
+language plpgsql as $$
+begin
+  new.patente := upper(regexp_replace(coalesce(new.patente, ''), '[^A-Za-z0-9]', '', 'g'));
+  if length(new.patente) < 4 then raise exception 'Patente no válida'; end if;
+  return new;
+end $$;
+drop trigger if exists vehiculos_antes on public.unidad_vehiculos;
+create trigger vehiculos_antes before insert or update on public.unidad_vehiculos for each row execute function privado.vehiculos_antes();
+
 -- Aviso de cobro: al publicar un período, un correo a cada unidad con su monto, el vencimiento y la deuda anterior
 create or replace function privado.avisar_cobros(p_e uuid default null) returns int
 language plpgsql security definer set search_path = public as $$
@@ -3882,6 +3990,14 @@ begin
   select retencion into r from public.edificios where id = p_e;
   if r is null then return res; end if;
 
+  m := privado.meses(r, 'novedades');
+  if m > 0 then
+    delete from public.novedades where edificio_id = p_e and ts < now() - make_interval(months => m);
+    get diagnostics n = row_count;
+    delete from public.turnos where edificio_id = p_e and fin < now() - make_interval(months => m);
+    res := res || jsonb_build_object('novedades', n);
+  end if;
+
   m := privado.meses(r, 'correos');
   if m > 0 then
     delete from public.correos where edificio_id = p_e and ts < now() - make_interval(months => m) and estado in ('enviado','descartado');
@@ -4059,6 +4175,11 @@ alter table public.emergencia_responsables enable row level security;
 alter table public.emergencia_simulacros enable row level security;
 alter table public.proveedores      enable row level security;
 alter table public.contratos        enable row level security;
+alter table public.turnos           enable row level security;
+alter table public.novedades        enable row level security;
+alter table public.unidad_vehiculos enable row level security;
+alter table public.unidad_mascotas  enable row level security;
+alter table public.unidad_espacios  enable row level security;
 
 -- helper para (re)crear políticas sin errores. Salvo que se indique lo contrario, toda
 -- política queda además limitada a las filas del edificio del usuario.
@@ -4284,6 +4405,21 @@ select public._pol('contratos','ctr_sel','select','public.mi_rol() in (''comite'
 select public._pol('contratos','ctr_ins','insert','public.es_admin()');
 select public._pol('contratos','ctr_upd','update','public.es_admin()');
 select public._pol('contratos','ctr_del','delete','public.es_admin()');
+select public._pol('turnos','tur_sel','select','public.mi_rol() in (''conserje'',''comite'',''admin'')');
+select public._pol('novedades','nov_sel','select','public.mi_rol() in (''conserje'',''comite'',''admin'')');
+select public._pol('novedades','nov_ins','insert','public.mi_rol() in (''conserje'',''comite'',''admin'')');
+select public._pol('unidad_vehiculos','uv_sel','select','public.mi_rol() in (''conserje'',''comite'',''admin'') or (public.es_residente() and depto = public.mi_depto())');
+select public._pol('unidad_vehiculos','uv_ins','insert','public.es_admin() or (public.es_residente() and depto = public.mi_depto())');
+select public._pol('unidad_vehiculos','uv_upd','update','public.es_admin() or (public.es_residente() and depto = public.mi_depto())');
+select public._pol('unidad_vehiculos','uv_del','delete','public.es_admin() or (public.es_residente() and depto = public.mi_depto())');
+select public._pol('unidad_mascotas','um_sel','select','public.mi_rol() in (''conserje'',''comite'',''admin'') or (public.es_residente() and depto = public.mi_depto())');
+select public._pol('unidad_mascotas','um_ins','insert','public.es_admin() or (public.es_residente() and depto = public.mi_depto())');
+select public._pol('unidad_mascotas','um_upd','update','public.es_admin() or (public.es_residente() and depto = public.mi_depto())');
+select public._pol('unidad_mascotas','um_del','delete','public.es_admin() or (public.es_residente() and depto = public.mi_depto())');
+select public._pol('unidad_espacios','ue_sel','select','public.mi_rol() in (''conserje'',''comite'',''admin'') or (public.es_residente() and depto = public.mi_depto())');
+select public._pol('unidad_espacios','ue_ins','insert','public.es_admin()');
+select public._pol('unidad_espacios','ue_upd','update','public.es_admin()');
+select public._pol('unidad_espacios','ue_del','delete','public.es_admin()');
 select public._pol('presupuestos','pre_sel','select','public.mi_rol() in (''residente'',''propietario'',''comite'',''admin'')');
 select public._pol('presupuestos','pre_ins','insert','public.es_admin()');
 select public._pol('presupuestos','pre_upd','update','public.es_admin()');
@@ -4334,6 +4470,8 @@ begin
       or (r = 'mantencion' and exists (select 1 from public.ot o where o.edificio_id = e and o.empresa_id = public.mi_empresa() and p_name = any(o.fotos_antes)));
   end if;
   if c = 'emergencia' then return r <> 'mantencion'; end if;
+  if c = 'novedades' then return r in ('conserje','comite','admin'); end if;
+  if c = 'mascotas' then return r in ('conserje','comite','admin') or exists (select 1 from public.unidad_mascotas x where x.edificio_id = e and x.foto = p_name and r in ('residente','propietario') and x.depto = public.mi_depto()); end if;
   if c = 'proveedores' then return r in ('comite','admin'); end if;
   if c = 'seguros' then
     return r in ('comite','admin') or (r = 'propietario' and exists (select 1 from public.unidad_documentos d where d.edificio_id = e and d.archivo = p_name and d.depto = public.mi_depto()));
@@ -4366,7 +4504,7 @@ create policy "fotos_delete" on storage.objects for delete to authenticated usin
 do $$
 declare t text;
 begin
-  foreach t in array array['edificios','empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos','certificados','banco_movimientos','banco_pagadores','presupuestos','emergencia_responsables','emergencia_simulacros','proveedores','contratos']
+  foreach t in array array['edificios','empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos','certificados','banco_movimientos','banco_pagadores','presupuestos','emergencia_responsables','emergencia_simulacros','proveedores','contratos','turnos','novedades','unidad_vehiculos','unidad_mascotas','unidad_espacios']
   loop
     begin
       execute format('alter publication supabase_realtime add table public.%I', t);

@@ -2,6 +2,8 @@
 
 ## Sin publicar
 
+- **Libro de novedades** de conserjería que no se puede editar ni borrar, con turnos: entrega con pendientes y resumen automático, y recepción registrada.
+- **Fichas de las unidades**: vehículos y mascotas registrados por cada unidad, bodegas y estacionamientos asignados por la administración, con buscador para conserjería.
 - **Emergencias**: plan con teléfonos, punto de encuentro, instrucciones y documento; responsables por zona; consulta registrada de quienes necesitan ayuda para evacuar; simulacros; resumen imprimible.
 - **Proveedores y contratos**: contratos, certificaciones, mantenciones y garantías con vencimiento, aviso configurable, renovación y costo mensual comprometido.
 - **Cartola bancaria**: importación desde Excel o CSV, unidad sugerida por RUT, unidad mencionada, nombre, monto o pagador conocido; al confirmar se registran los pagos con un solo comprobante; los cargos pasan al flujo de caja; sin duplicados y con deshacer.

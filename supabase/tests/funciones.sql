@@ -617,3 +617,31 @@ select t.falla($$insert into emergencia_responsables (funcion, nombre) values ('
 select t.ok((select count(*) = 0 from proveedores) and (select count(*) = 0 from contratos), 'un residente no ve proveedores ni contratos');
 select t.ok(public.puede_ver_archivo(public.mi_edificio() || '/emergencia/2026-01-01/plan.pdf') and not public.puede_ver_archivo(public.mi_edificio() || '/proveedores/2026-01-01/c.pdf'), 'el documento del plan lo ve la comunidad; los contratos, no');
 \echo 'OK: plan de emergencia y proveedores'
+
+-- ============ libro de novedades, turnos y fichas de la unidad ============
+select t.soy(:'a4');
+select public.iniciar_turno() as tur1 \gset
+select t.ok(public.iniciar_turno() = :'tur1', 'iniciar dos veces no abre otro turno');
+insert into novedades (texto, categoria, depto, uid) values ('  Ruidos en el 102 a las 23:40  ', 'reclamo', '102', :'a1');
+select t.ok((select uid = :'a4' and turno_id = :'tur1' and texto = 'Ruidos en el 102 a las 23:40' from novedades), 'la anotación queda con quien la escribe y en su turno');
+select t.falla($$update novedades set texto = 'otra cosa'$$, 'editar una novedad') ;
+select t.ok((select count(*) = 1 from novedades where texto like 'Ruidos%'), 'lo anotado no cambia');
+delete from novedades; select t.ok((select count(*) = 1 from novedades), 'lo anotado no se borra');
+select public.entregar_turno('Pendiente: llamar al técnico del portón', '{"encomiendas": 3}');
+select t.falla($$select public.entregar_turno('x')$$, 'entregar sin turno abierto');
+select t.soy(:'a1'); select public.iniciar_turno() as tur2 \gset
+select t.ok((select recibe_uid = :'a1' and recibido_at is not null and entrega like 'Pendiente%' from turnos where id = :'tur1'), 'quien inicia el turno siguiente queda como que recibió la entrega');
+select t.soy(:'a2');
+select t.ok((select count(*) = 0 from novedades) and (select count(*) = 0 from turnos), 'los residentes no ven el libro de novedades');
+select t.falla($$insert into novedades (texto) values ('x')$$, 'un residente escribe en el libro');
+select t.falla($$select public.iniciar_turno()$$, 'un residente inicia turno');
+insert into unidad_vehiculos (depto, patente, marca) values ('101', 'ab-cd 12', 'Toyota');
+select t.ok((select patente = 'ABCD12' from unidad_vehiculos where depto = '101'), 'la patente se guarda en un solo formato');
+insert into unidad_mascotas (depto, nombre, especie) values ('101', 'Toby', 'perro');
+select t.falla($$insert into unidad_mascotas (depto, nombre) values ('102', 'Ajeno')$$, 'registrar una mascota en otra unidad');
+select t.falla($$insert into unidad_espacios (depto, tipo, numero) values ('101', 'bodega', 'B-1')$$, 'un residente se asigna una bodega');
+select t.soy(:'a3'); select t.ok((select count(*) = 0 from unidad_vehiculos) and (select count(*) = 0 from unidad_mascotas), 'otra unidad no ve los vehículos ni las mascotas');
+select t.soy(:'a1'); insert into unidad_espacios (depto, tipo, numero) values ('101', 'bodega', 'B-1');
+select t.falla($$insert into unidad_espacios (depto, tipo, numero) values ('102', 'bodega', 'B-1')$$, 'asignar la misma bodega a dos unidades');
+select t.soy(:'a4'); select t.ok((select count(*) = 1 from unidad_vehiculos where patente = 'ABCD12') and (select count(*) = 1 from unidad_espacios), 'conserjería busca patentes, mascotas y bodegas');
+\echo 'OK: libro de novedades y fichas de la unidad'
