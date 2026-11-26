@@ -52,6 +52,10 @@ alter table public.edificios add column if not exists multas jsonb not null defa
   '{"plazo_decision":5,"plazo_descargos":5,"aprobaciones_comite":1,"destino":"fondo_reserva"}'::jsonb;
 -- Tipos de póliza que el edificio debe mantener vigentes (el seguro colectivo de incendio es obligatorio por ley)
 alter table public.edificios add column if not exists seguros_obligatorios jsonb not null default '["incendio"]'::jsonb;
+-- Suspensión de luz por morosidad: cuotas que la hacen procedente (la ley: 3 o más), aprobaciones del comité,
+-- días corridos de aviso previo y períodos que no cuentan (estado de catástrofe).
+alter table public.edificios add column if not exists suspension jsonb not null default
+  '{"umbral":3,"aprobaciones_comite":1,"dias_aviso":5,"periodos_excluidos":[]}'::jsonb;
 alter table public.edificios add column if not exists mora_tasa numeric(6,3) not null default 0;   -- interés por mora, % mensual (0 = no se cobra)
 alter table public.edificios add column if not exists mora_desde date;                             -- la mora se cuenta desde esta fecha (o desde el vencimiento, si es posterior)
 alter table public.edificios drop column if exists codigo;   -- los códigos de invitación eran de la versión multi-edificio
@@ -711,6 +715,68 @@ create table if not exists public.unidad_documentos (
   ts          timestamptz default now()
 );
 
+-- Condiciones especiales por unidad, con consentimiento expreso. Electrodependencia y oxígeno medicinal forman
+-- un registro reservado: lo ven la administración y la propia unidad; conserjería, con motivo registrado
+-- (emergencias). Una unidad con estas condiciones nunca puede quedar sin luz por morosidad (Ley 21.442, art. 36).
+create table if not exists public.condiciones_especiales (
+  id          uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  depto       text not null,
+  tipo        text not null check (tipo in ('electrodependiente','oxigeno','movilidad_reducida','adulto_mayor_solo','otra')),
+  detalle     text not null default '',
+  consentimiento_id uuid references public.consentimientos(id),
+  consentimiento_papel text,                 -- si lo registró la administración con un consentimiento firmado en papel
+  desde       date not null default current_date,
+  hasta       date,
+  registrado_por uuid default auth.uid(),
+  ts          timestamptz default now(),
+  check (tipo <> 'otra' or length(trim(detalle)) > 0)
+);
+-- Suspensión del suministro eléctrico por morosidad (adaptado del módulo E3 de CactusOne). Semiautomático:
+-- la app detecta y prepara, nunca corta sola, y cada paso repite los resguardos que exigen la ley y los tribunales.
+create table if not exists public.suspensiones (
+  id          uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  folio       int not null,
+  depto       text not null,
+  cuotas      int not null,
+  deuda       numeric(14,0) not null,
+  estado      text not null default 'en_comite' check (estado in ('en_comite','aprobada','rechazada','avisada','solicitada','suspendida','por_reponer','repuesta','cancelada')),
+  ronda       int not null default 1,
+  fecha_prevista date,                       -- desde cuándo se puede suspender (tras el aviso previo)
+  avisada_at  timestamptz,
+  solicitada_at timestamptz,
+  suspendida_el date,
+  regularizacion text check (regularizacion in ('pago','convenio')),
+  reponer_antes date,
+  repuesta_el date,
+  motivo_cierre text,
+  creado_por  uuid default auth.uid(),
+  ts          timestamptz default now(),
+  unique (edificio_id, folio)
+);
+create unique index if not exists suspensiones_activa_idx on public.suspensiones (edificio_id, depto)
+  where estado not in ('rechazada','repuesta','cancelada');
+create table if not exists public.suspension_votos (
+  suspension_id uuid not null references public.suspensiones(id) on delete cascade,
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  ronda       int not null,
+  uid         uuid not null default auth.uid(),
+  aprueba     boolean not null,
+  comentario  text,
+  ts          timestamptz default now(),
+  primary key (suspension_id, ronda, uid)
+);
+create table if not exists public.suspension_eventos (
+  id          uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  suspension_id uuid not null references public.suspensiones(id) on delete cascade,
+  tipo        text not null,
+  texto       text,
+  uid         uuid default auth.uid(),
+  ts          timestamptz default now()
+);
+
 -- Archivos de filas borradas por plazo de conservación, pendientes de eliminar del bucket.
 -- Los elimina la app de la administración (la base de datos no puede borrar archivos de Storage).
 create table if not exists public.archivos_por_borrar (
@@ -749,7 +815,7 @@ begin
   end if;
 
   select id into def from public.edificios order by creado, id limit 1;
-  foreach t in array array['empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos']
+  foreach t in array array['empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos']
   loop
     execute format('alter table public.%I add column if not exists edificio_id uuid references public.edificios(id) on delete cascade', t);
     execute format('select count(*) from public.%I where edificio_id is null', t) into n;
@@ -862,7 +928,7 @@ $$;
 do $$
 declare t text;
 begin
-  foreach t in array array['empresas','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos']
+  foreach t in array array['empresas','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos']
   loop
     execute format('alter table public.%I alter column edificio_id set default public.mi_edificio()', t);
   end loop;
@@ -1588,7 +1654,7 @@ declare t text;
 begin
   -- tablas con datos personales o de dinero (no los votos: el voto de un sondeo es secreto)
   foreach t in array array['edificios','usuarios','contactos','unidades','gastos','pagos','convenios','cargos','caja_movimientos','fondos','fondo_movimientos',
-                           'lecturas','multas_catalogo','indicadores','consentimientos','solicitudes_datos','estacionamientos','polizas','siniestros','unidad_documentos'] loop
+                           'lecturas','multas_catalogo','indicadores','consentimientos','solicitudes_datos','estacionamientos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones'] loop
     execute format('drop trigger if exists %I on public.%I', t || '_auditoria', t);
     execute format('create trigger %I after insert or update or delete on public.%I for each row execute function privado.auditar()', t || '_auditoria', t);
   end loop;
@@ -1658,12 +1724,6 @@ end $$;
 drop trigger if exists usuarios_consentimiento on public.usuarios;
 create trigger usuarios_consentimiento after insert or update of privacidad_at on public.usuarios for each row execute function privado.consentir_privacidad();
 
-create or replace function public.revocar_consentimiento(p_id uuid) returns void
-language plpgsql security definer set search_path = public as $$
-begin
-  update public.consentimientos set revocado_at = now() where id = p_id and uid = auth.uid() and revocado_at is null and tipo <> 'privacidad';
-  if not found then raise exception 'No se puede revocar ese consentimiento (el aviso de privacidad se retira eliminando la cuenta)'; end if;
-end $$;
 
 -- Solicitudes de derechos: el plazo de respuesta se fija en la base de datos
 create or replace function public.solicitudes_datos_antes() returns trigger
@@ -1774,6 +1834,248 @@ begin
     n := n + 1;
   end loop;
   return n;
+end $$;
+
+-- ---------- Condiciones especiales ----------
+create or replace function public.declarar_condicion(p_tipo text, p_detalle text, p_texto_consentimiento text) returns uuid
+language plpgsql security definer set search_path = public as $$
+declare e uuid := public.mi_edificio(); cid uuid; nid uuid;
+begin
+  if not public.es_residente() or coalesce(public.mi_depto(), '') = '' then raise exception 'Solo los residentes declaran condiciones de su unidad'; end if;
+  if coalesce(trim(p_texto_consentimiento), '') = '' then raise exception 'Falta el consentimiento expreso'; end if;
+  insert into public.consentimientos (edificio_id, uid, tipo, texto) values (e, auth.uid(), 'condicion_especial', trim(p_texto_consentimiento)) returning id into cid;
+  insert into public.condiciones_especiales (edificio_id, depto, tipo, detalle, consentimiento_id) values (e, public.mi_depto(), p_tipo, trim(coalesce(p_detalle, '')), cid) returning id into nid;
+  return nid;
+end $$;
+
+-- La administración registra una condición con consentimiento firmado en papel
+create or replace function public.registrar_condicion(p_depto text, p_tipo text, p_detalle text, p_consentimiento text) returns uuid
+language plpgsql security definer set search_path = public as $$
+declare nid uuid;
+begin
+  if not public.es_admin() then raise exception 'Solo administración'; end if;
+  if coalesce(trim(p_consentimiento), '') = '' then raise exception 'Indica cómo consta el consentimiento (por ejemplo, formulario firmado y su fecha)'; end if;
+  if not exists (select 1 from public.unidades where edificio_id = public.mi_edificio() and depto = trim(p_depto)) then raise exception 'La unidad % no existe', p_depto; end if;
+  insert into public.condiciones_especiales (edificio_id, depto, tipo, detalle, consentimiento_papel) values (public.mi_edificio(), trim(p_depto), p_tipo, trim(coalesce(p_detalle, '')), trim(p_consentimiento)) returning id into nid;
+  return nid;
+end $$;
+
+create or replace function public.terminar_condicion(p_id uuid) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  update public.condiciones_especiales set hasta = public.hoy() where id = p_id and hasta is null and edificio_id = public.mi_edificio()
+    and (public.es_admin() or (public.es_residente() and depto = public.mi_depto()));
+  if not found then raise exception 'No autorizado'; end if;
+end $$;
+
+-- Conserjería (en una emergencia) y administración ven las unidades con condiciones especiales; queda en la bitácora
+create or replace function public.ver_condiciones(p_motivo text) returns table (depto text, tipo text, detalle text)
+language plpgsql security definer set search_path = public as $$
+declare e uuid := public.mi_edificio();
+begin
+  if public.mi_rol() is null or public.mi_rol() not in ('conserje','admin') then raise exception 'No autorizado'; end if;
+  if coalesce(trim(p_motivo), '') = '' then raise exception 'Indica el motivo (por ejemplo, la emergencia en curso)'; end if;
+  insert into public.auditoria (edificio_id, accion, tabla, registro, motivo) values (e, 'consultar', 'condiciones_especiales', 'todas', trim(p_motivo));
+  return query select c.depto, c.tipo, c.detalle from public.condiciones_especiales c where c.edificio_id = e and c.hasta is null order by c.depto;
+end $$;
+
+-- Revocar el consentimiento de una condición la deja sin efecto
+create or replace function public.revocar_consentimiento(p_id uuid) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  update public.consentimientos set revocado_at = now() where id = p_id and uid = auth.uid() and revocado_at is null and tipo <> 'privacidad';
+  if not found then raise exception 'No se puede revocar ese consentimiento (el aviso de privacidad se retira eliminando la cuenta)'; end if;
+  update public.condiciones_especiales set hasta = public.hoy() where consentimiento_id = p_id and hasta is null;
+end $$;
+
+-- ---------- Suspensión de luz por morosidad ----------
+create or replace function privado.susp_cfg(p_e uuid, k text, def int) returns int
+language sql stable security definer set search_path = public as $$
+  select coalesce((select (suspension->>k)::int from public.edificios where id = p_e), def)
+$$;
+-- ¿Unidad protegida? Electrodependencia u oxígeno medicinal vigentes: nunca se suspende
+create or replace function privado.protegida(p_e uuid, p_depto text) returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists (select 1 from public.condiciones_especiales where edificio_id = p_e and depto = p_depto and hasta is null and tipo in ('electrodependiente','oxigeno'))
+$$;
+-- Cuotas de gasto común impagas: solo la parte del gasto común (no multas ni otros cargos, ni intereses), sin
+-- contar períodos en un convenio de pago vigente ni los excluidos (estado de catástrofe)
+create or replace function privado.cuotas_impagas(p_e uuid, p_depto text, out cuotas int, out deuda numeric)
+language sql stable security definer set search_path = public as $$
+  select count(*)::int, coalesce(sum(x.falta), 0) from (
+    select greatest(0, (g.monto - coalesce((select sum((d->>'monto')::numeric) from jsonb_array_elements(g.detalle) d where d ? 'c'), 0)) - g.pagado_monto) as falta
+    from public.gasto_unidades g join public.gastos p on p.edificio_id = g.edificio_id and p.periodo = g.periodo and p.publicado
+    where g.edificio_id = p_e and g.depto = p_depto
+      and not exists (select 1 from public.convenios c where c.id = g.convenio_id and c.estado in ('propuesto','vigente'))
+      and not exists (select 1 from public.edificios ed, jsonb_array_elements_text(ed.suspension->'periodos_excluidos') z where ed.id = p_e and z = g.periodo)) x
+  where x.falta > 0
+$$;
+create or replace function public.unidades_morosas() returns table (depto text, cuotas int, deuda numeric, protegida boolean, proceso uuid, estado text)
+language sql stable security definer set search_path = public as $$
+  select u.depto, ci.cuotas, ci.deuda, privado.protegida(u.edificio_id, u.depto), sp.id, sp.estado
+  from public.unidades u cross join lateral privado.cuotas_impagas(u.edificio_id, u.depto) ci
+  left join public.suspensiones sp on sp.edificio_id = u.edificio_id and sp.depto = u.depto and sp.estado not in ('rechazada','repuesta','cancelada')
+  where u.edificio_id = public.mi_edificio() and public.mi_rol() in ('comite','admin') and (ci.cuotas > 0 or sp.id is not null)
+  order by ci.cuotas desc, u.depto
+$$;
+create or replace function privado.evento_susp(p_id uuid, p_tipo text, p_texto text) returns void
+language sql security definer set search_path = public as $$
+  insert into public.suspension_eventos (edificio_id, suspension_id, tipo, texto) select edificio_id, id, p_tipo, p_texto from public.suspensiones where id = p_id
+$$;
+-- Si la unidad pasó a estar protegida, el proceso se cierra (o se ordena reponer, si ya estaba suspendida)
+create or replace function privado.susp_proteger(p_id uuid) returns boolean
+language plpgsql security definer set search_path = public as $$
+declare sp public.suspensiones;
+begin
+  select * into sp from public.suspensiones where id = p_id;
+  if not privado.protegida(sp.edificio_id, sp.depto) then return false; end if;
+  if sp.estado in ('suspendida','por_reponer') then
+    update public.suspensiones set estado = 'por_reponer', reponer_antes = least(coalesce(reponer_antes, public.hoy()), public.hoy()) where id = p_id;
+    perform privado.evento_susp(p_id, 'proteccion', 'En la unidad vive una persona electrodependiente o con oxígeno medicinal: hay que reponer el suministro de inmediato (art. 36).');
+  elsif sp.estado not in ('rechazada','repuesta','cancelada') then
+    update public.suspensiones set estado = 'cancelada', motivo_cierre = 'No procede: unidad con persona electrodependiente o con oxígeno medicinal (art. 36)' where id = p_id;
+    perform privado.evento_susp(p_id, 'proteccion', 'No procede la suspensión: unidad protegida (art. 36).');
+  end if;
+  return true;
+end $$;
+create or replace function privado.tg_condicion_protege() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare sp record;
+begin
+  if new.hasta is null and new.tipo in ('electrodependiente','oxigeno') then
+    for sp in select id from public.suspensiones where edificio_id = new.edificio_id and depto = new.depto and estado not in ('rechazada','repuesta','cancelada') loop
+      perform privado.susp_proteger(sp.id);
+      perform privado.push(new.edificio_id, privado.usuarios_de(new.edificio_id, '{admin}'), '⚡ Suspensión de luz: unidad protegida',
+        'Depto ' || new.depto || ': revisa el proceso de suspensión (art. 36).', '#finanzas--suspension');
+    end loop;
+  end if;
+  return null;
+end $$;
+drop trigger if exists condicion_protege on public.condiciones_especiales;
+create trigger condicion_protege after insert or update on public.condiciones_especiales for each row execute function privado.tg_condicion_protege();
+
+create or replace function public.proponer_suspension(p_depto text) returns uuid
+language plpgsql security definer set search_path = public as $$
+declare e uuid := public.mi_edificio(); ci record; f int; nid uuid; n int;
+begin
+  if not public.es_admin() then raise exception 'Solo administración'; end if;
+  if privado.protegida(e, p_depto) then raise exception 'No procede: en la unidad vive una persona electrodependiente o con oxígeno medicinal (art. 36)'; end if;
+  select * into ci from privado.cuotas_impagas(e, p_depto);
+  if ci.cuotas < privado.susp_cfg(e, 'umbral', 3) then raise exception 'La unidad tiene % cuota(s) de gasto común impaga(s); se requieren %', ci.cuotas, privado.susp_cfg(e, 'umbral', 3); end if;
+  if exists (select 1 from public.suspensiones where edificio_id = e and depto = p_depto and estado not in ('rechazada','repuesta','cancelada')) then raise exception 'La unidad ya tiene un proceso en curso'; end if;
+  perform pg_advisory_xact_lock(hashtextextended('suspensiones:' || e::text, 0));
+  select coalesce(max(folio), 0) + 1 into f from public.suspensiones where edificio_id = e;
+  n := privado.susp_cfg(e, 'aprobaciones_comite', 1);
+  insert into public.suspensiones (edificio_id, folio, depto, cuotas, deuda, estado) values (e, f, p_depto, ci.cuotas, ci.deuda, case when n > 0 then 'en_comite' else 'aprobada' end) returning id into nid;
+  perform privado.evento_susp(nid, 'propuesta', ci.cuotas || ' cuotas de gasto común impagas, $' || ci.deuda || '.');
+  if n > 0 then perform privado.push(e, privado.usuarios_de(e, '{comite}'), '⚡ Suspensión de luz por aprobar', 'Depto ' || p_depto || ': ' || ci.cuotas || ' cuotas impagas.', '#finanzas--suspension'); end if;
+  return nid;
+end $$;
+
+create or replace function public.votar_suspension(p_id uuid, p_aprueba boolean, p_comentario text default null) returns void
+language plpgsql security definer set search_path = public as $$
+declare sp public.suspensiones; n int; si int; no_ int;
+begin
+  select * into sp from public.suspensiones where id = p_id and edificio_id = public.mi_edificio() for update;
+  if not found or public.mi_rol() is distinct from 'comite' then raise exception 'Solo el comité aprueba'; end if;
+  if sp.estado <> 'en_comite' then raise exception 'La suspensión no está esperando al comité'; end if;
+  if not p_aprueba and coalesce(trim(p_comentario), '') = '' then raise exception 'Indica el motivo del rechazo'; end if;
+  if privado.susp_proteger(p_id) then return; end if;
+  insert into public.suspension_votos (suspension_id, edificio_id, ronda, aprueba, comentario) values (p_id, sp.edificio_id, sp.ronda, p_aprueba, nullif(trim(p_comentario), ''));
+  perform privado.evento_susp(p_id, 'voto', case when p_aprueba then 'Aprueba' else 'Rechaza: ' || trim(p_comentario) end);
+  n := privado.susp_cfg(sp.edificio_id, 'aprobaciones_comite', 1);
+  select count(*) filter (where aprueba), count(*) filter (where not aprueba) into si, no_ from public.suspension_votos where suspension_id = p_id and ronda = sp.ronda;
+  if si >= n then update public.suspensiones set estado = 'aprobada' where id = p_id;
+  elsif no_ >= n then update public.suspensiones set estado = 'rechazada', motivo_cierre = 'El comité no aprobó la suspensión' where id = p_id;
+  end if;
+end $$;
+
+-- Aviso previo a la unidad, con al menos los días corridos configurados (por defecto 5) antes de la fecha prevista
+create or replace function public.avisar_suspension(p_id uuid, p_fecha date) returns void
+language plpgsql security definer set search_path = public as $$
+declare sp public.suspensiones; d int;
+begin
+  select * into sp from public.suspensiones where id = p_id and edificio_id = public.mi_edificio() for update;
+  if not found or not public.es_admin() then raise exception 'No autorizado'; end if;
+  if sp.estado <> 'aprobada' then raise exception 'Primero la aprueba el comité'; end if;
+  if privado.susp_proteger(p_id) then raise exception 'No procede: la unidad está protegida (art. 36)'; end if;
+  d := privado.susp_cfg(sp.edificio_id, 'dias_aviso', 5);
+  if p_fecha is null or p_fecha < public.hoy() + d then raise exception 'La fecha prevista debe ser al menos % días corridos después del aviso (desde el %)', d, to_char(public.hoy() + d, 'DD-MM-YYYY'); end if;
+  update public.suspensiones set estado = 'avisada', avisada_at = now(), fecha_prevista = p_fecha where id = p_id;
+  perform privado.evento_susp(p_id, 'aviso', 'Aviso previo enviado. Fecha prevista: ' || to_char(p_fecha, 'DD-MM-YYYY') || '.');
+  perform privado.push(sp.edificio_id, privado.usuarios_de(sp.edificio_id, '{residente,propietario}', sp.depto), '⚡ Aviso previo de suspensión de luz',
+    'Por ' || sp.cuotas || ' cuotas de gasto común impagas, desde el ' || to_char(p_fecha, 'DD-MM-YYYY') || '. Regulariza con un pago o un convenio.', '#gastos');
+end $$;
+
+-- Recién desde la fecha prevista y sin regularizar: solicitud a la empresa eléctrica (u orden interna)
+create or replace function public.solicitar_suspension(p_id uuid) returns void
+language plpgsql security definer set search_path = public as $$
+declare sp public.suspensiones; ci record;
+begin
+  select * into sp from public.suspensiones where id = p_id and edificio_id = public.mi_edificio() for update;
+  if not found or not public.es_admin() then raise exception 'No autorizado'; end if;
+  if sp.estado <> 'avisada' then raise exception 'Primero se envía el aviso previo'; end if;
+  if public.hoy() < sp.fecha_prevista then raise exception 'Aún no llega la fecha prevista (%)', to_char(sp.fecha_prevista, 'DD-MM-YYYY'); end if;
+  if privado.susp_proteger(p_id) then raise exception 'No procede: la unidad está protegida (art. 36)'; end if;
+  select * into ci from privado.cuotas_impagas(sp.edificio_id, sp.depto);
+  if ci.cuotas < privado.susp_cfg(sp.edificio_id, 'umbral', 3) then
+    update public.suspensiones set estado = 'cancelada', motivo_cierre = 'Ya no tiene las cuotas impagas necesarias (pagó o firmó un convenio)' where id = p_id;
+    perform privado.evento_susp(p_id, 'cancelacion', 'Ya no procede: quedan ' || ci.cuotas || ' cuota(s) impaga(s).');
+    return;
+  end if;
+  update public.suspensiones set estado = 'solicitada', solicitada_at = now(), cuotas = ci.cuotas, deuda = ci.deuda where id = p_id;
+  perform privado.evento_susp(p_id, 'solicitud', 'Solicitud de suspensión del suministro eléctrico (solo electricidad; el agua nunca se corta).');
+end $$;
+
+create or replace function public.confirmar_suspension(p_id uuid, p_fecha date) returns void
+language plpgsql security definer set search_path = public as $$
+declare sp public.suspensiones;
+begin
+  select * into sp from public.suspensiones where id = p_id and edificio_id = public.mi_edificio() for update;
+  if not found or not public.es_admin() or sp.estado <> 'solicitada' then raise exception 'No autorizado'; end if;
+  update public.suspensiones set estado = 'suspendida', suspendida_el = coalesce(p_fecha, public.hoy()) where id = p_id;
+  perform privado.evento_susp(p_id, 'suspension', 'Suministro eléctrico suspendido el ' || to_char(coalesce(p_fecha, public.hoy()), 'DD-MM-YYYY') || '.');
+end $$;
+
+-- Pago o convenio: antes del corte cierra el caso; después, hay que reponer a más tardar el día hábil siguiente
+create or replace function public.regularizar_suspension(p_id uuid, p_tipo text, p_nota text default null) returns void
+language plpgsql security definer set search_path = public as $$
+declare sp public.suspensiones; v date;
+begin
+  select * into sp from public.suspensiones where id = p_id and edificio_id = public.mi_edificio() for update;
+  if not found or not public.es_admin() then raise exception 'No autorizado'; end if;
+  if p_tipo not in ('pago','convenio') then raise exception 'Indica si fue pago o convenio'; end if;
+  if sp.estado = 'suspendida' then
+    v := privado.dias_habiles(sp.edificio_id, public.hoy(), 1);
+    update public.suspensiones set estado = 'por_reponer', regularizacion = p_tipo, reponer_antes = v where id = p_id;
+    perform privado.evento_susp(p_id, 'regularizacion', initcap(p_tipo) || coalesce(': ' || nullif(trim(p_nota), ''), '') || '. Reponer a más tardar el ' || to_char(v, 'DD-MM-YYYY') || ' (art. 36).');
+    perform privado.push(sp.edificio_id, privado.usuarios_de(sp.edificio_id, '{residente,propietario}', sp.depto), '⚡ Reposición del suministro', 'Se repondrá a más tardar el ' || to_char(v, 'DD-MM-YYYY') || '.', '#gastos');
+  elsif sp.estado in ('en_comite','aprobada','avisada','solicitada') then
+    update public.suspensiones set estado = 'cancelada', regularizacion = p_tipo, motivo_cierre = 'Regularizada (' || p_tipo || ') antes de la suspensión' where id = p_id;
+    perform privado.evento_susp(p_id, 'regularizacion', initcap(p_tipo) || ' antes de la suspensión' || coalesce(': ' || nullif(trim(p_nota), ''), '') || '.');
+  else raise exception 'El caso ya está cerrado';
+  end if;
+end $$;
+
+create or replace function public.confirmar_reposicion(p_id uuid, p_fecha date) returns void
+language plpgsql security definer set search_path = public as $$
+declare sp public.suspensiones; f date := coalesce(p_fecha, public.hoy());
+begin
+  select * into sp from public.suspensiones where id = p_id and edificio_id = public.mi_edificio() for update;
+  if not found or not public.es_admin() or sp.estado <> 'por_reponer' then raise exception 'No autorizado'; end if;
+  update public.suspensiones set estado = 'repuesta', repuesta_el = f where id = p_id;
+  perform privado.evento_susp(p_id, 'reposicion', 'Suministro repuesto el ' || to_char(f, 'DD-MM-YYYY') || case when f > sp.reponer_antes then ' (fuera del plazo del ' || to_char(sp.reponer_antes, 'DD-MM-YYYY') || ')' else '' end || '.');
+end $$;
+
+create or replace function public.cancelar_suspension(p_id uuid, p_motivo text) returns void
+language plpgsql security definer set search_path = public as $$
+declare sp public.suspensiones;
+begin
+  select * into sp from public.suspensiones where id = p_id and edificio_id = public.mi_edificio() for update;
+  if not found or not public.es_admin() or sp.estado not in ('en_comite','aprobada','avisada','solicitada') then raise exception 'No autorizado'; end if;
+  if coalesce(trim(p_motivo), '') = '' then raise exception 'Indica el motivo'; end if;
+  update public.suspensiones set estado = 'cancelada', motivo_cierre = trim(p_motivo) where id = p_id;
+  perform privado.evento_susp(p_id, 'cancelacion', trim(p_motivo));
 end $$;
 
 -- ---------- Multas con debido proceso ----------
@@ -2602,6 +2904,10 @@ alter table public.solicitudes_datos enable row level security;
 alter table public.polizas          enable row level security;
 alter table public.siniestros       enable row level security;
 alter table public.unidad_documentos enable row level security;
+alter table public.condiciones_especiales enable row level security;
+alter table public.suspensiones     enable row level security;
+alter table public.suspension_votos enable row level security;
+alter table public.suspension_eventos enable row level security;
 
 -- helper para (re)crear políticas sin errores. Salvo que se indique lo contrario, toda
 -- política queda además limitada a las filas del edificio del usuario.
@@ -2790,6 +3096,12 @@ select public._pol('siniestros','sin_upd','update','public.es_admin()');
 select public._pol('unidad_documentos','ud_sel','select','public.mi_rol() in (''comite'',''admin'') or (public.mi_rol() = ''propietario'' and depto = public.mi_depto())');
 select public._pol('unidad_documentos','ud_ins','insert','public.es_admin() or (public.mi_rol() = ''propietario'' and depto = public.mi_depto())');
 select public._pol('unidad_documentos','ud_upd','update','public.es_admin()');
+-- registro reservado: la administración y la propia unidad (conserjería y comité, solo por ver_condiciones con motivo)
+select public._pol('condiciones_especiales','ce_sel','select','public.es_admin() or (public.es_residente() and depto = public.mi_depto())');
+-- suspensiones: administración y comité; la unidad, desde el aviso previo
+select public._pol('suspensiones','su_sel','select','public.mi_rol() in (''comite'',''admin'') or (public.es_residente() and depto = public.mi_depto() and estado in (''avisada'',''solicitada'',''suspendida'',''por_reponer'',''repuesta''))');
+select public._pol('suspension_votos','sv_sel','select','public.mi_rol() in (''comite'',''admin'')');
+select public._pol('suspension_eventos','se_sel','select','exists (select 1 from public.suspensiones x where x.id = suspension_id)');
 
 -- archivos_por_borrar: la administración los lee y los quita de la cola al borrarlos del bucket
 select public._pol('archivos_por_borrar','apb_sel','select','public.es_admin()');
@@ -2864,7 +3176,7 @@ create policy "fotos_delete" on storage.objects for delete to authenticated usin
 do $$
 declare t text;
 begin
-  foreach t in array array['edificios','empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos']
+  foreach t in array array['edificios','empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos']
   loop
     begin
       execute format('alter publication supabase_realtime add table public.%I', t);

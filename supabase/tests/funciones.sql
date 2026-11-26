@@ -355,3 +355,57 @@ select t.ok((select revisado_por = :'a1' and revisado_at is not null from unidad
 reset role; select t.ok(privado.avisos_seguros() = 1, 'al propietario se le avisa que su póliza vence en menos de 30 días'); select t.ok(privado.avisos_seguros() = 0, 'una sola vez');
 \echo 'OK: seguros'
 
+-- ---------- suspensión de luz por morosidad ----------
+\set a8 '00000000-0000-0000-0000-0000000000a8'
+reset role; insert into auth.users (id) values (:'a8');
+select t.soy(:'a8'); insert into usuarios (id, edificio_id, nombre, depto) values (:'a8', :'ea', 'Tomás Torres', '104');
+select t.soy(:'a1'); insert into unidades (depto, alicuota) values ('104', 0); update usuarios set estado = 'activo', rol = 'propietario' where id = :'a8';
+insert into gastos (periodo, total, publicado, items) select p, 1000, false, '[{"categoria":"Reparación","monto":1000,"prorrateo":"unidades","deptos":["104"]}]' from unnest(array['2031-01','2031-02','2031-03']) p;
+select public.recalcular_prorrateo(p) from unnest(array['2031-01','2031-02','2031-03']) p;
+update gastos set publicado = true where periodo in ('2031-01','2031-02','2031-03');
+select t.ok((select cuotas = 3 and deuda = 3000 and not protegida from public.unidades_morosas() where depto = '104'), 'el 104 tiene 3 cuotas de gasto común impagas');
+select t.falla($$select public.proponer_suspension('103')$$, 'proponer una unidad con menos de 3 cuotas impagas (el 103 tiene 1)');
+select public.proponer_suspension('104') as susp \gset
+select t.falla($$select public.proponer_suspension('104')$$, 'dos procesos a la vez para la misma unidad');
+select t.soy(:'a8'); select t.ok((select count(*) = 0 from suspensiones), 'antes del aviso la unidad no ve el proceso');
+select t.soy(:'a1'); select t.falla(format($$select public.avisar_suspension(%L, public.hoy() + 10)$$, :'susp'), 'avisar sin aprobación del comité');
+select t.soy(:'a5'); select public.votar_suspension(:'susp', true);
+select t.soy(:'a1');
+select t.ok((select estado = 'aprobada' from suspensiones where id = :'susp'), 'aprobada por el comité');
+select t.falla(format($$select public.avisar_suspension(%L, public.hoy() + 2)$$, :'susp'), 'aviso con menos de 5 días corridos');
+select public.avisar_suspension(:'susp', public.hoy() + 5);
+select t.soy(:'a8'); select t.ok((select count(*) = 1 from suspensiones), 'con el aviso previo, la unidad ve el proceso');
+select t.soy(:'a1');
+select t.falla(format($$select public.solicitar_suspension(%L)$$, :'susp'), 'solicitar el corte antes de la fecha prevista');
+reset role; update suspensiones set fecha_prevista = public.hoy() where id = :'susp'; select t.soy(:'a1');
+select public.solicitar_suspension(:'susp');
+select public.confirmar_suspension(:'susp', public.hoy());
+select t.ok((select estado = 'suspendida' from suspensiones where id = :'susp'), 'suspendida tras aviso, aprobación y plazo');
+select public.regularizar_suspension(:'susp', 'pago');
+reset role; select t.ok((select estado = 'por_reponer' and reponer_antes = privado.dias_habiles(edificio_id, public.hoy(), 1) from suspensiones where id = :'susp'), 'tras el pago, reponer a más tardar el día hábil siguiente'); select t.soy(:'a1');
+select public.confirmar_reposicion(:'susp', public.hoy());
+select t.ok((select estado = 'repuesta' from suspensiones where id = :'susp'), 'suministro repuesto');
+-- electrodependencia: se cancela el proceso y ya no se puede proponer
+select public.proponer_suspension('104') as susp2 \gset
+select t.soy(:'a8');
+select t.falla($$select public.declarar_condicion('electrodependiente', 'Concentrador de oxígeno nocturno', '')$$, 'declarar sin consentimiento expreso');
+select public.declarar_condicion('electrodependiente', 'Ventilador mecánico nocturno', 'Autorizo a la administración a registrar esta condición de salud para resguardos en emergencias y frente a cortes de luz.') as cond \gset
+select t.soy(:'a1');
+select t.ok((select estado = 'cancelada' and motivo_cierre like 'No procede%' from suspensiones where id = :'susp2'), 'al registrar un electrodependiente, el proceso se cancela solo');
+select t.falla($$select public.proponer_suspension('104')$$, 'proponer la suspensión de una unidad con electrodependiente');
+select t.ok((select protegida from public.unidades_morosas() where depto = '104'), 'la lista de morosos marca la unidad como protegida');
+select t.soy(:'a5'); select t.ok((select count(*) = 0 from condiciones_especiales), 'el comité no ve el registro reservado');
+select t.soy(:'a2'); select t.ok((select count(*) = 0 from condiciones_especiales), 'otra unidad no lo ve');
+select t.soy(:'a4');
+select t.falla($$select * from public.ver_condiciones('')$$, 'conserjería consulta sin motivo');
+select t.ok((select count(*) = 1 from public.ver_condiciones('Corte de luz general: verificar equipos de apoyo') where depto = '104'), 'conserjería consulta con motivo (emergencia)');
+select t.soy(:'a1'); select t.ok((select count(*) = 1 from auditoria where tabla = 'condiciones_especiales' and accion = 'consultar'), 'la consulta queda en la bitácora');
+-- revocar el consentimiento deja la condición sin efecto
+select t.soy(:'a8'); select public.revocar_consentimiento((select consentimiento_id from condiciones_especiales where id = :'cond'));
+select t.soy(:'a1'); select t.ok((select hasta is not null from condiciones_especiales where id = :'cond'), 'revocado el consentimiento, la condición termina');
+-- períodos excluidos (estado de catástrofe)
+update edificios set suspension = suspension || '{"periodos_excluidos":["2031-01"]}';
+select t.ok((select cuotas = 2 from public.unidades_morosas() where depto = '104'), 'las cuotas de un período excluido no cuentan');
+select t.falla($$select public.proponer_suspension('104')$$, 'con el período excluido ya no alcanza el umbral');
+\echo 'OK: suspensión de luz'
+
