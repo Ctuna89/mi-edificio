@@ -711,3 +711,29 @@ select t.soy(:'a5'); select t.ok((select count(*) = 1 from plantillas), 'el comi
 select t.falla(format($$select public.enviar_documento(%L, '[]')$$, :'pla'), 'el comité envía documentos');
 select t.soy(:'a2'); select t.ok((select count(*) = 0 from plantillas), 'los residentes no ven las plantillas');
 \echo 'OK: plantillas de documentos'
+
+-- ============ facturas de proveedores ============
+select t.soy(:'a1');
+update proveedores set rut = '76.543.210-3' where nombre = 'Ascensores del Sur';
+insert into facturas (tipo_dte, folio, rut_emisor, emisor, fecha, neto, iva, total) values (33, 1501, '76543210-3', 'Ascensores del Sur SpA', '2026-11-10', 100000, 19000, 119000) returning id as fac \gset
+select t.ok((select proveedor_id is not null and rut_emisor = '76543210-3' and estado = 'por_pagar' from facturas where id = :'fac'), 'la factura queda por pagar y ligada al proveedor por su RUT');
+select t.falla($$insert into facturas (tipo_dte, folio, rut_emisor, fecha, total) values (33, 1501, '76.543.210-3', '2026-11-10', 1)$$, 'registrar dos veces la misma factura');
+select t.falla($$insert into facturas (folio, rut_emisor, fecha, total) values (1, '76.543.210-0', '2026-11-10', 1)$$, 'RUT del emisor no válido');
+update facturas set total = 1 where id = :'fac';
+select t.falla(format($$update facturas set estado = 'pagada' where id = %L$$, :'fac'), 'marcarla pagada sin registrar el pago');
+select t.ok((select total = 119000 and estado = 'por_pagar' from facturas where id = :'fac'), 'los montos del documento no se cambian');
+select public.importar_cartola('[{"fecha":"2026-11-28","monto":-119000,"glosa":"PAGO ASCENSORES DEL SUR","n":0}]');
+select id as carg from banco_movimientos where glosa = 'PAGO ASCENSORES DEL SUR' \gset
+select t.falla(format($$select public.pagar_factura(%L, null, 'Mantención', %L)$$, :'fac', (select id from banco_movimientos where monto > 0 limit 1)), 'pagar con un abono');
+select public.pagar_factura(:'fac', null, 'Mantención', :'carg') as cajf \gset
+select t.ok((select estado = 'pagada' and pagada_fecha = '2026-11-28' and caja_id = :'cajf' from facturas where id = :'fac')
+  and (select estado = 'caja' and caja_id = :'cajf' from banco_movimientos where id = :'carg')
+  and (select tipo = 'egreso' and monto = 119000 and descripcion like 'Factura nº 1501%' from caja_movimientos where id = :'cajf'), 'pagarla con el cargo de la cartola: un solo egreso, y el cargo queda conciliado');
+select t.falla(format($$select public.pagar_factura(%L, null, 'x')$$, :'fac'), 'pagar dos veces');
+select public.deshacer_movimiento(:'carg');
+select t.ok((select estado = 'por_pagar' and caja_id is null from facturas where id = :'fac') and not exists (select 1 from caja_movimientos where id = :'cajf'), 'deshacer el cargo deja la factura por pagar');
+select public.pagar_factura(:'fac', '2026-11-30', 'Mantención');
+select t.ok((select estado = 'pagada' and pagada_fecha = '2026-11-30' from facturas where id = :'fac'), 'también se paga sin cartola');
+select t.falla(format($$update facturas set estado = 'anulada' where id = %L$$, :'fac'), 'anular una factura pagada');
+select t.soy(:'a2'); select t.ok((select count(*) = 0 from facturas), 'los residentes no ven las facturas');
+\echo 'OK: facturas de proveedores'

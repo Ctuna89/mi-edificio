@@ -2,6 +2,7 @@
 
 ## Sin publicar
 
+- **Facturas de proveedores** (Finanzas → Facturas): se sube el XML de la factura electrónica del SII (uno o varios documentos, cualquier codificación) y la app lee emisor, folio, fecha, vencimiento, neto, IVA, total y detalle; también se registran a mano. Se ligan al proveedor por su RUT (o lo crean), no se duplican, quedan por pagar y al pagarlas pasan al flujo de caja; en la cartola, un cargo con el mismo total se marca como el pago de la factura, con un solo egreso. Aviso de facturas vencidas.
 - **Plantillas de documentos** (Administración → Plantillas): cartas de cobranza, avisos, citaciones y actas con variables que se completan solas por unidad (deuda, detalle por período, datos para transferir…); seis ejemplos para partir; se imprimen una página por unidad o se envían por correo a una unidad, a las morosas, a todas o a las elegidas (cobranzas y citaciones como notificación formal).
 - **Ingresos de proveedores en portería**: conserjería registra quién entra (empresa, persona, RUT y patente validados, motivo, destino o unidad) con hora de entrada y salida; la administración y el comité programan visitas que conserjería ve en su inicio; la entrega de turno avisa quién sigue dentro; búsqueda y Excel.
 - **Varias unidades por persona**: la administración agrega a una cuenta otras unidades (un segundo depto, un estacionamiento o una bodega con alícuota propia), con el rol en cada una. La persona ve el saldo de todas en su inicio, elige cuál está usando con un selector y recibe los avisos y correos de todas.

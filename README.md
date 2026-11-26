@@ -340,6 +340,10 @@ Este módulo está adaptado de [CactusOne](https://github.com/Ctuna89/cactusone)
 
 ![Conciliación de la cartola bancaria](docs/capturas/banco.png)
 
+**Facturas de proveedores.** En Finanzas → Facturas se sube el XML de la factura electrónica que llega del SII o del proveedor (puede traer varias) y la app lee emisor, folio, fechas, neto, IVA, total y detalle; las boletas y otros documentos se registran a mano con su PDF o foto. Cada factura se liga al proveedor por su RUT (si es nuevo, se agrega a Proveedores), no se puede registrar dos veces, y queda por pagar hasta que se registra el pago, que la pasa al flujo de caja como egreso con su categoría. Al conciliar la cartola, un cargo con el mismo total que una factura por pagar se marca como su pago, con un solo egreso. Los montos leídos del documento no se pueden cambiar; una factura por pagar se anula con un motivo. Las notas de crédito no se importan todavía. El inicio avisa las facturas vencidas.
+
+![Facturas de proveedores](docs/capturas/facturas.png)
+
 **Presupuesto.** En Finanzas → Presupuesto la administración define el presupuesto anual por categoría, con un monto por mes (puede partir del promedio gastado el año anterior). La app lo compara con los ítems de los gastos comunes publicados, mes a mes y en el año. La comunidad lo puede ver.
 
 ![Presupuesto contra gasto real](docs/capturas/presupuesto.png)

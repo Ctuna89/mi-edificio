@@ -1071,6 +1071,34 @@ create table if not exists public.contratos (
   check (hasta is null or desde is null or hasta >= desde)
 );
 
+-- Facturas (y boletas) de proveedores: se leen del XML del SII o se registran a mano; al pagarlas pasan al flujo
+-- de caja como egreso. No se borran: se anulan.
+create table if not exists public.facturas (
+  id          uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  proveedor_id uuid references public.proveedores(id) on delete set null,
+  tipo_dte    int not null default 33,           -- 33 factura, 34 exenta, 56 nota de débito, 61 nota de crédito, 0 otro documento
+  folio       bigint not null,
+  rut_emisor  text not null,
+  emisor      text not null default '',
+  fecha       date not null,
+  vence       date,
+  neto        numeric(14,2) not null default 0,
+  exento      numeric(14,2) not null default 0,
+  iva         numeric(14,2) not null default 0,
+  total       numeric(14,2) not null,
+  detalle     jsonb not null default '[]'::jsonb,
+  categoria   text not null default '',
+  archivo     text default '',
+  estado      text not null default 'por_pagar' check (estado in ('por_pagar','pagada','anulada')),
+  pagada_fecha date,
+  caja_id     uuid,
+  nota        text default '',
+  registrado_por uuid default auth.uid(),
+  ts          timestamptz default now(),
+  unique (edificio_id, rut_emisor, tipo_dte, folio)
+);
+
 -- Ingresos de proveedores y técnicos en portería (programados por la administración o registrados al llegar)
 create table if not exists public.proveedor_ingresos (
   id          uuid primary key default gen_random_uuid(),
@@ -1211,7 +1239,7 @@ begin
   end if;
 
   select id into def from public.edificios order by creado, id limit 1;
-  foreach t in array array['empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos','certificados','banco_movimientos','banco_pagadores','presupuestos','emergencia_responsables','emergencia_simulacros','proveedores','contratos','turnos','novedades','unidad_vehiculos','unidad_mascotas','unidad_espacios','comunicado_lecturas','usuario_unidades','proveedor_ingresos','plantillas']
+  foreach t in array array['empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos','certificados','banco_movimientos','banco_pagadores','presupuestos','emergencia_responsables','emergencia_simulacros','proveedores','contratos','turnos','novedades','unidad_vehiculos','unidad_mascotas','unidad_espacios','comunicado_lecturas','usuario_unidades','proveedor_ingresos','plantillas','facturas']
   loop
     execute format('alter table public.%I add column if not exists edificio_id uuid references public.edificios(id) on delete cascade', t);
     execute format('select count(*) from public.%I where edificio_id is null', t) into n;
@@ -1324,7 +1352,7 @@ $$;
 do $$
 declare t text;
 begin
-  foreach t in array array['empresas','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos','certificados','banco_movimientos','banco_pagadores','presupuestos','emergencia_responsables','emergencia_simulacros','proveedores','contratos','turnos','novedades','unidad_vehiculos','unidad_mascotas','unidad_espacios','comunicado_lecturas','usuario_unidades','proveedor_ingresos','plantillas']
+  foreach t in array array['empresas','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos','certificados','banco_movimientos','banco_pagadores','presupuestos','emergencia_responsables','emergencia_simulacros','proveedores','contratos','turnos','novedades','unidad_vehiculos','unidad_mascotas','unidad_espacios','comunicado_lecturas','usuario_unidades','proveedor_ingresos','plantillas','facturas']
   loop
     execute format('alter table public.%I alter column edificio_id set default public.mi_edificio()', t);
   end loop;
@@ -2096,7 +2124,7 @@ declare t text;
 begin
   -- tablas con datos personales o de dinero (no los votos: el voto de un sondeo es secreto)
   foreach t in array array['edificios','usuarios','contactos','unidades','gastos','pagos','convenios','cargos','caja_movimientos','fondos','fondo_movimientos',
-                           'lecturas','multas_catalogo','indicadores','consentimientos','solicitudes_datos','estacionamientos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','certificados','banco_movimientos','presupuestos','emergencia_responsables','proveedores','contratos','turnos','unidad_vehiculos','unidad_mascotas','unidad_espacios','usuario_unidades','proveedor_ingresos','plantillas'] loop
+                           'lecturas','multas_catalogo','indicadores','consentimientos','solicitudes_datos','estacionamientos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','certificados','banco_movimientos','presupuestos','emergencia_responsables','proveedores','contratos','turnos','unidad_vehiculos','unidad_mascotas','unidad_espacios','usuario_unidades','proveedor_ingresos','plantillas','facturas'] loop
     execute format('drop trigger if exists %I on public.%I', t || '_auditoria', t);
     execute format('create trigger %I after insert or update or delete on public.%I for each row execute function privado.auditar()', t || '_auditoria', t);
   end loop;
@@ -3120,6 +3148,60 @@ begin
   update public.banco_movimientos set estado = case when p_caja then 'caja' else 'ignorado' end, caja_id = cid, nota = coalesce(p_nota, ''), conciliado_por = auth.uid(), conciliado_at = now() where id = p_id;
 end $$;
 
+-- ---------- Facturas de proveedores ----------
+create or replace function privado.facturas_antes() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if tg_op = 'INSERT' then
+    new.rut_emisor := public.rut_normalizado(new.rut_emisor);
+    if new.rut_emisor is null then raise exception 'RUT del emisor no válido'; end if;
+    if new.folio <= 0 then raise exception 'Folio no válido'; end if;
+    if new.total = 0 then raise exception 'El total no puede ser cero'; end if;
+    if new.proveedor_id is null then select id into new.proveedor_id from public.proveedores where edificio_id = new.edificio_id and public.rut_normalizado(rut) = new.rut_emisor limit 1; end if;
+    new.estado := 'por_pagar'; new.caja_id := null; new.pagada_fecha := null; new.registrado_por := coalesce(auth.uid(), new.registrado_por);
+  else
+    -- lo que viene del documento no cambia; el estado solo cambia con pagar_factura() o al anular
+    new.tipo_dte := old.tipo_dte; new.folio := old.folio; new.rut_emisor := old.rut_emisor; new.fecha := old.fecha;
+    new.neto := old.neto; new.exento := old.exento; new.iva := old.iva; new.total := old.total; new.detalle := old.detalle; new.registrado_por := old.registrado_por;
+    if coalesce(current_setting('mi_edificio.pago_factura', true), '') <> '1' then
+      new.caja_id := old.caja_id; new.pagada_fecha := old.pagada_fecha;
+      if new.estado <> old.estado and not (new.estado = 'anulada' and old.estado = 'por_pagar') then raise exception 'Solo se anula una factura por pagar; para pagarla usa "Registrar pago"'; end if;
+    end if;
+  end if;
+  return new;
+end $$;
+drop trigger if exists facturas_antes on public.facturas;
+create trigger facturas_antes before insert or update on public.facturas for each row execute function privado.facturas_antes();
+
+-- Pagar una factura: egreso en el flujo de caja; si viene de un cargo de la cartola, el cargo queda conciliado con ella
+create or replace function public.pagar_factura(p_id uuid, p_fecha date, p_categoria text, p_banco uuid default null) returns uuid
+language plpgsql security definer set search_path = public as $$
+declare e uuid := public.mi_edificio(); f public.facturas; m public.banco_movimientos; cid uuid;
+begin
+  if not public.es_admin() then raise exception 'Solo administración'; end if;
+  select * into f from public.facturas where id = p_id and edificio_id = e for update;
+  if not found then raise exception 'Factura no encontrada'; end if;
+  if f.estado <> 'por_pagar' then raise exception 'La factura no está por pagar'; end if;
+  if coalesce(trim(p_categoria), '') = '' then raise exception 'Indica la categoría del gasto'; end if;
+  if p_banco is not null then
+    select * into m from public.banco_movimientos where id = p_banco and edificio_id = e for update;
+    if not found or m.estado <> 'pendiente' or m.monto >= 0 then raise exception 'El cargo de la cartola no está por conciliar'; end if;
+    if abs(m.monto) <> f.total then raise exception 'El cargo (%) no coincide con el total de la factura (%)', privado.clp(abs(m.monto)), privado.clp(f.total); end if;
+    p_fecha := m.fecha;
+  end if;
+  insert into public.caja_movimientos (edificio_id, tipo, fecha, categoria, descripcion, monto, registrado_por)
+  values (e, 'egreso', coalesce(p_fecha, public.hoy()), trim(p_categoria),
+          case f.tipo_dte when 33 then 'Factura' when 34 then 'Factura exenta' when 56 then 'Nota de débito' when 61 then 'Nota de crédito' else 'Documento' end || ' nº ' || f.folio || ' · ' || f.emisor, f.total, auth.uid())
+  returning id into cid;
+  perform set_config('mi_edificio.pago_factura', '1', true);
+  update public.facturas set estado = 'pagada', pagada_fecha = coalesce(p_fecha, public.hoy()), caja_id = cid, categoria = trim(p_categoria) where id = p_id;
+  perform set_config('mi_edificio.pago_factura', '', true);
+  if p_banco is not null then
+    update public.banco_movimientos set estado = 'caja', caja_id = cid, nota = 'Pago de la factura nº ' || f.folio || ' · ' || f.emisor, conciliado_por = auth.uid(), conciliado_at = now() where id = p_banco;
+  end if;
+  return cid;
+end $$;
+
 -- Deshacer: anula los pagos (o borra el movimiento de caja) y el movimiento vuelve a quedar pendiente
 create or replace function public.deshacer_movimiento(p_id uuid, p_motivo text default '') returns void
 language plpgsql security definer set search_path = public as $$
@@ -3129,7 +3211,12 @@ begin
   select * into m from public.banco_movimientos where id = p_id and edificio_id = e for update;
   if not found or m.estado = 'pendiente' then raise exception 'No hay nada que deshacer'; end if;
   update public.pagos set anulado = true, anulado_motivo = coalesce(nullif(trim(p_motivo), ''), 'Conciliación bancaria deshecha') where id = any(m.pagos) and not anulado;
-  if m.caja_id is not null then delete from public.caja_movimientos where id = m.caja_id and edificio_id = e; end if;
+  if m.caja_id is not null then
+    perform set_config('mi_edificio.pago_factura', '1', true);
+    update public.facturas set estado = 'por_pagar', caja_id = null, pagada_fecha = null where caja_id = m.caja_id and edificio_id = e;
+    perform set_config('mi_edificio.pago_factura', '', true);
+    delete from public.caja_movimientos where id = m.caja_id and edificio_id = e;
+  end if;
   update public.banco_movimientos set estado = 'pendiente', depto = null, pagos = '{}', caja_id = null, sobrante = 0, conciliado_por = null, conciliado_at = null where id = p_id;
 end $$;
 
@@ -4378,6 +4465,7 @@ alter table public.comunicado_lecturas enable row level security;
 alter table public.usuario_unidades enable row level security;
 alter table public.proveedor_ingresos enable row level security;
 alter table public.plantillas       enable row level security;
+alter table public.facturas         enable row level security;
 
 -- helper para (re)crear políticas sin errores. Salvo que se indique lo contrario, toda
 -- política queda además limitada a las filas del edificio del usuario.
@@ -4603,6 +4691,9 @@ select public._pol('contratos','ctr_sel','select','public.mi_rol() in (''comite'
 select public._pol('contratos','ctr_ins','insert','public.es_admin()');
 select public._pol('contratos','ctr_upd','update','public.es_admin()');
 select public._pol('contratos','ctr_del','delete','public.es_admin()');
+select public._pol('facturas','fac_sel','select','public.mi_rol() in (''comite'',''admin'')');
+select public._pol('facturas','fac_ins','insert','public.es_admin()');
+select public._pol('facturas','fac_upd','update','public.es_admin()');
 select public._pol('plantillas','pla_sel','select','public.mi_rol() in (''comite'',''admin'')');
 select public._pol('plantillas','pla_ins','insert','public.es_admin()');
 select public._pol('plantillas','pla_upd','update','public.es_admin()');
@@ -4683,6 +4774,7 @@ begin
   if c = 'novedades' then return r in ('conserje','comite','admin'); end if;
   if c = 'mascotas' then return r in ('conserje','comite','admin') or exists (select 1 from public.unidad_mascotas x where x.edificio_id = e and x.foto = p_name and r in ('residente','propietario') and x.depto = public.mi_depto()); end if;
   if c = 'proveedores' then return r in ('comite','admin'); end if;
+  if c = 'facturas' then return r in ('comite','admin'); end if;
   if c = 'seguros' then
     return r in ('comite','admin') or (r = 'propietario' and exists (select 1 from public.unidad_documentos d where d.edificio_id = e and d.archivo = p_name and d.depto = public.mi_depto()));
   end if;
@@ -4714,7 +4806,7 @@ create policy "fotos_delete" on storage.objects for delete to authenticated usin
 do $$
 declare t text;
 begin
-  foreach t in array array['edificios','empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos','certificados','banco_movimientos','banco_pagadores','presupuestos','emergencia_responsables','emergencia_simulacros','proveedores','contratos','turnos','novedades','unidad_vehiculos','unidad_mascotas','unidad_espacios','comunicado_lecturas','usuario_unidades','proveedor_ingresos','plantillas']
+  foreach t in array array['edificios','empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos','certificados','banco_movimientos','banco_pagadores','presupuestos','emergencia_responsables','emergencia_simulacros','proveedores','contratos','turnos','novedades','unidad_vehiculos','unidad_mascotas','unidad_espacios','comunicado_lecturas','usuario_unidades','proveedor_ingresos','plantillas','facturas']
   loop
     begin
       execute format('alter publication supabase_realtime add table public.%I', t);
