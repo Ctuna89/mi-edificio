@@ -2,6 +2,7 @@
 
 ## Sin publicar
 
+- **Ley 21.719 de datos personales** (adaptado de CactusOne): bitácora de auditoría que no se puede modificar, teléfonos visibles solo para la persona y la administración (conserjería y comité los consultan con un motivo registrado), consentimientos con el texto aceptado, y solicitudes de acceso, rectificación, supresión, oposición, portabilidad o bloqueo con plazo de 30 días.
 - **Multas con debido proceso** (adaptado de CactusOne): catálogo de conductas en UTM o UF, caso con evidencia, notificación de cargos, descargos en días hábiles, resolución fundada, aprobación del comité, reincidencia, infracciones permanentes y derivación al Juzgado de Policía Local. Lo cobrado va al fondo de reserva. Las multas ya no se pueden cargar a mano.
 - **Reparto por ítem**: cada ítem del gasto común se reparte por alícuota, en partes iguales, según consumo (con un % fijo opcional por alícuota) o solo entre algunas unidades. La suma cuadra al peso.
 - **Lecturas de medidores**: agua caliente, calefacción, gas u otros. Cada mes se anota lo que marca el medidor y el consumo es la diferencia con el mes anterior (nunca negativo). Cambio de medidor: consumo = (última del retirado − mes anterior) + (actual − inicial del nuevo). Conserjería y administración las ingresan o pegan desde Excel; la app avisa consumos raros y faltantes, y bloquea las lecturas de un período publicado.

@@ -287,3 +287,46 @@ select t.soy(:'a3');
 select t.ok((select count(*) = 0 from infracciones where depto <> '102') and (select count(*) = 2 from infracciones), 'el 102 ve solo sus casos (con cargos o cerrados), no los de otra unidad');
 \echo 'OK: multas con debido proceso'
 
+-- ---------- datos personales (Ley 21.719) ----------
+\set a7 '00000000-0000-0000-0000-0000000000a7'
+reset role; insert into auth.users (id) values (:'a7');
+select t.soy(:'a7'); insert into usuarios (id, edificio_id, nombre, depto, telefono, privacidad_at) values (:'a7', :'ea', 'Sara Sánchez', '103', '+56 9 1111 2222', now());
+select t.soy(:'a1'); update usuarios set estado = 'activo', rol = 'propietario' where id = :'a7';
+select t.ok((select count(*) = 1 and bool_and(tipo = 'privacidad' and length(texto) > 10) from consentimientos where uid = :'a7'), 'aceptar el aviso de privacidad queda como consentimiento, con su texto');
+select t.ok((select telefono = '' from usuarios where id = :'a7') and (select telefono = '+56 9 1111 2222' from contactos where uid = :'a7'), 'el teléfono se guarda aparte, no en usuarios, y la administración lo ve');
+select t.soy(:'a4');
+select t.ok((select count(*) = 0 from contactos), 'conserjería no recibe los teléfonos');
+select t.falla($$select * from public.ver_telefonos('103', '')$$, 'consultar teléfonos sin motivo');
+select t.ok((select telefono = '+56 9 1111 2222' from public.ver_telefonos('103', 'Encomienda refrigerada sin retirar')), 'con motivo, conserjería consulta el teléfono de la unidad');
+select t.soy(:'a5');
+select t.ok((select count(*) = 0 from contactos), 'el comité no recibe los teléfonos');
+select t.soy(:'a2');
+select t.ok((select count(*) = 0 from contactos), 'un residente no ve teléfonos de otros');
+select t.falla($$select * from public.ver_telefonos('103', 'curiosidad')$$, 'un residente consulta teléfonos');
+select t.ok((select count(*) = 0 from auditoria), 'la bitácora no la ve un residente');
+select t.soy(:'a1');
+select t.ok((select count(*) = 1 from auditoria where accion = 'consultar' and tabla = 'contactos' and motivo = 'Encomienda refrigerada sin retirar' and uid = :'a4'), 'la consulta queda en la bitácora con quién y por qué');
+select t.ok((select count(*) >= 1 from auditoria where tabla = 'pagos' and accion = 'crear'), 'los pagos quedan en la bitácora');
+select t.ok((select count(*) = 0 from auditoria where tabla = 'votos'), 'los votos no van a la bitácora (el sondeo es secreto)');
+select t.falla($$delete from auditoria$$, 'borrar la bitácora');
+select t.falla($$update auditoria set motivo = 'x'$$, 'modificar la bitácora');
+-- solicitudes de derechos
+select t.soy(:'a7');
+insert into solicitudes_datos (tipo, detalle, estado, vence) values ('acceso', 'Quiero saber qué datos tienen de mí', 'respondida', '2099-01-01') returning id as sol \gset
+select t.ok((select estado = 'recibida' and vence = public.hoy() + 30 from solicitudes_datos where id = :'sol'), 'la solicitud parte recibida con 30 días corridos de plazo');
+select t.falla(format($$update solicitudes_datos set estado = 'respondida', respuesta = 'x' where id = %L$$, :'sol'), 'quien solicita se responde a sí mismo');
+select t.soy(:'a2'); select t.ok((select count(*) = 0 from solicitudes_datos), 'no se ven las solicitudes de otros');
+select t.soy(:'a1');
+select t.falla(format($$update solicitudes_datos set estado = 'respondida' where id = %L$$, :'sol'), 'responder sin texto');
+update solicitudes_datos set estado = 'respondida', respuesta = 'Adjuntamos el detalle; también puede descargarlo en Mi cuenta.' where id = :'sol';
+select t.ok((select respondido_at is not null and respondido_por = :'a1' from solicitudes_datos where id = :'sol'), 'respuesta registrada con fecha y autor');
+-- eliminar la cuenta borra el teléfono y los datos de la bitácora
+select t.soy(:'a7'); select public.eliminar_mi_cuenta();
+select t.soy(:'a1');
+select t.ok((select count(*) = 0 from contactos where uid = :'a7'), 'al eliminar la cuenta se borra su teléfono');
+select t.ok((select count(*) = 0 from auditoria where registro = :'a7' and (antes::text like '%Sánchez%' or despues::text like '%Sánchez%' or antes::text like '%1111%' or despues::text like '%1111%')), 'y sus datos desaparecen de la bitácora');
+reset role; update edificios set retencion = retencion || '{"auditoria": 1}'; select set_config('mi_edificio.interno', '1', false); update auditoria set ts = now() - interval '2 months' where id = (select min(id) from auditoria); select set_config('mi_edificio.interno', '', false);
+select privado.depurar_edificio(:'ea');
+select t.ok((select count(*) = 0 from auditoria where ts < now() - interval '1 month'), 'la bitácora respeta el plazo de conservación que fija la administración');
+\echo 'OK: datos personales'
+

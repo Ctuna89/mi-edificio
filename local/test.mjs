@@ -215,7 +215,7 @@ test('una actualización que falla no toca los datos, y un programa más antiguo
   const VERSION = fs.readFileSync(path.join(AQUI, '..', 'VERSION'), 'utf8').trim(), pagina = async (cab = {}) => { const r = await fetch(B + '/', { headers: cab }); return { e: r.status, t: await r.text() }; };
   // "versión 50": su esquema borra una columna y las unidades… y después falla
   const malo = path.join(DATOS, 'esquema-malo.sql');
-  fs.writeFileSync(malo, fs.readFileSync(path.join(AQUI, '..', 'supabase', 'schema.sql'), 'utf8') + '\nalter table public.usuarios drop column telefono;\ndelete from public.unidades;\nselect 1/0;\n');
+  fs.writeFileSync(malo, fs.readFileSync(path.join(AQUI, '..', 'supabase', 'schema.sql'), 'utf8') + '\nalter table public.unidades drop column prop;\ndelete from public.unidades;\nselect 1/0;\n');
   await bajar(); await levantar({ MI_EDIFICIO_VERSION: '50.0.0', MI_EDIFICIO_ESQUEMA: malo });
   let p = await pagina(); assert.equal(p.e, 503); assert.match(p.t, /Los datos del edificio no se modificaron/); assert.match(p.t, /division by zero/, 'en el computador del edificio se ve el detalle');
   assert.ok(p.t.includes(`releases/tag/v${VERSION}`), 'indica a qué versión volver');
@@ -224,7 +224,7 @@ test('una actualización que falla no toca los datos, y un programa más antiguo
   assert.ok(fs.readdirSync(path.join(DATOS, 'respaldos')).some(x => x.startsWith(`antes-de-actualizar-${VERSION}-a-50.0.0-`)), 'antes de intentar, guardó una copia');
   // se vuelve a la versión anterior: todo sigue como estaba
   await bajar(); await levantar();
-  const yo = (await ana.db({ t: 'usuarios', op: 'select' })).data; assert.ok('telefono' in yo[0], 'la columna que el esquema fallido borraba sigue ahí');
+  const yo = (await ana.db({ t: 'unidades', op: 'select' })).data; assert.ok(yo.length > 0 && 'prop' in yo[0], 'la columna que el esquema fallido borraba sigue ahí');
   assert.equal((await ana.db({ t: 'unidades', op: 'select' })).data.length, 2, 'y las unidades también');
   assert.equal((await ana.pedir('/api/sistema/estado')).data.historial.at(-1).a, VERSION, 'la base sigue marcada con la versión anterior');
   // una versión nueva que sí funciona

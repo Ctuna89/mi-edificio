@@ -297,11 +297,14 @@ Lo que la app ya trae para cumplir:
 
 | Obligación | Cómo se cubre |
 |---|---|
-| Informar al titular | Aviso de privacidad del edificio (Administración → Edificio), mostrado y aceptado al registrarse y disponible en Mi cuenta. Se guarda la fecha de aceptación. |
+| Informar al titular | Aviso de privacidad del edificio (Administración → Edificio), mostrado y aceptado al registrarse. Queda como **consentimiento** con la fecha y el texto exacto aceptado, visible en Mi cuenta → Lo que aceptaste. |
+| Ejercer derechos | Mi cuenta → **Ejercer tus derechos**: acceso, rectificación, supresión, oposición, portabilidad o bloqueo. La administración las ve en Administración → Datos personales con su plazo de 30 días corridos, y la persona recibe la respuesta en la app. |
+| Minimizar quién ve qué | El teléfono de cada persona lo ven ella y la administración. Conserjería y comité lo consultan con el botón "📞 Teléfono de una unidad" indicando un motivo. |
+| Registro de accesos y cambios | **Bitácora de auditoría** (Administración → Datos personales): quién creó, cambió, borró o consultó datos personales o de dinero, con su motivo. No se puede modificar; se exporta a Excel. Los votos no se registran, para no romper el secreto de los sondeos. Al eliminar una cuenta se borran sus datos también de la bitácora. |
 | Acceso y portabilidad | Mi cuenta → **Descargar mis datos** (JSON). |
 | Rectificación | Cada persona edita su nombre y teléfono; unidad y rol los corrige la administración. |
 | Supresión | Mi cuenta → **Eliminar mi cuenta**: borra nombre, teléfono y unidad y bloquea el acceso. |
-| Conservación limitada | Administración → Edificio → **Conservación de datos**: la administración fija cuántos meses se guardan visitas, rondas, encomiendas entregadas, mensajes, reservas, incidencias cerradas y uso de estacionamientos. Lo que supera el plazo se borra a diario, con sus fotos. |
+| Conservación limitada | Administración → Edificio → **Conservación de datos** (también la bitácora, con la clave `auditoria`): la administración fija cuántos meses se guardan visitas, rondas, encomiendas entregadas, mensajes, reservas, incidencias cerradas y uso de estacionamientos. Lo que supera el plazo se borra a diario, con sus fotos. |
 | Seguridad y mínimo acceso | Permisos por rol; cada unidad ve solo sus cobros, encomiendas, visitas y voto. |
 
 Lo que debe resolver cada comunidad (no lo hace el software):

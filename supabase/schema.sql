@@ -75,7 +75,7 @@ alter table public.edificios add column if not exists visita_patente boolean not
 alter table public.edificios add column if not exists est_alerta_min int not null default 0;
 alter table public.edificios add column if not exists est_aviso_min int not null default 0;
 -- Plazos de conservación en meses, definidos por la administración de cada edificio.
--- Claves: visitas, registros, encomiendas, mensajes, reservas, incidencias, estacionamientos. Sin clave o 0 = no se borra.
+-- Claves: visitas, registros, encomiendas, mensajes, reservas, incidencias, estacionamientos, auditoria. Sin clave o 0 = no se borra.
 alter table public.edificios add column if not exists retencion jsonb not null default '{}'::jsonb;
 
 -- Ajustes de la instalación (1 fila). Sin políticas RLS: solo se edita desde el SQL Editor.
@@ -605,6 +605,57 @@ create table if not exists public.infraccion_votos (
   primary key (infraccion_id, ronda, uid)
 );
 
+-- Ley 21.719 de datos personales (adaptado de CactusOne).
+-- Teléfono aparte: lo ven la persona y la administración; conserjería y comité lo consultan con un motivo,
+-- y cada consulta queda en la bitácora de auditoría.
+create table if not exists public.contactos (
+  uid         uuid primary key references public.usuarios(id) on delete cascade,
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  telefono    text not null default ''
+);
+-- el teléfono se guarda en el mismo momento en que se crea la persona: la referencia se valida al final
+alter table public.contactos alter constraint contactos_uid_fkey deferrable initially deferred;
+-- Bitácora de auditoría: quién creó, cambió, borró o consultó cada registro. No se modifica ni se borra
+-- (salvo el plazo de conservación que fije la administración). Solo la lee la administración.
+create table if not exists public.auditoria (
+  id          bigint generated always as identity primary key,
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  ts          timestamptz not null default now(),
+  uid         uuid default auth.uid(),
+  accion      text not null check (accion in ('crear','cambiar','borrar','consultar')),
+  tabla       text not null,
+  registro    text,
+  motivo      text,
+  antes       jsonb,
+  despues     jsonb
+);
+create index if not exists auditoria_ts_idx on public.auditoria (edificio_id, ts desc);
+create index if not exists auditoria_registro_idx on public.auditoria (tabla, registro);
+-- Consentimientos: qué aceptó cada persona, con el texto exacto, y si lo revocó
+create table if not exists public.consentimientos (
+  id          uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  uid         uuid not null references public.usuarios(id) on delete cascade,
+  tipo        text not null,                    -- privacidad | condicion_especial | …
+  texto       text not null,
+  otorgado_at timestamptz not null default now(),
+  revocado_at timestamptz
+);
+-- Solicitudes para ejercer derechos sobre los datos personales: respuesta en 30 días corridos
+create table if not exists public.solicitudes_datos (
+  id          uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  uid         uuid not null references public.usuarios(id) on delete cascade,
+  tipo        text not null check (tipo in ('acceso','rectificacion','supresion','oposicion','portabilidad','bloqueo')),
+  detalle     text not null default '',
+  estado      text not null default 'recibida' check (estado in ('recibida','en_curso','respondida','rechazada')),
+  vence       date not null,
+  respuesta   text,
+  respondido_at timestamptz,
+  respondido_por uuid,
+  ts          timestamptz default now()
+);
+
 -- Archivos de filas borradas por plazo de conservación, pendientes de eliminar del bucket.
 -- Los elimina la app de la administración (la base de datos no puede borrar archivos de Storage).
 create table if not exists public.archivos_por_borrar (
@@ -643,7 +694,7 @@ begin
   end if;
 
   select id into def from public.edificios order by creado, id limit 1;
-  foreach t in array array['empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos']
+  foreach t in array array['empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos']
   loop
     execute format('alter table public.%I add column if not exists edificio_id uuid references public.edificios(id) on delete cascade', t);
     execute format('select count(*) from public.%I where edificio_id is null', t) into n;
@@ -756,7 +807,7 @@ $$;
 do $$
 declare t text;
 begin
-  foreach t in array array['empresas','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos']
+  foreach t in array array['empresas','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos']
   loop
     execute format('alter table public.%I alter column edificio_id set default public.mi_edificio()', t);
   end loop;
@@ -1455,6 +1506,143 @@ language sql stable security definer set search_path = public as $$
   group by f.id
 $$;
 
+-- ---------- Datos personales (Ley 21.719) ----------
+-- Registro genérico de cambios para la bitácora de auditoría
+create or replace function privado.auditar() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare f jsonb := to_jsonb(coalesce(new, old)); e uuid;
+begin
+  e := case when tg_table_name = 'edificios' then (f->>'id')::uuid else (f->>'edificio_id')::uuid end;
+  insert into public.auditoria (edificio_id, accion, tabla, registro, antes, despues)
+  values (e, case tg_op when 'INSERT' then 'crear' when 'UPDATE' then 'cambiar' else 'borrar' end, tg_table_name,
+          coalesce(f->>'id', f->>'uid', concat_ws('/', f->>'periodo', f->>'depto')),
+          case when tg_op <> 'INSERT' then to_jsonb(old) end, case when tg_op <> 'DELETE' then to_jsonb(new) end);
+  return null;
+end $$;
+-- La bitácora no se cambia ni se borra: solo la depuración por plazo y el borrado de datos de una cuenta eliminada
+create or replace function privado.auditoria_fija() returns trigger
+language plpgsql as $$
+begin
+  if current_setting('mi_edificio.interno', true) = '1' then return coalesce(new, old); end if;
+  raise exception 'La bitácora de auditoría no se puede modificar';
+end $$;
+drop trigger if exists auditoria_fija on public.auditoria;
+create trigger auditoria_fija before update or delete on public.auditoria for each row execute function privado.auditoria_fija();
+do $$
+declare t text;
+begin
+  -- tablas con datos personales o de dinero (no los votos: el voto de un sondeo es secreto)
+  foreach t in array array['edificios','usuarios','contactos','unidades','gastos','pagos','convenios','cargos','caja_movimientos','fondos','fondo_movimientos',
+                           'lecturas','multas_catalogo','indicadores','consentimientos','solicitudes_datos','estacionamientos'] loop
+    execute format('drop trigger if exists %I on public.%I', t || '_auditoria', t);
+    execute format('create trigger %I after insert or update or delete on public.%I for each row execute function privado.auditar()', t || '_auditoria', t);
+  end loop;
+end $$;
+
+-- El teléfono se guarda en contactos aunque llegue en usuarios (compatibilidad con la app y el registro)
+create or replace function privado.mover_telefono() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if coalesce(trim(new.telefono), '') <> '' then
+    insert into public.contactos (uid, edificio_id, telefono) values (new.id, new.edificio_id, trim(new.telefono))
+    on conflict (uid) do update set telefono = excluded.telefono, edificio_id = excluded.edificio_id;
+    new.telefono := '';
+  end if;
+  return new;
+end $$;
+drop trigger if exists usuarios_telefono on public.usuarios;
+create trigger usuarios_telefono before insert or update of telefono on public.usuarios for each row execute function privado.mover_telefono();
+create or replace function privado.contacto_usuario() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if exists (select 1 from public.contactos where uid = new.id) and new.edificio_id is not null then
+    update public.contactos set edificio_id = new.edificio_id where uid = new.id and edificio_id is distinct from new.edificio_id;
+  end if;
+  -- cuenta eliminada: se borran su teléfono y el rastro de sus datos en la bitácora
+  if current_setting('mi_edificio.baja', true) = '1' then
+    perform set_config('mi_edificio.interno', '1', true);
+    delete from public.contactos where uid = new.id;
+    update public.auditoria set antes = null, despues = null, motivo = 'Datos borrados al eliminar la cuenta'
+    where tabla in ('usuarios','contactos','consentimientos','solicitudes_datos') and registro = new.id::text
+       or (tabla in ('consentimientos','solicitudes_datos') and (antes->>'uid' = new.id::text or despues->>'uid' = new.id::text));
+    perform set_config('mi_edificio.interno', '', true);
+  end if;
+  return null;
+end $$;
+drop trigger if exists usuarios_contacto on public.usuarios;
+create trigger usuarios_contacto after insert or update on public.usuarios for each row execute function privado.contacto_usuario();
+-- traslado de los teléfonos que ya estaban en usuarios
+insert into public.contactos (uid, edificio_id, telefono)
+select id, edificio_id, trim(telefono) from public.usuarios where coalesce(trim(telefono), '') <> '' on conflict (uid) do nothing;
+update public.usuarios set telefono = '' where coalesce(telefono, '') <> '';
+
+-- Conserjería y comité consultan los teléfonos de una unidad indicando el motivo (queda en la bitácora)
+create or replace function public.ver_telefonos(p_depto text, p_motivo text)
+returns table (uid uuid, nombre text, rol text, telefono text)
+language plpgsql security definer set search_path = public as $$
+declare e uuid := public.mi_edificio();
+begin
+  if public.mi_rol() is null or public.mi_rol() not in ('conserje','comite','admin') then raise exception 'No autorizado'; end if;
+  if coalesce(trim(p_motivo), '') = '' then raise exception 'Indica el motivo de la consulta'; end if;
+  insert into public.auditoria (edificio_id, accion, tabla, registro, motivo) values (e, 'consultar', 'contactos', 'depto ' || trim(p_depto), trim(p_motivo));
+  return query select u.id, u.nombre, u.rol::text, coalesce(c.telefono, '') from public.usuarios u left join public.contactos c on c.uid = u.id
+    where u.edificio_id = e and u.estado = 'activo' and u.depto = trim(p_depto) and u.rol in ('residente','propietario') order by u.nombre;
+end $$;
+
+-- El aviso de privacidad aceptado al registrarse queda como consentimiento, con el texto vigente
+create or replace function privado.consentir_privacidad() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if new.privacidad_at is not null and (tg_op = 'INSERT' or old.privacidad_at is distinct from new.privacidad_at) and new.edificio_id is not null then
+    insert into public.consentimientos (edificio_id, uid, tipo, texto)
+    select new.edificio_id, new.id, 'privacidad', coalesce(nullif(trim(e.privacidad), ''), 'Aviso de privacidad por defecto de Mi Edificio')
+    from public.edificios e where e.id = new.edificio_id;
+  end if;
+  return null;
+end $$;
+drop trigger if exists usuarios_consentimiento on public.usuarios;
+create trigger usuarios_consentimiento after insert or update of privacidad_at on public.usuarios for each row execute function privado.consentir_privacidad();
+
+create or replace function public.revocar_consentimiento(p_id uuid) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  update public.consentimientos set revocado_at = now() where id = p_id and uid = auth.uid() and revocado_at is null and tipo <> 'privacidad';
+  if not found then raise exception 'No se puede revocar ese consentimiento (el aviso de privacidad se retira eliminando la cuenta)'; end if;
+end $$;
+
+-- Solicitudes de derechos: el plazo de respuesta se fija en la base de datos
+create or replace function public.solicitudes_datos_antes() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if tg_op = 'INSERT' then
+    new.uid := coalesce(auth.uid(), new.uid); new.estado := 'recibida'; new.vence := public.hoy() + 30;
+    new.respuesta := null; new.respondido_at := null; new.respondido_por := null; new.detalle := trim(coalesce(new.detalle, ''));
+    return new;
+  end if;
+  if auth.uid() is not null and not public.es_admin() then raise exception 'Solo la administración responde'; end if;
+  new.uid := old.uid; new.tipo := old.tipo; new.detalle := old.detalle; new.vence := old.vence; new.ts := old.ts;
+  if new.estado in ('respondida','rechazada') then
+    if coalesce(trim(new.respuesta), '') = '' then raise exception 'Escribe la respuesta'; end if;
+    new.respondido_at := now(); new.respondido_por := auth.uid();
+  end if;
+  return new;
+end $$;
+drop trigger if exists solicitudes_datos_antes on public.solicitudes_datos;
+create trigger solicitudes_datos_antes before insert or update on public.solicitudes_datos for each row execute function public.solicitudes_datos_antes();
+create or replace function privado.tg_push_solicitud_datos() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if tg_op = 'INSERT' then
+    perform privado.push(new.edificio_id, privado.usuarios_de(new.edificio_id, '{admin}'), '🔒 Solicitud sobre datos personales',
+      'Responder antes del ' || to_char(new.vence, 'DD-MM-YYYY') || ' (Ley 21.719).', '#admin--datos');
+  elsif new.estado in ('respondida','rechazada') and old.estado not in ('respondida','rechazada') then
+    perform privado.push(new.edificio_id, array[new.uid], '🔒 Respuesta a tu solicitud de datos', left(new.respuesta, 120), '#perfil');
+  end if;
+  return null;
+end $$;
+drop trigger if exists push_solicitud_datos on public.solicitudes_datos;
+create trigger push_solicitud_datos after insert or update on public.solicitudes_datos for each row execute function privado.tg_push_solicitud_datos();
+
 -- ---------- Multas con debido proceso ----------
 -- Fecha que resulta de sumar p_n días hábiles (sin sábados, domingos ni feriados del edificio)
 create or replace function privado.dias_habiles(p_e uuid, p_desde date, p_n int) returns date
@@ -2129,6 +2317,14 @@ begin
   select retencion into r from public.edificios where id = p_e;
   if r is null then return res; end if;
 
+  m := privado.meses(r, 'auditoria');
+  if m > 0 then
+    perform set_config('mi_edificio.interno', '1', true);
+    delete from public.auditoria where edificio_id = p_e and ts < now() - make_interval(months => m);
+    get diagnostics n = row_count; res := res || jsonb_build_object('auditoria', n);
+    perform set_config('mi_edificio.interno', '', true);
+  end if;
+
   m := privado.meses(r, 'visitas');
   if m > 0 then
     delete from public.visitas where edificio_id = p_e and fecha < (public.hoy() - make_interval(months => m))::date;
@@ -2265,6 +2461,10 @@ alter table public.multas_catalogo  enable row level security;
 alter table public.infracciones     enable row level security;
 alter table public.infraccion_eventos enable row level security;
 alter table public.infraccion_votos enable row level security;
+alter table public.contactos        enable row level security;
+alter table public.auditoria        enable row level security;
+alter table public.consentimientos  enable row level security;
+alter table public.solicitudes_datos enable row level security;
 
 -- helper para (re)crear políticas sin errores. Salvo que se indique lo contrario, toda
 -- política queda además limitada a las filas del edificio del usuario.
@@ -2434,6 +2634,15 @@ select public._pol('multas_catalogo','mc_upd','update','public.es_admin()');
 select public._pol('infracciones','inf_sel','select','public.mi_rol() in (''comite'',''admin'') or creado_por = auth.uid() or (public.es_residente() and depto = public.mi_depto() and estado not in (''abierto'',''archivado''))');
 select public._pol('infraccion_eventos','ie_sel','select','exists (select 1 from public.infracciones i where i.id = infraccion_id)');
 select public._pol('infraccion_votos','iv_sel','select','public.mi_rol() in (''comite'',''admin'')');
+-- datos personales: el teléfono, la propia persona y la administración; la bitácora, solo la administración
+select public._pol('contactos','con_sel','select','uid = auth.uid() or public.es_admin()');
+select public._pol('contactos','con_ins','insert','uid = auth.uid() or public.es_admin()');
+select public._pol('contactos','con_upd','update','uid = auth.uid() or public.es_admin()');
+select public._pol('auditoria','aud_sel','select','public.es_admin()');
+select public._pol('consentimientos','cons_sel','select','uid = auth.uid() or public.es_admin()');
+select public._pol('solicitudes_datos','sd_sel','select','uid = auth.uid() or public.es_admin()');
+select public._pol('solicitudes_datos','sd_ins','insert','uid = auth.uid() and public.mi_rol() is not null');
+select public._pol('solicitudes_datos','sd_upd','update','public.es_admin()');
 
 -- archivos_por_borrar: la administración los lee y los quita de la cola al borrarlos del bucket
 select public._pol('archivos_por_borrar','apb_sel','select','public.es_admin()');
@@ -2505,7 +2714,7 @@ create policy "fotos_delete" on storage.objects for delete to authenticated usin
 do $$
 declare t text;
 begin
-  foreach t in array array['edificios','empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos']
+  foreach t in array array['edificios','empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos']
   loop
     begin
       execute format('alter publication supabase_realtime add table public.%I', t);
