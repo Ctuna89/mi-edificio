@@ -190,6 +190,7 @@ Límites: está pensada para un edificio. La base de datos atiende una consulta 
 | Encuestas y votaciones de asamblea | vota, ve resultados | – | crea, cierra, ve totales | crea, cierra, ve totales | – |
 | Emergencias: plan, teléfonos, responsables y simulacros | ve el plan y declara condiciones | ve, consulta condiciones especiales | edita responsables y simulacros | edita todo | – |
 | Proveedores, contratos y certificaciones | – | ve teléfonos en Emergencias | ve | gestiona | – |
+| Ingresos de proveedores | – | registra entrada y salida | programa visitas, ve | programa visitas, ve | – |
 | Libro de novedades y turnos | – | anota, inicia y entrega turnos | lee | lee, anota | – |
 | Fichas de unidades: vehículos, mascotas, bodegas | registra los de su unidad (en Mi cuenta) | busca | busca | busca, asigna bodegas y estacionamientos | – |
 | Documentos (reglamento, actas, balances) | lee | lee | sube | sube | – |
@@ -260,6 +261,10 @@ La Ley 21.442 (art. 20 nº 9) permite suspender o pedir la suspensión del sumin
 **Condiciones especiales.** Los residentes declaran en Mi cuenta, con consentimiento expreso, si en su unidad vive alguien electrodependiente, que usa oxígeno medicinal, con movilidad reducida o un adulto mayor que vive solo; la administración puede registrarlo con un consentimiento en papel. Es un registro reservado: lo ven la administración y la propia unidad. Conserjería lo consulta en una emergencia con el botón "🚨 Unidades con condiciones especiales", indicando el motivo, que queda en la bitácora. Revocar el consentimiento termina la condición.
 
 Adaptado de [CactusOne](https://github.com/Ctuna89/cactusone), con permiso de sus autores.
+
+## Ingresos de proveedores
+
+En el módulo Ingresos, la conserjería registra a los técnicos y proveedores que entran al edificio: empresa (de la lista de proveedores o escrita), quién viene, RUT y patente (validados), motivo y destino o unidad, con la hora de entrada y de salida que pone el servidor. La administración y el comité programan visitas ("viene el técnico de ascensores el martes") que la conserjería ve en su inicio y marca al llegar. La entrega de turno avisa quién sigue dentro. El historial se busca y se descarga en Excel, y se conserva con el plazo de las visitas.
 
 ## Libro de novedades y turnos
 

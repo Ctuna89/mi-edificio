@@ -167,6 +167,7 @@ const MODULES = [
   {id:'multas', ic:'⚖️', t:'Multas', d:'Casos de infracción: cargos, descargos y resolución', roles:['residente','propietario','conserje','comite','admin']},
   {id:'emergencia', ic:'🚨', t:'Emergencias', d:'Plan, teléfonos, responsables y simulacros', roles:['residente','propietario','conserje','comite','admin']},
   {id:'proveedores', ic:'🤝', t:'Proveedores', d:'Contratos, certificaciones y vencimientos', roles:['comite','admin']},
+  {id:'ingresos', ic:'🧰', t:'Ingresos', d:'Proveedores y técnicos que entran al edificio', roles:['conserje','comite','admin']},
   {id:'novedades', ic:'📓', t:'Novedades', d:'Libro de novedades y turnos de conserjería', roles:['conserje','comite','admin']},
   {id:'fichas', ic:'🏘️', t:'Unidades', d:'Vehículos, mascotas, bodegas y estacionamientos', roles:['conserje','comite','admin']},
   {id:'documentos', ic:'📁', t:'Documentos', d:'Reglamento, actas, balances', roles:['residente','propietario','conserje','comite','admin']},
@@ -430,7 +431,7 @@ function inicioEstado(r){
     return;
   }
   const canal=Object.keys(canalRol).find(c=>canalRol[c]===r);
-  const tablas=['novedades','turnos','contratos','emergencia_simulacros','asambleas','registro_personas','suspensiones','suspension_votos','polizas','unidad_documentos','solicitudes_datos','usuarios','reservas','incidencias','conversaciones','estacionamiento_usos','gastos','gasto_unidades','pagos','convenios','lecturas','encomiendas','visitas','ot','infracciones','infraccion_votos'];
+  const tablas=['proveedor_ingresos','novedades','turnos','contratos','emergencia_simulacros','asambleas','registro_personas','suspensiones','suspension_votos','polizas','unidad_documentos','solicitudes_datos','usuarios','reservas','incidencias','conversaciones','estacionamiento_usos','gastos','gasto_unidades','pagos','convenios','lecturas','encomiendas','visitas','ot','infracciones','infraccion_votos'];
   watch(tablas, async()=>{ const L=[], add=(n,...a)=>{ if(typeof n==='string'||n>0) L.push(fila(n,...a)); };
     if(r==='mantencion'){ if(S.me.empresa_id) add(await cuenta(q(T('ot').select('id').eq('empresa_id',S.me.empresa_id).eq('estado','asignada'))),'Órdenes de trabajo asignadas','#mantencion','wa'); return L; }
     const [usu,resv,inc,msj,est,borr,enc,vis]=await Promise.all([
@@ -458,6 +459,9 @@ function inicioEstado(r){
       const porVencer=[...new Set(pols.map(p=>p.tipo))].map(t=>pols.filter(p=>p.tipo===t&&p.desde<=hoy).sort((a,b)=>a.desde<b.desde?1:-1)[0]).filter(p=>p&&p.hasta>=hoy&&diasA(p.hasta)<=60);
       porVencer.forEach(p=>add(diasA(p.hasta)+' d',`Póliza de ${(TIPO_POLIZA[p.tipo]||p.tipo).split(' (')[0].toLowerCase()} por vencer`,'#seguros',diasA(p.hasta)<=15?'er':'wa','Vence el '+fmtDay(p.hasta)));
       add(udocs.filter(x=>x.estado==='en_revision').length,'Documentos de unidades por revisar','#seguros--unidades','wa','Pólizas y certificados subidos por propietarios'); }
+    if(['conserje','admin','comite'].includes(r)&&modAbierto('ingresos')){ const pi=await q(T('proveedor_ingresos').select('estado,programado').in('estado',['programado','dentro'])).catch(()=>[]);
+      if(r==='conserje') add(pi.filter(x=>x.estado==='dentro').length,'Proveedores dentro del edificio','#ingresos','in','Registra su salida al irse');
+      add(pi.filter(x=>x.estado==='programado'&&x.programado===hoy).length,'Proveedores que vienen hoy','#ingresos','in'); }
     if(r==='conserje'&&modAbierto('novedades')){ const tu=await q(T('turnos').select('uid,fin').is('fin',null)).catch(()=>[]); if(!tu.some(t=>t.uid===S.uid)) add('📓','Inicia tu turno','#novedades','wa','Lee lo que dejó pendiente el turno anterior'); }
     if(['admin','comite'].includes(r)&&modAbierto('novedades')){ const ayer=new Date(Date.now()-864e5).toISOString(); add(await cuenta(q(T('novedades').select('id').eq('importante',true).gte('ts',ayer))),'Novedades importantes en las últimas 24 horas','#novedades','wa'); }
     if(['admin','comite'].includes(r)&&modAbierto('proveedores')){ const ct=(await q(T('contratos').select('titulo,hasta,aviso_dias,terminado')).catch(()=>[])).filter(c=>!c.terminado&&c.hasta);
@@ -814,13 +818,52 @@ const EST_DOC={en_revision:['En revisión','wa'], aceptado:['Aceptado','ok'], re
 const EST_SIN={abierto:['Abierto','wa'], en_liquidacion:['En liquidación','in'], pagado:['Pagado','ok'], rechazado:['Rechazado','er'], cerrado:['Cerrado','mu']};
 const diasA=f=>Math.round((new Date(f+'T12:00:00')-new Date(todayStr()+'T12:00:00'))/86400000);
 const pillVence=f=>{ const d=diasA(f); return d<0?`<span class="pill er">Vencida hace ${-d} ${-d===1?'día':'días'}</span>`:d<=60?`<span class="pill ${d<=15?'er':'wa'}">Vence en ${d} ${d===1?'día':'días'}</span>`:'<span class="pill ok">Vigente</span>'; };
+// ---------- Ingresos de proveedores en portería ----------
+const EST_ING={programado:['Programado','in'], dentro:['Dentro','wa'], salio:['Salió','ok'], no_llego:['No llegó','mu']};
+VIEWS.ingresos = function(){
+  const r=role(), progr=['comite','admin'].includes(r); let xs=[], pv=[], dias=30, qq='';
+  setMain(`<h1>Ingresos de proveedores</h1><p class="small muted">Técnicos, proveedores y empresas que entran al edificio: quién, de qué empresa, a qué y a dónde, con la hora de entrada y de salida.${progr?' Puedes programar una visita para que conserjería la espere.':''}</p>
+    <div class="row wrap" style="margin-bottom:10px"><button class="btn" id="bIng">Registrar ingreso</button>${progr?'<button class="btn sec" id="bProg">Programar visita</button>':''}</div><div id="ingBody"><div class="empty">Cargando…</div></div>`);
+  const w=watch(['proveedor_ingresos','proveedores'], async()=>{ const desde=new Date(Date.now()-dias*864e5).toISOString(); const [a1,a2,b]=await Promise.all([q(T('proveedor_ingresos').select('*').in('estado',['programado','dentro'])), q(T('proveedor_ingresos').select('*').gte('ts',desde).order('ts',{ascending:false}).limit(1000)), q(T('proveedores').select('id,nombre,rubro,telefono,activo').order('nombre'))]);
+      const a=[...a1, ...a2.filter(x=>!a1.some(y=>y.id===x.id))]; return {a,b}; },
+    ({a,b})=>{ xs=a; pv=b.filter(p=>p.activo); if(!$('.modal')) draw(); });
+  const listo=()=>w.reload(), hoy=todayStr();
+  const fila=x=>`<div class="item static"><div class="hd"><b>${esc(x.empresa)}${x.nombre?' · '+esc(x.nombre):''}</b><span class="row" style="gap:4px">${pillOf(EST_ING,x.estado)}<span class="muted small">${x.estado==='programado'?fmtDay(x.programado):x.ingreso_at?fmtDate(x.ingreso_at):''}</span></span></div>
+    <div class="meta">${esc(x.motivo||'')}${x.destino?' · '+esc(x.destino):''}${x.depto?' · depto '+esc(x.depto):''}${x.rut?' · '+esc(x.rut):''}${x.patente?' · 🚗 '+esc(x.patente):''}${x.salida_at?' · salió '+horaDe(x.salida_at):''}${x.nota?' · '+esc(x.nota):''}</div>
+    ${x.estado==='dentro'?`<div class="row acc"><button class="btn sm" data-isal="${x.id}">Registrar salida</button></div>`:x.estado==='programado'?`<div class="row acc"><button class="btn sm" data-ille="${x.id}">Llegó</button><button class="btn sec sm" data-ino="${x.id}">No llegó</button></div>`:''}</div>`;
+  const draw=()=>{ const el=$('#ingBody'); if(!el) return; const den=xs.filter(x=>x.estado==='dentro'), pro=xs.filter(x=>x.estado==='programado').sort((a,b)=>a.programado<b.programado?-1:1), his=xs.filter(x=>['salio','no_llego'].includes(x.estado)).filter(x=>!qq||sinTildes([x.empresa,x.nombre,x.rut,x.patente,x.motivo,x.destino,x.depto].join(' ')).includes(sinTildes(qq)));
+    el.innerHTML=`<h2>Dentro del edificio (${den.length})</h2><div class="list">${den.map(fila).join('')||'<div class="empty">Nadie dentro</div>'}</div>
+      <h2>Programados</h2><div class="list">${pro.map(x=>(x.programado<hoy?fila(x).replace('pill in','pill er'):fila(x))).join('')||'<div class="empty">Sin visitas programadas</div>'}</div>
+      <div class="row wrap" style="margin-top:16px"><h2 class="grow" style="margin:0">Últimos ${dias} días</h2><input type="search" id="ingQ" placeholder="Buscar empresa, persona, RUT, patente…" value="${esc(qq)}" style="max-width:280px"><button class="btn sec sm" id="ingXls">Excel</button></div>
+      <div class="list" style="margin-top:8px">${his.map(fila).join('')||'<div class="empty">Sin registros</div>'}</div>`;
+    $('#ingQ').addEventListener('input',e=>{ qq=e.target.value; const pos=e.target.selectionStart; draw(); const i=$('#ingQ'); i.focus(); i.setSelectionRange(pos,pos); }); };
+  const form=(x={}, prog=false)=>{ const m=modal(`<h3>${prog?'Programar visita':x.id?'Registrar llegada':'Registrar ingreso'}</h3><form id="fIng">
+      <div class="row"><label class="f grow"><span>Proveedor</span><select name="proveedor_id"><option value="">Otro (escribir la empresa)</option>${pv.map(p=>`<option value="${p.id}" ${x.proveedor_id===p.id?'selected':''}>${esc(p.nombre)}${p.rubro?' · '+esc(p.rubro):''}</option>`).join('')}</select></label><label class="f grow" id="ingEmp"><span>Empresa</span><input type="text" name="empresa" value="${esc(x.proveedor_id?'':x.empresa||'')}"></label></div>
+      ${prog?`<label class="f"><span>Día</span><input type="date" name="programado" min="${hoy}" value="${hoy}" required></label>`:`<div class="row"><label class="f grow"><span>Nombre de quien viene</span><input type="text" name="nombre" value="${esc(x.nombre||'')}" required></label><label class="f"><span>RUT</span><input type="text" name="rut" value="${esc(x.rut||'')}" style="width:140px"></label><label class="f"><span>Patente</span><input type="text" name="patente" value="${esc(x.patente||'')}" style="width:110px;text-transform:uppercase"></label></div>`}
+      <label class="f"><span>Motivo</span><input type="text" name="motivo" value="${esc(x.motivo||'')}" required placeholder="Ej: mantención de ascensores, reparación de filtración"></label>
+      <div class="row"><label class="f grow"><span>Destino</span><input type="text" name="destino" value="${esc(x.destino||'')}" placeholder="Ej: sala de bombas, azotea"></label><label class="f"><span>Unidad (si va a un depto)</span><input type="text" name="depto" value="${esc(x.depto||'')}" list="dlIng" style="width:110px"><datalist id="dlIng">${Object.keys(S.unidades).sort(porNum).map(d=>`<option value="${esc(d)}">`).join('')}</datalist></label></div>
+      <button class="btn full">${prog?'Programar':'Registrar ingreso'}</button></form>`);
+    const vis=()=>{ $('#ingEmp',m).style.display=$('[name=proveedor_id]',m).value?'none':''; }; $('[name=proveedor_id]',m).addEventListener('change',vis); vis();
+    $('#fIng',m).addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); const b=$('button.full',m); busy(b,true);
+      const o={proveedor_id:d.proveedor_id||null, empresa:d.proveedor_id?'':d.empresa.trim(), motivo:d.motivo.trim(), destino:d.destino.trim(), depto:d.depto.trim()||null};
+      if(prog){ o.programado=d.programado; o.estado='programado'; } else { Object.assign(o,{nombre:d.nombre.trim(), rut:d.rut.trim(), patente:d.patente.trim(), estado:'dentro'}); }
+      try{ await q(x.id?T('proveedor_ingresos').update(o).eq('id',x.id):T('proveedor_ingresos').insert(o)); closeModal(); toast(prog?'Visita programada':'Ingreso registrado'); listo(); }catch(err){ toast(errMsg(err)); busy(b,false); } }); };
+  $('#bIng').addEventListener('click',()=>form());
+  $('#bProg')?.addEventListener('click',()=>form({},true));
+  $('#ingBody').addEventListener('click', async e=>{ const t=x=>e.target.closest(x); let b;
+    if(b=t('[data-isal]')){ try{ await q(T('proveedor_ingresos').update({estado:'salio'}).eq('id',b.dataset.isal)); toast('Salida registrada'); listo(); }catch(err){ toast(errMsg(err)); } }
+    else if(b=t('[data-ille]')) form(xs.find(x=>x.id===b.dataset.ille));
+    else if(b=t('[data-ino]')){ try{ await q(T('proveedor_ingresos').update({estado:'no_llego'}).eq('id',b.dataset.ino)); listo(); }catch(err){ toast(errMsg(err)); } }
+    else if(t('#ingXls')){ const B=v=>({v,b:true}); descargar(new Blob([window.MiniXlsx.build([{name:'Ingresos', widths:[18,18,24,22,14,10,30,20,8,10], rows:[[B(S.cfg?.nombre||'')],[B('Ingresos de proveedores')],[],[B('Entrada'),B('Salida'),B('Empresa'),B('Persona'),B('RUT'),B('Patente'),B('Motivo'),B('Destino'),B('Unidad'),B('Estado')], ...xs.filter(x=>x.estado!=='programado').map(x=>[x.ingreso_at?fmtDate(x.ingreso_at):'', x.salida_at?fmtDate(x.salida_at):'', x.empresa, x.nombre||'', x.rut||'', x.patente||'', x.motivo||'', x.destino||'', x.depto||'', EST_ING[x.estado][0]])]}])],{type:window.MiniXlsx.MIME}), 'ingresos-proveedores.xlsx'); } });
+};
+
 // ---------- Libro de novedades y turnos ----------
 const CAT_NOV={novedad:['Novedad','mu'], seguridad:['Seguridad','er'], mantencion:['Mantención','wa'], aseo:['Aseo','in'], visita:['Visitas','in'], reclamo:['Reclamo','wa'], instruccion:['Instrucción','ok'], otro:['Otro','mu']};
-async function resumenTurno(){ const hoy=todayStr(); const [enc,vis,est,inc]=await Promise.all([
+async function resumenTurno(){ const hoy=todayStr(); const [enc,vis,est,inc,prv]=await Promise.all([
   q(T('encomiendas').select('id').eq('entregado',false)).catch(()=>[]), q(T('visitas').select('id').eq('estado','ingreso')).catch(()=>[]),
-  q(T('estacionamiento_usos').select('id').is('fin',null)).catch(()=>[]), q(T('incidencias').select('id').eq('estado','abierta')).catch(()=>[])]);
-  return {encomiendas:enc.length, visitas_dentro:vis.length, estacionamientos:est.length, incidencias:inc.length, fecha:hoy}; }
-const txtResumen=r=>[r.encomiendas?`${r.encomiendas} encomiendas por entregar`:'', r.visitas_dentro?`${r.visitas_dentro} visitas dentro`:'', r.estacionamientos?`${r.estacionamientos} estacionamientos de visita ocupados`:'', r.incidencias?`${r.incidencias} incidencias abiertas`:''].filter(Boolean).join(' · ');
+  q(T('estacionamiento_usos').select('id').is('fin',null)).catch(()=>[]), q(T('incidencias').select('id').eq('estado','abierta')).catch(()=>[]), q(T('proveedor_ingresos').select('id').eq('estado','dentro')).catch(()=>[])]);
+  return {encomiendas:enc.length, visitas_dentro:vis.length, estacionamientos:est.length, incidencias:inc.length, proveedores_dentro:prv.length, fecha:hoy}; }
+const txtResumen=r=>[r.encomiendas?`${r.encomiendas} encomiendas por entregar`:'', r.visitas_dentro?`${r.visitas_dentro} visitas dentro`:'', r.estacionamientos?`${r.estacionamientos} estacionamientos de visita ocupados`:'', r.incidencias?`${r.incidencias} incidencias abiertas`:'', r.proveedores_dentro?`${r.proveedores_dentro} proveedores dentro del edificio`:''].filter(Boolean).join(' · ');
 VIEWS.novedades = function(){
   const r=role(), turnea=['conserje','admin'].includes(r); let ns=[], ts=[], filtro={q:'', cat:'', imp:false, dias:7};
   setMain(`<h1>Libro de novedades</h1><div id="nvTurno"></div>

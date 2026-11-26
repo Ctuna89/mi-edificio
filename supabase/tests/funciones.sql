@@ -682,3 +682,20 @@ select t.soy(:'a1'); update usuarios set depto = '103' where id = :'a2';
 select t.ok((select array_agg(depto order by depto) = array['103','104'] from usuario_unidades where uid = :'a2'), 'si la administración le cambia el depto, se reemplaza el anterior');
 update usuarios set depto = '101' where id = :'a2'; delete from usuario_unidades where uid = :'a2' and depto = '104';
 \echo 'OK: varias unidades por persona'
+
+-- ============ ingresos de proveedores ============
+select t.soy(:'a1');
+insert into proveedor_ingresos (proveedor_id, motivo, programado, estado) values ((select id from proveedores limit 1), 'Mantención mensual de ascensores', public.hoy() + 1, 'programado') returning id as pi1 \gset
+select t.ok((select empresa <> '' and ingreso_at is null from proveedor_ingresos where id = :'pi1'), 'la administración programa la visita; la empresa se toma del proveedor');
+select t.falla($$insert into proveedor_ingresos (motivo) values ('x')$$, 'ingreso sin empresa');
+select t.soy(:'a4');
+insert into proveedor_ingresos (empresa, nombre, rut, patente, motivo, depto) values ('Gasfitería Pérez', 'Juan Pérez', '12.345.678-5', 'ab-cd 12', 'Filtración', '102') returning id as pi2 \gset
+select t.ok((select estado = 'dentro' and ingreso_at is not null and rut = '12345678-5' and patente = 'ABCD12' and registrado_por = :'a4' from proveedor_ingresos where id = :'pi2'), 'conserjería registra el ingreso con hora, RUT y patente normalizados');
+select t.falla($$insert into proveedor_ingresos (empresa, rut) values ('X', '12.345.678-9')$$, 'RUT no válido');
+update proveedor_ingresos set estado = 'salio', ingreso_at = now() - interval '5 hours' where id = :'pi2';
+select t.ok((select salida_at is not null and ingreso_at > now() - interval '1 hour' from proveedor_ingresos where id = :'pi2'), 'la salida queda con hora y la hora de ingreso no se cambia');
+select t.falla(format($$update proveedor_ingresos set estado = 'dentro' where id = %L$$, :'pi2'), 'reabrir un ingreso cerrado');
+update proveedor_ingresos set estado = 'dentro' where id = :'pi1';
+select t.ok((select ingreso_at is not null from proveedor_ingresos where id = :'pi1'), 'una visita programada se registra al llegar');
+select t.soy(:'a2'); select t.ok((select count(*) = 0 from proveedor_ingresos), 'los residentes no ven los ingresos de proveedores');
+\echo 'OK: ingresos de proveedores'
