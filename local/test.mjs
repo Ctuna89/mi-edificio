@@ -189,7 +189,7 @@ test('correo: la administración configura el SMTP y la app envía las notificac
     const cit = await ana.rpc('citar_asamblea', { p_id: asm.data }); assert.equal(cit.estado, 200, cit.error);
     const env = await hasta(async () => { const r = (await ana.db({ t: 'correos', op: 'select', f: [['referencia', 'eq', 'asambleas/' + asm.data]] })).data; return r.length && r.every(x => x.estado === 'enviado') && r; });
     assert.ok(env, 'las citaciones quedan enviadas'); assert.ok(env.some(x => x.para === 'rita@test.cl'));
-    const cita = recibidos.find(m => m.para.includes('rita@test.cl')); assert.match(cita.cuerpo, /Citaci/); assert.match(cita.cuerpo, /Reply-To|From: Torre Local|Torre Local/);
+    const cita = recibidos.find(m => m.para.includes('rita@test.cl') && /Citaci/.test(m.cuerpo)); assert.match(cita.cuerpo, /Citaci/); assert.match(cita.cuerpo, /Reply-To|From: Torre Local|Torre Local/);
     assert.equal((await rita.db({ t: 'correos', op: 'select' })).data.length, 0, 'la cola es solo de la administración');
   } finally { smtp.close(); await ana.pedir('/api/correo/configurar', { borrar: true, proveedor: 'otro', host: 'x', remitente: 'a@b.cl' }); }
 });
