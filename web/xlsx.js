@@ -1,6 +1,7 @@
 /* =====================================================================
-   Generador mínimo de archivos .xlsx (Excel), sin dependencias.
+   Generador y lector mínimos de archivos .xlsx (Excel), sin dependencias.
    MiniXlsx.build([{ name:'Hoja', widths:[30,12], rows:[[celda, ...], ...] }]) → Uint8Array
+   MiniXlsx.read(arrayBuffer) → Promise<filas de la primera hoja>
    Celda: número (formato miles si es entero), texto, null (vacía) o { v, b:true } para negrita.
    ===================================================================== */
 (function(root){
@@ -70,6 +71,57 @@ function build(sheets){
   return zip(files);
 }
 
-const api = { build, MIME:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' };
+// Lector mínimo: primera hoja de un .xlsx → filas de celdas (texto o número). Usa DecompressionStream (navegadores
+// actuales y Node 18+). No lee .xls antiguos: esos se guardan como .xlsx o CSV, o se copian y pegan.
+const dec = new TextDecoder();
+const desXml = s => s.replace(/&(lt|gt|quot|apos|amp|#(\d+)|#x([0-9a-f]+));/gi, (m, k, d, h) => d ? String.fromCodePoint(+d) : h ? String.fromCodePoint(parseInt(h, 16)) : ({lt:'<', gt:'>', quot:'"', apos:"'", amp:'&'})[k.toLowerCase()]);
+async function unzip(buf){
+  const b = new Uint8Array(buf), dv = new DataView(b.buffer, b.byteOffset, b.byteLength), out = {};
+  let e = b.length - 22; while (e >= 0 && dv.getUint32(e, true) !== 0x06054b50) e--;
+  if (e < 0) throw new Error('El archivo no es un Excel (.xlsx) válido');
+  let p = dv.getUint32(e + 16, true); const n = dv.getUint16(e + 10, true);
+  for (let i = 0; i < n; i++) {
+    if (dv.getUint32(p, true) !== 0x02014b50) break;
+    const met = dv.getUint16(p + 10, true), tam = dv.getUint32(p + 20, true), ln = dv.getUint16(p + 28, true), lx = dv.getUint16(p + 30, true), lc = dv.getUint16(p + 32, true), off = dv.getUint32(p + 42, true);
+    const nombre = dec.decode(b.subarray(p + 46, p + 46 + ln)); p += 46 + ln + lx + lc;
+    out[nombre] = async () => { const ini = off + 30 + dv.getUint16(off + 26, true) + dv.getUint16(off + 28, true), d = b.subarray(ini, ini + tam);
+      if (met === 0) return dec.decode(d);
+      if (met !== 8) throw new Error('Compresión no soportada');
+      return dec.decode(await new Response(new Blob([d]).stream().pipeThrough(new DecompressionStream('deflate-raw'))).arrayBuffer()); };
+  }
+  return out;
+}
+const colNum = r => { let n = 0; for (const ch of r.replace(/\d+$/, '')) n = n * 26 + ch.charCodeAt(0) - 64; return n - 1; };
+async function read(buf){
+  const z = await unzip(buf);
+  const ss = z['xl/sharedStrings.xml'] ? [...(await z['xl/sharedStrings.xml']()).matchAll(/<si>([\s\S]*?)<\/si>/g)].map(m => desXml([...m[1].matchAll(/<t[^>]*>([\s\S]*?)<\/t>/g)].map(t => t[1]).join(''))) : [];
+  let hoja = 'xl/worksheets/sheet1.xml';
+  if (z['xl/workbook.xml'] && z['xl/_rels/workbook.xml.rels']) {   // la primera hoja del libro, no necesariamente sheet1.xml
+    const rid = ((await z['xl/workbook.xml']()).match(/<sheet\b[^>]*\br:id="([^"]+)"/) || [])[1];
+    const t = rid && ((await z['xl/_rels/workbook.xml.rels']()).match(new RegExp('<Relationship\\b[^>]*Id="' + rid + '"[^>]*Target="([^"]+)"')) || (await z['xl/_rels/workbook.xml.rels']()).match(new RegExp('<Relationship\\b[^>]*Target="([^"]+)"[^>]*Id="' + rid + '"')) || [])[1];
+    if (t) hoja = t.startsWith('/') ? t.slice(1) : 'xl/' + t.replace(/^\.\//, '');
+  }
+  if (!z[hoja]) hoja = Object.keys(z).find(k => /^xl\/worksheets\/[^/]+\.xml$/.test(k));
+  if (!hoja) throw new Error('El Excel no tiene hojas');
+  const filas = [];
+  for (const f of (await z[hoja]()).matchAll(/<row\b[^>]*?(?:\/>|>([\s\S]*?)<\/row>)/g)) {
+    const fila = [];
+    for (const c of (f[1] || '').matchAll(/<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g)) {
+      const at = c[1], r = (at.match(/\br="([A-Z]+\d+)"/) || [])[1], t = (at.match(/\bt="(\w+)"/) || [])[1], cu = c[2] || '';
+      const v = (cu.match(/<v>([\s\S]*?)<\/v>/) || [])[1];
+      let val = null;
+      if (t === 's') val = ss[+v] ?? '';
+      else if (t === 'inlineStr') val = desXml([...cu.matchAll(/<t[^>]*>([\s\S]*?)<\/t>/g)].map(x => x[1]).join(''));
+      else if (t === 'str' || t === 'e') val = v != null ? desXml(v) : '';
+      else if (t === 'b') val = v === '1';
+      else if (v != null) val = Number(v);
+      fila[r ? colNum(r) : fila.length] = val;
+    }
+    filas.push(Array.from(fila, x => x ?? null));
+  }
+  return filas;
+}
+
+const api = { build, read, MIME:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' };
 if(typeof module!=='undefined' && module.exports) module.exports = api; else root.MiniXlsx = api;
 })(typeof window!=='undefined' ? window : globalThis);

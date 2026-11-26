@@ -932,6 +932,49 @@ create table if not exists public.correos (
   mensaje_id  text,
   ts          timestamptz default now()
 );
+-- Cartola bancaria importada. monto > 0 = abono, < 0 = cargo. La huella evita importar dos veces el mismo movimiento.
+create table if not exists public.banco_movimientos (
+  id          uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  fecha       date not null,
+  monto       numeric(14,2) not null check (monto <> 0),
+  glosa       text not null default '',
+  documento   text default '',
+  huella      text not null,
+  estado      text not null default 'pendiente' check (estado in ('pendiente','conciliado','caja','ignorado')),
+  sugerido    text,                          -- unidad sugerida para un abono
+  motivo      text,                          -- por qué se sugiere
+  depto       text,
+  pagos       uuid[] not null default '{}',
+  caja_id     uuid,
+  sobrante    numeric(14,2) not null default 0,
+  nota        text default '',
+  importado_por uuid,
+  conciliado_por uuid,
+  conciliado_at timestamptz,
+  ts          timestamptz default now(),
+  unique (edificio_id, huella)
+);
+create index if not exists banco_mov_estado_idx on public.banco_movimientos (edificio_id, estado, fecha);
+-- Quién paga qué unidad: se aprende al conciliar (RUT o glosa del pagador)
+create table if not exists public.banco_pagadores (
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  clave       text not null,
+  depto       text not null,
+  ts          timestamptz default now(),
+  primary key (edificio_id, clave)
+);
+-- Presupuesto anual por categoría de gasto, con el monto de cada mes
+create table if not exists public.presupuestos (
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  anio        int not null,
+  categoria   text not null,
+  montos      numeric(14,2)[] not null default array_fill(0::numeric, array[12]) check (cardinality(montos) = 12),
+  nota        text default '',
+  actualizado timestamptz default now(),
+  primary key (edificio_id, anio, categoria)
+);
+
 -- Certificados de deuda (o de no deuda) de una unidad, con folio correlativo por edificio
 create table if not exists public.certificados (
   id          uuid primary key default gen_random_uuid(),
@@ -986,7 +1029,7 @@ begin
   end if;
 
   select id into def from public.edificios order by creado, id limit 1;
-  foreach t in array array['empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos','certificados']
+  foreach t in array array['empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos','certificados','banco_movimientos','banco_pagadores','presupuestos']
   loop
     execute format('alter table public.%I add column if not exists edificio_id uuid references public.edificios(id) on delete cascade', t);
     execute format('select count(*) from public.%I where edificio_id is null', t) into n;
@@ -1099,7 +1142,7 @@ $$;
 do $$
 declare t text;
 begin
-  foreach t in array array['empresas','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos','certificados']
+  foreach t in array array['empresas','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos','certificados','banco_movimientos','banco_pagadores','presupuestos']
   loop
     execute format('alter table public.%I alter column edificio_id set default public.mi_edificio()', t);
   end loop;
@@ -1826,7 +1869,7 @@ declare t text;
 begin
   -- tablas con datos personales o de dinero (no los votos: el voto de un sondeo es secreto)
   foreach t in array array['edificios','usuarios','contactos','unidades','gastos','pagos','convenios','cargos','caja_movimientos','fondos','fondo_movimientos',
-                           'lecturas','multas_catalogo','indicadores','consentimientos','solicitudes_datos','estacionamientos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','certificados'] loop
+                           'lecturas','multas_catalogo','indicadores','consentimientos','solicitudes_datos','estacionamientos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','certificados','banco_movimientos','presupuestos'] loop
     execute format('drop trigger if exists %I on public.%I', t || '_auditoria', t);
     execute format('create trigger %I after insert or update or delete on public.%I for each row execute function privado.auditar()', t || '_auditoria', t);
   end loop;
@@ -2691,6 +2734,177 @@ begin
   return id;
 end $$;
 
+-- ---------- Cartola bancaria ----------
+create or replace function privado.sin_tildes(t text) returns text
+language sql immutable as $$ select upper(translate(coalesce(t, ''), 'áéíóúüñÁÉÍÓÚÜÑ', 'aeiouunAEIOUUN')) $$;
+-- Clave del pagador para recordar a qué unidad corresponde: su RUT si aparece en la glosa; si no, la glosa sin números
+create or replace function privado.clave_pagador(p_glosa text) returns text
+language plpgsql immutable as $$
+declare m text[]; r text;
+begin
+  for m in select regexp_matches(coalesce(p_glosa, ''), '(\d{1,2}\.?\d{3}\.?\d{3})\s*-?\s*([0-9kK])(?![0-9])', 'g') loop
+    r := public.rut_normalizado(m[1] || m[2]);
+    if r is not null then return 'RUT ' || r; end if;
+  end loop;
+  r := trim(regexp_replace(regexp_replace(privado.sin_tildes(p_glosa), '[^A-Z ]', ' ', 'g'), '\s+', ' ', 'g'));
+  return case when length(r) >= 6 then r end;
+end $$;
+-- Unidad sugerida para un abono: pagador conocido, RUT del registro, unidad mencionada en la glosa, nombre, o monto único
+create or replace function privado.sugerir_depto(p_e uuid, p_glosa text, p_monto numeric, out depto text, out motivo text)
+language plpgsql stable security definer set search_path = public as $$
+declare g text := privado.sin_tildes(p_glosa); k text := privado.clave_pagador(p_glosa); m text[]; x record; c int;
+begin
+  if p_monto <= 0 then return; end if;
+  select b.depto into depto from public.banco_pagadores b
+  where b.edificio_id = p_e and (b.clave = k or (b.clave not like 'RUT %' and length(b.clave) >= 10 and position(b.clave in coalesce(k, '')) > 0))
+  order by b.clave = k desc, length(b.clave) desc limit 1;
+  if depto is not null then motivo := 'pagador conocido'; return; end if;
+  if k like 'RUT %' then
+    select r.depto, r.nombre into x from public.registro_personas r where r.edificio_id = p_e and r.rut = substr(k, 5) and r.estado = 'vigente' and r.hasta is null order by (r.relacion = 'copropietario') desc limit 1;
+    if found then depto := x.depto; motivo := 'RUT de ' || x.nombre; return; end if;
+  end if;
+  for m in select regexp_matches(g, '(?:DEPARTAMENTO|DEPTO|DPTO|DTO|DEP|CASA|OFICINA|OF|UNIDAD|UN)\.?\s*N?[O°º]?\.?\s*([0-9]+[A-Z]?)', 'g') loop
+    select u.depto into depto from public.unidades u where u.edificio_id = p_e and upper(u.depto) = m[1];
+    if depto is not null then motivo := 'menciona la unidad ' || depto; return; end if;
+  end loop;
+  -- nombre: todas las palabras (de 3 letras o más, al menos dos) del nombre de alguien del registro o del propietario
+  select n.depto, n.nombre, count(*) over () into x from (
+    select distinct r.depto, r.nombre from public.registro_personas r where r.edificio_id = p_e and r.estado = 'vigente' and r.hasta is null
+    union select u.depto, u.prop from public.unidades u where u.edificio_id = p_e and coalesce(u.prop, '') <> '') n
+  where (select count(*) >= 2 and bool_and(position(w in g) > 0) from regexp_split_to_table(privado.sin_tildes(n.nombre), '[^A-Z]+') w where length(w) >= 3)
+  limit 1;
+  if found and x.count = 1 then depto := x.depto; motivo := 'nombre de ' || x.nombre; return; end if;
+  select min(gu.depto), count(distinct gu.depto) into depto, c from public.gasto_unidades gu join public.gastos p on p.edificio_id = gu.edificio_id and p.periodo = gu.periodo and p.publicado
+  where gu.edificio_id = p_e and not gu.pagado and gu.monto - gu.pagado_monto = p_monto;
+  if c = 1 then motivo := 'el monto coincide con un cobro pendiente'; return; end if;
+  select min(t.depto), count(*) into depto, c from (
+    select gu.depto from public.gasto_unidades gu join public.gastos p on p.edificio_id = gu.edificio_id and p.periodo = gu.periodo and p.publicado
+    where gu.edificio_id = p_e and not gu.pagado and gu.monto - gu.pagado_monto > 0
+      and not exists (select 1 from public.convenios cv where cv.id = gu.convenio_id and cv.estado in ('propuesto','vigente'))
+    group by gu.depto having sum(gu.monto - gu.pagado_monto) = p_monto) t;
+  if c = 1 then motivo := 'el monto coincide con la deuda de la unidad'; else depto := null; end if;
+end $$;
+
+-- p_filas: [{fecha, monto, glosa, documento, n}] (n: orden entre movimientos idénticos del mismo archivo)
+create or replace function public.importar_cartola(p_filas jsonb) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare e uuid := public.mi_edificio(); f jsonb; nuevas int := 0; total int := 0; s record; h text; mid uuid;
+begin
+  if not public.es_admin() then raise exception 'Solo administración'; end if;
+  if jsonb_typeof(p_filas) <> 'array' or jsonb_array_length(p_filas) > 5000 then raise exception 'Cartola no válida'; end if;
+  for f in select * from jsonb_array_elements(p_filas) loop
+    total := total + 1;
+    if (f->>'monto')::numeric = 0 or (f->>'fecha') is null then continue; end if;
+    h := md5(concat_ws('|', f->>'fecha', round((f->>'monto')::numeric), privado.sin_tildes(trim(f->>'glosa')), trim(coalesce(f->>'documento', '')), coalesce(f->>'n', '0')));
+    insert into public.banco_movimientos (edificio_id, fecha, monto, glosa, documento, huella, importado_por)
+    values (e, (f->>'fecha')::date, round((f->>'monto')::numeric), left(trim(coalesce(f->>'glosa', '')), 300), left(trim(coalesce(f->>'documento', '')), 60), h, auth.uid())
+    on conflict (edificio_id, huella) do nothing returning id into mid;
+    if mid is not null then
+      nuevas := nuevas + 1;
+      if (f->>'monto')::numeric > 0 then
+        s := privado.sugerir_depto(e, f->>'glosa', round((f->>'monto')::numeric));
+        update public.banco_movimientos set sugerido = s.depto, motivo = s.motivo where id = mid;
+      end if;
+      mid := null;
+    end if;
+  end loop;
+  return jsonb_build_object('total', total, 'nuevas', nuevas, 'repetidas', total - nuevas);
+end $$;
+
+-- Aplica un abono a la deuda de la unidad: cobros más antiguos fuera de convenio, después el convenio vigente y al final
+-- los intereses por mora. Devuelve los pagos creados y lo que sobra.
+create or replace function privado.aplicar_abono(p_e uuid, p_depto text, p_monto numeric, p_fecha date, p_medio text, p_ref text, p_nota text, out pagos uuid[], out sobrante numeric, out detalle text)
+language plpgsql security definer set search_path = public as $$
+declare r numeric := p_monto; x record; a numeric; id uuid;
+begin
+  pagos := '{}'; detalle := '';
+  for x in select gu.periodo, gu.monto - gu.pagado_monto as saldo from public.gasto_unidades gu
+           join public.gastos p on p.edificio_id = gu.edificio_id and p.periodo = gu.periodo and p.publicado
+           where gu.edificio_id = p_e and gu.depto = p_depto and not gu.pagado and gu.monto - gu.pagado_monto > 0
+             and not exists (select 1 from public.convenios c where c.id = gu.convenio_id and c.estado in ('propuesto','vigente'))
+           order by gu.periodo loop
+    exit when r <= 0; a := least(r, x.saldo);
+    insert into public.pagos (edificio_id, depto, periodo, concepto, monto, fecha, medio, referencia, nota) values (p_e, p_depto, x.periodo, 'gasto', a, p_fecha, p_medio, p_ref, p_nota) returning pagos.id into id;
+    pagos := pagos || id; r := r - a; detalle := detalle || E'\n- gasto común de ' || privado.mes_texto(x.periodo) || ': ' || privado.clp(a);
+  end loop;
+  for x in select c.id, c.monto_total - coalesce((select sum(k.pagado_monto) from public.convenio_cuotas k where k.convenio_id = c.id), 0) as saldo
+           from public.convenios c where c.edificio_id = p_e and c.depto = p_depto and c.estado = 'vigente' order by c.ts loop
+    exit when r <= 0; continue when x.saldo <= 0; a := least(r, x.saldo);
+    insert into public.pagos (edificio_id, depto, convenio_id, concepto, monto, fecha, medio, referencia, nota) values (p_e, p_depto, x.id, 'gasto', a, p_fecha, p_medio, p_ref, p_nota) returning pagos.id into id;
+    pagos := pagos || id; r := r - a; detalle := detalle || E'\n- convenio de pago: ' || privado.clp(a);
+  end loop;
+  for x in select gu.periodo, coalesce(gu.interes, privado.interes_cobro(gu.edificio_id, gu.depto, gu.periodo, public.hoy())) - gu.interes_pagado as saldo
+           from public.gasto_unidades gu where gu.edificio_id = p_e and gu.depto = p_depto order by gu.periodo loop
+    exit when r <= 0; continue when coalesce(x.saldo, 0) <= 0; a := least(r, x.saldo);
+    insert into public.pagos (edificio_id, depto, periodo, concepto, monto, fecha, medio, referencia, nota) values (p_e, p_depto, x.periodo, 'interes', a, p_fecha, p_medio, p_ref, p_nota) returning pagos.id into id;
+    pagos := pagos || id; r := r - a; detalle := detalle || E'\n- interés por mora de ' || privado.mes_texto(x.periodo) || ': ' || privado.clp(a);
+  end loop;
+  sobrante := greatest(r, 0);
+end $$;
+
+-- Concilia un abono con una unidad: registra los pagos (un comprobante por la transferencia) y recuerda al pagador.
+-- Lo que sobra (sin deuda a la cual aplicarlo) queda como otro ingreso en el flujo de caja, a favor de la unidad.
+create or replace function public.conciliar_movimiento(p_id uuid, p_depto text) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare e uuid := public.mi_edificio(); m public.banco_movimientos; a record; cid uuid; k text;
+begin
+  if not public.es_admin() then raise exception 'Solo administración'; end if;
+  select * into m from public.banco_movimientos where id = p_id and edificio_id = e for update;
+  if not found then raise exception 'Movimiento no encontrado'; end if;
+  if m.estado <> 'pendiente' then raise exception 'El movimiento ya fue procesado'; end if;
+  if m.monto <= 0 then raise exception 'Solo los abonos se concilian con una unidad'; end if;
+  if not exists (select 1 from public.unidades where edificio_id = e and depto = p_depto) then raise exception 'La unidad no existe'; end if;
+  perform set_config('mi_edificio.sin_comprobante', '1', true);
+  a := privado.aplicar_abono(e, p_depto, m.monto, m.fecha, 'transferencia', left(coalesce(nullif(m.documento, ''), m.glosa), 60), 'Cartola: ' || left(m.glosa, 120));
+  perform set_config('mi_edificio.sin_comprobante', '', true);
+  if a.sobrante > 0 then
+    insert into public.caja_movimientos (edificio_id, tipo, fecha, categoria, descripcion, monto, registrado_por)
+    values (e, 'ingreso', m.fecha, 'Saldo a favor', 'Depto ' || p_depto || ': abono sin cobro pendiente (' || left(m.glosa, 100) || ')', a.sobrante, auth.uid()) returning id into cid;
+  end if;
+  update public.banco_movimientos set estado = 'conciliado', depto = p_depto, pagos = a.pagos, caja_id = cid, sobrante = a.sobrante, conciliado_por = auth.uid(), conciliado_at = now() where id = p_id;
+  k := privado.clave_pagador(m.glosa);
+  if k is not null then
+    insert into public.banco_pagadores (edificio_id, clave, depto) values (e, k, p_depto) on conflict (edificio_id, clave) do update set depto = excluded.depto, ts = now();
+  end if;
+  if coalesce((select (correo_avisos->>'comprobante')::boolean from public.edificios where id = e), true) then
+    perform privado.correo_unidad(e, p_depto, 'Comprobante de pago · unidad ' || p_depto,
+      'Registramos la transferencia recibida el ' || to_char(m.fecha, 'DD-MM-YYYY') || ' por ' || privado.clp(m.monto) || ', aplicada así:' || a.detalle ||
+      case when a.sobrante > 0 then E'\n- saldo a favor de la unidad: ' || privado.clp(a.sobrante) else '' end ||
+      E'\n\nSaldo pendiente de la unidad: ' || privado.clp((privado.deuda_unidad(e, p_depto)->>'total')::numeric) || '.', 'banco/' || p_id);
+  end if;
+  return jsonb_build_object('pagos', cardinality(a.pagos), 'sobrante', a.sobrante);
+end $$;
+
+-- Un movimiento que no es pago de gastos comunes: al flujo de caja (ingreso u egreso) o se ignora
+create or replace function public.clasificar_movimiento(p_id uuid, p_caja boolean, p_categoria text default '', p_nota text default '') returns void
+language plpgsql security definer set search_path = public as $$
+declare e uuid := public.mi_edificio(); m public.banco_movimientos; cid uuid;
+begin
+  if not public.es_admin() then raise exception 'Solo administración'; end if;
+  select * into m from public.banco_movimientos where id = p_id and edificio_id = e for update;
+  if not found then raise exception 'Movimiento no encontrado'; end if;
+  if m.estado <> 'pendiente' then raise exception 'El movimiento ya fue procesado'; end if;
+  if p_caja then
+    if coalesce(trim(p_categoria), '') = '' then raise exception 'Indica la categoría'; end if;
+    insert into public.caja_movimientos (edificio_id, tipo, fecha, categoria, descripcion, monto, registrado_por)
+    values (e, case when m.monto > 0 then 'ingreso' else 'egreso' end, m.fecha, trim(p_categoria), coalesce(nullif(trim(p_nota), ''), m.glosa), abs(m.monto), auth.uid()) returning id into cid;
+  end if;
+  update public.banco_movimientos set estado = case when p_caja then 'caja' else 'ignorado' end, caja_id = cid, nota = coalesce(p_nota, ''), conciliado_por = auth.uid(), conciliado_at = now() where id = p_id;
+end $$;
+
+-- Deshacer: anula los pagos (o borra el movimiento de caja) y el movimiento vuelve a quedar pendiente
+create or replace function public.deshacer_movimiento(p_id uuid, p_motivo text default '') returns void
+language plpgsql security definer set search_path = public as $$
+declare e uuid := public.mi_edificio(); m public.banco_movimientos;
+begin
+  if not public.es_admin() then raise exception 'Solo administración'; end if;
+  select * into m from public.banco_movimientos where id = p_id and edificio_id = e for update;
+  if not found or m.estado = 'pendiente' then raise exception 'No hay nada que deshacer'; end if;
+  update public.pagos set anulado = true, anulado_motivo = coalesce(nullif(trim(p_motivo), ''), 'Conciliación bancaria deshecha') where id = any(m.pagos) and not anulado;
+  if m.caja_id is not null then delete from public.caja_movimientos where id = m.caja_id and edificio_id = e; end if;
+  update public.banco_movimientos set estado = 'pendiente', depto = null, pagos = '{}', caja_id = null, sobrante = 0, conciliado_por = null, conciliado_at = null where id = p_id;
+end $$;
+
 -- Aviso de cobro: al publicar un período, un correo a cada unidad con su monto, el vencimiento y la deuda anterior
 create or replace function privado.avisar_cobros(p_e uuid default null) returns int
 language plpgsql security definer set search_path = public as $$
@@ -2751,6 +2965,7 @@ end $$;
 create or replace function privado.tg_correo_pago() returns trigger
 language plpgsql security definer set search_path = public as $$
 begin
+  if current_setting('mi_edificio.sin_comprobante', true) = '1' then return null; end if;
   if new.anulado or new.medio = 'condonacion' or not coalesce((select (correo_avisos->>'comprobante')::boolean from public.edificios where id = new.edificio_id), true) then return null; end if;
   perform privado.correo_unidad(new.edificio_id, new.depto, 'Comprobante de pago nº ' || privado.folio_pago(new.id) || ' · unidad ' || new.depto,
     'Registramos el siguiente pago de la unidad ' || new.depto || ':' || E'\n\n' ||
@@ -3761,6 +3976,9 @@ alter table public.asamblea_mociones enable row level security;
 alter table public.asamblea_votos   enable row level security;
 alter table public.correos          enable row level security;
 alter table public.certificados     enable row level security;
+alter table public.banco_movimientos enable row level security;
+alter table public.banco_pagadores  enable row level security;
+alter table public.presupuestos     enable row level security;
 
 -- helper para (re)crear políticas sin errores. Salvo que se indique lo contrario, toda
 -- política queda además limitada a las filas del edificio del usuario.
@@ -3967,6 +4185,13 @@ select public._pol('asamblea_asistencia','aa_sel','select','public.mi_rol() in (
 select public._pol('asamblea_mociones','am_sel','select','public.mi_rol() in (''residente'',''propietario'',''comite'',''admin'')');
 select public._pol('asamblea_votos','av_sel','select','public.mi_rol() in (''residente'',''propietario'',''comite'',''admin'')');
 select public._pol('correos','cor_sel','select','public.es_admin()');
+select public._pol('banco_movimientos','bm_sel','select','public.mi_rol() in (''comite'',''admin'')');
+select public._pol('banco_pagadores','bp_sel','select','public.es_admin()');
+select public._pol('banco_pagadores','bp_del','delete','public.es_admin()');
+select public._pol('presupuestos','pre_sel','select','public.mi_rol() in (''residente'',''propietario'',''comite'',''admin'')');
+select public._pol('presupuestos','pre_ins','insert','public.es_admin()');
+select public._pol('presupuestos','pre_upd','update','public.es_admin()');
+select public._pol('presupuestos','pre_del','delete','public.es_admin()');
 select public._pol('certificados','cert_sel','select','public.mi_rol() in (''comite'',''admin'') or (public.es_residente() and depto = public.mi_depto())');
 select public._pol('suspension_eventos','se_sel','select','exists (select 1 from public.suspensiones x where x.id = suspension_id)');
 
@@ -4043,7 +4268,7 @@ create policy "fotos_delete" on storage.objects for delete to authenticated usin
 do $$
 declare t text;
 begin
-  foreach t in array array['edificios','empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos','certificados']
+  foreach t in array array['edificios','empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos','certificados','banco_movimientos','banco_pagadores','presupuestos']
   loop
     begin
       execute format('alter publication supabase_realtime add table public.%I', t);

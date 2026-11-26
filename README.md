@@ -293,6 +293,16 @@ Este módulo está adaptado de [CactusOne](https://github.com/Ctuna89/cactusone)
 
 **Interés por mora.** En Administración → Edificio se define la tasa mensual (0 = no se cobra) y, si se quiere, desde qué fecha se cuenta. Es interés simple, calculado por día (tasa ÷ 30) sobre el saldo impago de cada cobro vencido; cada abono reduce la base desde su fecha. Se muestra aparte de la deuda, a la administración, al comité y a la unidad. Se paga desde "Registrar pago" eligiendo *Interés por mora*, o se perdona con el medio *Condonación*, que queda en el historial y no entra al flujo de caja. Al pagarse el capital, el interés de ese cobro queda fijo; mientras un cobro está en un convenio, deja de sumar. Cambiar la tasa recalcula las deudas pendientes, no los cobros ya pagados. **La app no sabe cuál es la tasa máxima legal ni la de tu reglamento de copropiedad: confírmala antes de activarla.**
 
+**Cartola bancaria.** En Finanzas → Banco se importa la cartola descargada del banco (Excel .xlsx o CSV, o las filas copiadas y pegadas). La app reconoce las columnas de fecha, descripción, cargos y abonos, omite títulos y totales, y no duplica movimientos si se importa dos veces. Para cada abono sugiere la unidad que pagó: por el RUT del Registro de copropietarios, la unidad mencionada en la transferencia, el nombre, el monto o porque ya conoce a ese pagador. Al confirmar se registran los pagos (primero los cobros más antiguos, después el convenio y los intereses), se envía un solo comprobante y, si sobra, queda como saldo a favor en el flujo de caja. Los cargos (pagos a proveedores, comisiones) se pasan al flujo de caja como egresos con su categoría. Todo se puede deshacer. Los .xls antiguos no se leen: se guardan como .xlsx o se copian y pegan.
+
+![Conciliación de la cartola bancaria](docs/capturas/banco.png)
+
+**Presupuesto.** En Finanzas → Presupuesto la administración define el presupuesto anual por categoría, con un monto por mes (puede partir del promedio gastado el año anterior). La app lo compara con los ítems de los gastos comunes publicados, mes a mes y en el año. La comunidad lo puede ver.
+
+![Presupuesto contra gasto real](docs/capturas/presupuesto.png)
+
+**Rendición de cuentas.** Finanzas → Rendición arma, para cada mes, el informe para la comunidad y el comité: gastos del período y su recaudación, ingresos y egresos con el saldo de caja, fondos, morosidad, presupuesto y estado de la conciliación bancaria; se imprime con espacio para las firmas.
+
 **Flujo de caja.** Finanzas → Flujo de caja muestra, por mes y con totales del año, los ingresos por gastos comunes (tomados de los pagos registrados), otros ingresos, egresos, flujo neto y saldo acumulado; se exporta a Excel. Los egresos y otros ingresos los anota la administración; para partir con la caja real, anota un ingreso de categoría "Saldo inicial". Los ítems de un período de gastos comunes son lo que se cobra, no egresos: no entran solos al flujo.
 
 ## Visitas con QR

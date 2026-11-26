@@ -1275,8 +1275,164 @@ function cuentaResidente(){
     q(T('certificados').select('*').eq('depto',myDepto()).order('folio',{ascending:false}).limit(20)).then(cs=>{ const c=$('#gCert'); if(!c||!cs.length) return; c.innerHTML=`<h2>Certificados de deuda</h2><div class="list">${cs.map(x=>`<div class="item" data-cert="${x.id}"><div class="hd"><b>Nº ${x.folio} · ${fmtDay(x.fecha)}</b>${Number(x.deuda)>0?`<span class="pill er">Deuda ${clp(x.deuda)}</span>`:'<span class="pill ok">Sin deuda</span>'}</div><div class="meta">${esc(x.motivo||'')}</div></div>`).join('')}</div>`; c.onclick=e=>{ const it=e.target.closest('[data-cert]'); if(it) imprimirCertificado(cs.find(x=>x.id===it.dataset.cert)); }; }).catch(()=>{}); }, {silent:true});
   $('#gCuenta').addEventListener('click',e=>{ const it=e.target.closest('[data-cv]'); if(it&&D?.C[it.dataset.cv]) detalleConvenio(D.C[it.dataset.cv], w.reload); });
 }
+// ---------- Cartola bancaria ----------
+const CAT_CAJA=['Remuneraciones','Agua','Electricidad','Gas','Mantención','Aseo','Seguros','Honorarios','Reparaciones','Multas','Arriendo de espacios','Intereses','Comisiones bancarias','Saldo a favor','Saldo inicial'];
+const sinTildes=t=>String(t??'').normalize('NFD').replace(/[̀-ͯ]/g,'').toLowerCase().trim();
+// Fecha de una celda: número de serie de Excel, dd/mm/aaaa, dd-mm-aa, aaaa-mm-dd
+function fechaCelda(v){ if(v==null||v==='') return null;
+  if(typeof v==='number'){ if(v<20000||v>80000) return null; const d=new Date(Date.UTC(1899,11,30)+Math.round(v)*86400000); return d.toISOString().slice(0,10); }
+  const t=String(v).trim(); let m=t.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/); if(m) return `${m[1]}-${pad(+m[2])}-${pad(+m[3])}`;
+  m=t.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})\b/); if(m){ const y=m[3].length===2?'20'+m[3]:m[3]; if(+m[2]>12) return null; return `${y}-${pad(+m[2])}-${pad(+m[1])}`; }
+  return null; }
+// Monto de una celda: 1.234.567 · $ 1.234 · -15.000 · 1234567,00 · (15.000)
+function montoCelda(v){ if(v==null||v==='') return 0; if(typeof v==='number') return v;
+  let t=String(v).replace(/\s|\$|CLP/gi,''); const neg=/^\(.*\)$/.test(t)||/^-/.test(t)||/-$/.test(t); t=t.replace(/[()\-+]/g,'');
+  if(/,\d{1,2}$/.test(t)) t=t.replace(/\./g,'').replace(',','.'); else if(/^\d{1,3}(\.\d{3})+$/.test(t)) t=t.replace(/\./g,''); else t=t.replace(/,/g,'');
+  const n=Number(t); return isFinite(n)?(neg?-n:n):NaN; }
+async function leerCartola(file, texto){
+  if(file&&/\.xlsx$/i.test(file.name)) return window.MiniXlsx.read(await file.arrayBuffer());
+  if(file&&/\.xls$/i.test(file.name)) throw new Error('Los .xls antiguos no se pueden leer: ábrelo en Excel y guárdalo como .xlsx o CSV, o copia las filas y pégalas aquí.');
+  const t=file?await file.text():texto||''; const lin=t.replace(/\r/g,'').split('\n').filter(l=>l.trim());
+  const sep=lin.some(l=>l.includes('\t'))?'\t':(lin.slice(0,10).join('').split(';').length>lin.slice(0,10).join('').split(',').length?';':',');
+  return lin.map(l=>{ const out=[]; let c='', q=false; for(let i=0;i<l.length;i++){ const ch=l[i]; if(ch==='"'){ if(q&&l[i+1]==='"'){ c+='"'; i++; } else q=!q; } else if(ch===sep&&!q){ out.push(c); c=''; } else c+=ch; } out.push(c); return out.map(x=>x.trim()); }); }
+// Columnas: busca la fila de títulos (Fecha + Abono/Monto/Depósito)
+function detectarCartola(filas){
+  const es=(h,...k)=>k.some(x=>sinTildes(h).includes(x));
+  for(let i=0;i<Math.min(filas.length,40);i++){ const f=filas[i].map(x=>x==null?'':String(x));
+    const fecha=f.findIndex(h=>es(h,'fecha')); if(fecha<0) continue;
+    const abono=f.findIndex(h=>es(h,'abono','deposito','credito','ingreso'));
+    const cargo=f.findIndex(h=>es(h,'cargo','giro','debito','egreso'));
+    const monto=f.findIndex(h=>sinTildes(h)==='monto'||es(h,'importe','monto ($)','monto $'));
+    if(abono<0&&monto<0) continue;
+    return {cab:i, cols:{fecha, glosa:f.findIndex(h=>es(h,'descripcion','glosa','detalle','concepto','movimiento')), doc:f.findIndex(h=>es(h,'documento','n° doc','nro','operacion','referencia')), cargo, abono, monto:abono>=0?-1:monto}}; }
+  return {cab:-1, cols:{fecha:0, glosa:1, doc:-1, cargo:-1, abono:-1, monto:2}}; }
+function movsCartola(filas, cab, c){ const out=[], vistos={}; let malas=0;
+  filas.slice(cab+1).forEach(f=>{ const fecha=fechaCelda(f[c.fecha]); let monto=c.monto>=0?montoCelda(f[c.monto]):montoCelda(f[c.abono])-Math.abs(montoCelda(f[c.cargo])||0);
+    if(c.monto<0&&!(montoCelda(f[c.abono])>0)) monto=-Math.abs(montoCelda(f[c.cargo])||0);
+    if(!fecha||!monto||!isFinite(monto)){ if(f.some(x=>x!=null&&x!=='')) malas++; return; }
+    const glosa=c.glosa>=0?String(f[c.glosa]??'').trim():'', doc=c.doc>=0?String(f[c.doc]??'').trim():'';
+    const k=[fecha,Math.round(monto),sinTildes(glosa),doc].join('|'); vistos[k]=(vistos[k]??-1)+1;
+    out.push({fecha, monto:Math.round(monto), glosa, documento:doc, n:vistos[k]}); });
+  return {movs:out, malas}; }
+function importarCartola(listo){
+  const m=modal(`<h3>Importar cartola</h3><p class="small muted">Descarga la cartola desde el sitio de tu banco como Excel (.xlsx) o CSV, o abre el archivo y copia las filas. Volver a importar la misma cartola no duplica movimientos.</p>
+    <form id="fCa1"><label class="f"><span>Archivo</span><input type="file" name="archivo" accept=".xlsx,.xls,.csv,.txt"></label><label class="f"><span>…o pega aquí las filas copiadas desde Excel (con la fila de títulos)</span><textarea name="texto" rows="4"></textarea></label><button class="btn full">Leer</button></form><div id="caPaso2"></div>`);
+  $('#fCa1',m).addEventListener('submit', async ev=>{ ev.preventDefault(); const f=$('[name=archivo]',m).files[0], t=$('[name=texto]',m).value; if(!f&&!t.trim()){ toast('Elige un archivo o pega las filas'); return; }
+    let filas; try{ filas=(await leerCartola(f,t)).filter(r=>r&&r.length); }catch(err){ toast(errMsg(err)); return; } if(!filas.length){ toast('No se encontraron filas'); return; }
+    const det=detectarCartola(filas), cab=det.cab<0?-1:det.cab, tit=cab>=0?filas[cab]:filas[0].map((_,i)=>'Columna '+(i+1)), n=Math.max(...filas.map(r=>r.length));
+    const sel=(k,t,opc)=>`<label class="f"><span>${t}</span><select name="${k}">${opc?'<option value="-1">(no hay)</option>':''}${Array.from({length:n},(_,i)=>`<option value="${i}" ${det.cols[k]===i?'selected':''}>${esc(tit[i]??'Columna '+(i+1))}</option>`).join('')}</select></label>`;
+    $('#fCa1',m).style.display='none';
+    $('#caPaso2',m).innerHTML=`<form id="fCa2"><div class="grid2">${sel('fecha','Fecha')}${sel('glosa','Descripción',true)}${sel('doc','N° de documento',true)}${sel('abono','Abonos (entradas)',true)}${sel('cargo','Cargos (salidas)',true)}${sel('monto','…o un solo monto con signo',true)}</div><div id="caPrev"></div><div class="row wrap"><button type="button" class="btn sec" id="caAtras">Volver</button><button class="btn grow">Importar</button></div></form>`;
+    const f2=$('#fCa2',m); let res;
+    const prev=()=>{ const c={}; ['fecha','glosa','doc','abono','cargo','monto'].forEach(k=>c[k]=Number(f2.elements[k].value)); if(c.abono>=0) c.monto=-1; res=movsCartola(filas, cab, c);
+      const ab=res.movs.filter(x=>x.monto>0);
+      $('#caPrev',m).innerHTML=`<div class="info">${res.movs.length} movimientos: ${ab.length} abonos por ${clp(ab.reduce((a,x)=>a+x.monto,0))} y ${res.movs.length-ab.length} cargos${res.malas?` · ${res.malas} filas sin fecha o monto se omiten (títulos, totales, saldos)`:''}.</div>
+        <div style="overflow:auto;max-height:220px"><table><thead><tr><th>Fecha</th><th>Descripción</th><th class="num">Monto</th></tr></thead><tbody>${res.movs.slice(0,8).map(x=>`<tr><td>${fmtDay(x.fecha)}</td><td>${esc(x.glosa)}</td><td class="num" style="color:${x.monto>0?'var(--ok)':'var(--er)'}">${clp(x.monto)}</td></tr>`).join('')}</tbody></table></div>`; };
+    f2.addEventListener('change',prev); prev();
+    $('#caAtras',m).addEventListener('click',()=>{ $('#caPaso2',m).innerHTML=''; $('#fCa1',m).style.display=''; });
+    f2.addEventListener('submit', async ev2=>{ ev2.preventDefault(); if(!res.movs.length){ toast('No hay movimientos para importar'); return; } const b=$('button.grow',f2); busy(b,true);
+      try{ const r=await q(sb.rpc('importar_cartola',{p_filas:res.movs})); closeModal(); toast(r.nuevas?`${r.nuevas} movimientos nuevos${r.repetidas?` · ${r.repetidas} ya estaban`:''}`:'Todos los movimientos ya estaban importados'); listo(); }catch(err){ toast(errMsg(err)); busy(b,false); } }); }); }
+const EST_BANCO={pendiente:['Por conciliar','wa'], conciliado:['Pago registrado','ok'], caja:['En el flujo de caja','in'], ignorado:['Ignorado','mu']};
+async function panelBanco(el, listo, sigue=()=>true){ const adm=isAdmin(); let ms=[]; try{ ms=await q(T('banco_movimientos').select('*').order('fecha',{ascending:false}).limit(3000)); }catch(err){ el.innerHTML=`<div class="err">${esc(errMsg(err))}</div>`; return; } if(!sigue()) return;
+  const filtro=el.dataset.f||'pendiente', pend=ms.filter(x=>x.estado==='pendiente'), sug=pend.filter(x=>x.monto>0&&x.sugerido), vis=filtro==='todos'?ms:ms.filter(x=>filtro==='pendiente'?x.estado==='pendiente':x.estado!=='pendiente');
+  el.innerHTML=`<p class="small muted">Importa la cartola del banco y concilia cada abono con la unidad que pagó: la app sugiere la unidad por el RUT del registro de copropietarios, la unidad mencionada en la transferencia, el nombre o el monto, y recuerda a cada pagador. Al confirmar se registran los pagos (primero los cobros más antiguos) y se envía un comprobante. Los cargos se pasan al flujo de caja como egresos.</p>
+    ${adm?`<div class="row wrap" style="margin-bottom:10px"><button class="btn" id="bCart">Importar cartola</button>${sug.length?`<button class="btn sec" id="bSug">Confirmar ${sug.length===1?'la sugerencia':'las '+sug.length+' sugerencias'}</button>`:''}</div>`:''}
+    <div class="tabs" style="margin-bottom:8px">${[['pendiente',`Por conciliar (${pend.length})`],['hechos','Procesados'],['todos','Todos']].map(([k,v])=>`<button data-bf="${k}" class="${k===filtro?'on':''}">${v}</button>`).join('')}</div>
+    <div class="list">${vis.slice(0,300).map(x=>{ const ab=x.monto>0;
+      return `<div class="item static"><div class="hd"><b style="color:${ab?'var(--ok)':'var(--er)'}">${ab?'+':'−'}${clp(Math.abs(x.monto))}</b><span class="row" style="gap:4px">${pillOf(EST_BANCO,x.estado)}<span class="muted small">${fmtDay(x.fecha)}</span></span></div>
+        <div class="meta">${esc(x.glosa||'(sin descripción)')}${x.documento?' · doc. '+esc(x.documento):''}</div>
+        ${x.estado==='pendiente'&&ab&&x.sugerido?`<div class="small" style="margin-top:4px">Sugerencia: <b>Depto ${esc(x.sugerido)}</b> · ${esc(x.motivo||'')}</div>`:''}
+        ${x.estado==='conciliado'?`<div class="small muted" style="margin-top:4px">Depto ${esc(x.depto)} · ${x.pagos.length} ${x.pagos.length===1?'pago':'pagos'}${Number(x.sobrante)?' · saldo a favor '+clp(x.sobrante):''}</div>`:''}
+        ${x.nota&&x.estado!=='pendiente'?`<div class="small muted">${esc(x.nota)}</div>`:''}
+        ${adm?`<div class="row acc">${x.estado==='pendiente'?(ab?`${x.sugerido?`<button class="btn sm" data-bok="${x.id}" data-d="${esc(x.sugerido)}">Confirmar ${esc(x.sugerido)}</button>`:''}<button class="btn sec sm" data-botra="${x.id}">${x.sugerido?'Otra unidad':'Asignar a una unidad'}</button><button class="btn sec sm" data-bcaja="${x.id}">Otro ingreso</button>`:`<button class="btn sm" data-bcaja="${x.id}">Registrar egreso</button>`)+`<button class="btn sec sm" data-bign="${x.id}">Ignorar</button>`:`<button class="btn sec sm" data-bdes="${x.id}">Deshacer</button>`}</div>`:''}</div>`; }).join('')||`<div class="empty">${filtro==='pendiente'?'No hay movimientos por conciliar':'Sin movimientos'}</div>`}</div>`;
+  const conc=async(id,d)=>{ const r=await q(sb.rpc('conciliar_movimiento',{p_id:id, p_depto:d})); return r; };
+  el.onclick=async e=>{ const t=x=>e.target.closest(x); let b;
+    if(b=t('[data-bf]')){ el.dataset.f=b.dataset.bf; panelBanco(el, listo, sigue); }
+    else if(t('#bCart')) importarCartola(()=>panelBanco(el, listo, sigue));
+    else if(t('#bSug')){ if(!await confirmBox(`Se registrarán los pagos de ${sug.length} ${sug.length===1?'abono':'abonos'} en las unidades sugeridas y se enviarán los comprobantes. ¿Continuar?`)) return; let n=0;
+      for(const x of sug){ try{ await conc(x.id,x.sugerido); n++; }catch(err){ toast(`Depto ${x.sugerido}: ${errMsg(err)}`); } } toast(`${n} ${n===1?'abono conciliado':'abonos conciliados'}`); listo(); panelBanco(el, listo, sigue); }
+    else if(b=t('[data-bok]')){ try{ const r=await conc(b.dataset.bok,b.dataset.d); toast(Number(r.sobrante)?`Pago registrado · saldo a favor ${clp(r.sobrante)}`:'Pago registrado'); listo(); panelBanco(el, listo, sigue); }catch(err){ toast(errMsg(err)); } }
+    else if(b=t('[data-botra]')){ const x=ms.find(y=>y.id===b.dataset.botra); const m=modal(`<h3>Asignar a una unidad</h3><p class="small muted">${fmtDay(x.fecha)} · ${clp(x.monto)} · ${esc(x.glosa)}</p><form id="fBo"><label class="f"><span>Unidad</span><input type="text" name="depto" list="dlBo" required><datalist id="dlBo">${Object.keys(S.unidades).sort(porNum).map(d=>`<option value="${esc(d)}">`).join('')}</datalist></label><p class="small muted">La app recordará a este pagador para las próximas cartolas.</p><button class="btn full">Registrar pago</button></form>`);
+      $('#fBo',m).addEventListener('submit', async ev=>{ ev.preventDefault(); const d=formData(ev.target).depto.trim(); try{ await conc(x.id,d); closeModal(); toast('Pago registrado'); listo(); panelBanco(el, listo, sigue); }catch(err){ toast(errMsg(err)); } }); }
+    else if(b=t('[data-bcaja]')){ const x=ms.find(y=>y.id===b.dataset.bcaja); const m=modal(`<h3>${x.monto>0?'Otro ingreso':'Egreso'}</h3><p class="small muted">${fmtDay(x.fecha)} · ${clp(Math.abs(x.monto))} · ${esc(x.glosa)}</p><form id="fBc"><label class="f"><span>Categoría</span><input type="text" name="cat" list="dlBc" required><datalist id="dlBc">${CAT_CAJA.map(c=>`<option value="${c}">`).join('')}</datalist></label><label class="f"><span>Detalle (vacío = la glosa del banco)</span><input type="text" name="nota" placeholder="Proveedor, N° de factura…"></label><button class="btn full">Pasar al flujo de caja</button></form>`);
+      $('#fBc',m).addEventListener('submit', async ev=>{ ev.preventDefault(); const d=formData(ev.target); try{ await q(sb.rpc('clasificar_movimiento',{p_id:x.id, p_caja:true, p_categoria:d.cat.trim(), p_nota:d.nota.trim()})); closeModal(); toast('Registrado en el flujo de caja'); listo(); panelBanco(el, listo, sigue); }catch(err){ toast(errMsg(err)); } }); }
+    else if(b=t('[data-bign]')){ const nota=await askText('¿Por qué se ignora? (por ejemplo, traspaso entre cuentas propias)'); if(nota===null) return; try{ await q(sb.rpc('clasificar_movimiento',{p_id:b.dataset.bign, p_caja:false, p_categoria:'', p_nota:nota})); toast('Movimiento ignorado'); panelBanco(el, listo, sigue); }catch(err){ toast(errMsg(err)); } }
+    else if(b=t('[data-bdes]')){ if(!await confirmBox('Se anularán los pagos (o el movimiento de caja) que se registraron con este movimiento, y quedará por conciliar. ¿Deshacer?')) return; try{ await q(sb.rpc('deshacer_movimiento',{p_id:b.dataset.bdes, p_motivo:'Conciliación bancaria deshecha'})); toast('Deshecho'); listo(); panelBanco(el, listo, sigue); }catch(err){ toast(errMsg(err)); } } }; }
+
+// ---------- Presupuesto anual ----------
+const MESES_C=['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
+// Gasto real por categoría y mes: los ítems de los períodos publicados de ese año
+function realPorCategoria(gastos, anio){ const R={}; gastos.filter(g=>g.publicado&&g.periodo.startsWith(anio+'-')).forEach(g=>{ const i=Number(g.periodo.slice(5,7))-1; (g.items||[]).forEach(it=>{ const k=(it.categoria||'Otros').trim(); (R[k]=R[k]||Array(12).fill(0))[i]+=Number(it.monto)||0; }); }); return R; }
+async function panelPresupuesto(el, D, sigue=()=>true){ const adm=isAdmin(); const anio=Number(el.dataset.anio)||new Date().getFullYear(); let ps=[];
+  try{ ps=await q(T('presupuestos').select('*').eq('anio',anio).order('categoria')); }catch(err){ el.innerHTML=`<div class="err">${esc(errMsg(err))}</div>`; return; } if(!sigue()) return;
+  const R=realPorCategoria(D.gastos, anio), P={}; ps.forEach(p=>P[p.categoria]=p.montos.map(Number));
+  const pubs=D.gastos.filter(g=>g.publicado&&g.periodo.startsWith(anio+'-')).map(g=>Number(g.periodo.slice(5,7)));
+  const cats=[...new Set([...Object.keys(P),...Object.keys(R)])].sort((a,b)=>(P[b]?1:0)-(P[a]?1:0)||a.localeCompare(b));
+  const sum=a=>(a||[]).reduce((x,y)=>x+y,0), enPub=a=>(a||[]).reduce((x,y,i)=>x+(pubs.includes(i+1)?y:0),0);   // solo los meses ya publicados
+  const fila=k=>{ const pa=sum(P[k]), pf=enPub(P[k]), rf=enPub(R[k]), d=rf-pf, pct=pf?Math.round(d/pf*100):null; return {k, pa, pf, rf, d, pct}; };
+  const fs=cats.map(fila), T_=fs.reduce((a,f)=>({pa:a.pa+f.pa, pf:a.pf+f.pf, rf:a.rf+f.rf}),{pa:0,pf:0,rf:0});
+  const dif=(d,pct)=>`<span style="color:${d>0?'var(--er)':d<0?'var(--ok)':'inherit'}">${d>0?'+':d<0?'−':''}${clp(Math.abs(d))}${pct!=null?` (${d>0?'+':pct<0?'−':''}${Math.abs(pct)} %)`:''}</span>`;
+  el.innerHTML=`<div class="row wrap" style="margin-bottom:10px"><button class="btn sec sm" data-pa="${anio-1}">← ${anio-1}</button><b style="font-size:18px">${anio}</b><button class="btn sec sm" data-pa="${anio+1}">${anio+1} →</button><span class="grow"></span>${adm?'<button class="btn" id="bPre">Editar presupuesto</button>':''}</div>
+    ${!ps.length?`<div class="note">No hay presupuesto para ${anio}.${adm?' Créalo con "Editar presupuesto"; puedes partir de lo gastado el año anterior.':''}</div>`:''}
+    <div class="kpi"><div class="k"><b>${clp(T_.pa)}</b><span>Presupuesto ${anio}</span></div><div class="k"><b>${clp(T_.rf)}</b><span>Gastado en ${anio}</span></div><div class="k"><b>${dif(T_.rf-T_.pf, T_.pf?Math.round((T_.rf-T_.pf)/T_.pf*100):null)}</b><span>Diferencia con lo presupuestado para esos meses</span></div></div>
+    <div class="card" style="overflow:auto;margin-top:12px"><table><thead><tr><th>Categoría</th><th class="num">Presupuesto anual</th><th class="num">Presupuesto a la fecha</th><th class="num">Real a la fecha</th><th class="num">Diferencia</th></tr></thead><tbody>${fs.map(f=>`<tr><td>${esc(f.k)}${!P[f.k]?' <span class="pill wa">sin presupuesto</span>':''}</td><td class="num">${clp(f.pa)}</td><td class="num">${clp(f.pf)}</td><td class="num">${clp(f.rf)}</td><td class="num">${dif(f.d,f.pct)}</td></tr>`).join('')||'<tr><td colspan="5" class="muted">Sin datos</td></tr>'}</tbody></table></div>
+    <p class="small muted">"Real" son los ítems de los gastos comunes publicados de ${anio}, por categoría; "a la fecha" compara solo los meses ya publicados${pubs.length?` (${pubs.sort((a,b)=>a-b).map(i=>MESES_C[i-1].toLowerCase()).join(', ')})`:''}. Para comparar bien, usa los mismos nombres de categoría en el presupuesto y en los gastos comunes.</p>`;
+  el.onclick=e=>{ const b=e.target.closest('[data-pa]'); if(b){ el.dataset.anio=b.dataset.pa; panelPresupuesto(el, D, sigue); return; } if(e.target.closest('#bPre')) editarPresupuesto(anio, ps, D, ()=>panelPresupuesto(el, D, sigue)); }; }
+function editarPresupuesto(anio, ps, D, listo){
+  const filas=ps.map(p=>({categoria:p.categoria, montos:p.montos.map(Number)}));
+  const m=modal(`<h3>Presupuesto ${anio}</h3><p class="small muted">Un monto por mes para cada categoría. Si es igual todo el año, escríbelo en "Mensual". Abre el detalle para meses distintos (por ejemplo, calefacción en invierno).</p><div id="peFilas"></div>
+    <div class="row wrap" style="margin:8px 0"><button type="button" class="btn sec sm" id="peAdd">Agregar categoría</button><button type="button" class="btn sec sm" id="peAnt">Partir de lo gastado en ${anio-1}</button></div><button class="btn full" id="peOk">Guardar presupuesto</button>`);
+  const pinta=()=>{ $('#peFilas',m).innerHTML=filas.map((f,i)=>{ const igual=f.montos.every(x=>x===f.montos[0]);
+    return `<div class="card" style="padding:10px;margin-bottom:8px"><div class="row wrap"><label class="f grow"><span>Categoría</span><input type="text" data-pc="${i}" value="${esc(f.categoria)}" list="dlPe"></label><label class="f"><span>Mensual</span><input type="text" inputmode="numeric" data-clp data-pm="${i}" value="${igual?Math.round(f.montos[0]):''}" placeholder="${igual?'':'varía'}" style="width:130px"></label><button type="button" class="btn sec sm" data-pdel="${i}" aria-label="Quitar">✕</button></div>
+      <details><summary class="small">Detalle por mes · total ${clp(f.montos.reduce((a,b)=>a+b,0))}</summary><div class="grid2" style="grid-template-columns:repeat(auto-fill,minmax(110px,1fr))">${f.montos.map((x,j)=>`<label class="f"><span>${MESES_C[j]}</span><input type="text" inputmode="numeric" data-clp data-pmm="${i}:${j}" value="${Math.round(x)}"></label>`).join('')}</div></details></div>`; }).join('')+`<datalist id="dlPe">${[...new Set([...CAT_CAJA,...Object.keys(realPorCategoria(D.gastos, anio-1))])].map(c=>`<option value="${esc(c)}">`).join('')}</datalist>`; };
+  const num=v=>Number(String(v).replace(/[^0-9]/g,''))||0;
+  m.addEventListener('change',e=>{ const t=e.target; if(t.dataset.pc!=null) filas[+t.dataset.pc].categoria=t.value.trim();
+    else if(t.dataset.pm!=null){ if(t.value.trim()==='') return; filas[+t.dataset.pm].montos=Array(12).fill(num(t.value)); pinta(); }
+    else if(t.dataset.pmm){ const [i,j]=t.dataset.pmm.split(':').map(Number); filas[i].montos[j]=num(t.value); pinta(); } });
+  m.addEventListener('click',e=>{ const b=e.target.closest('[data-pdel]'); if(b){ filas.splice(+b.dataset.pdel,1); pinta(); } });
+  $('#peAdd',m).addEventListener('click',()=>{ filas.push({categoria:'', montos:Array(12).fill(0)}); pinta(); });
+  $('#peAnt',m).addEventListener('click',()=>{ const R=realPorCategoria(D.gastos, anio-1); if(!Object.keys(R).length){ toast(`No hay gastos publicados de ${anio-1}`); return; }
+    Object.entries(R).forEach(([k,v])=>{ const f=filas.find(x=>x.categoria===k); const prom=Math.round(v.reduce((a,b)=>a+b,0)/Math.max(1,v.filter(x=>x).length)); if(f) f.montos=Array(12).fill(prom); else filas.push({categoria:k, montos:Array(12).fill(prom)}); }); pinta(); toast('Se cargó el promedio mensual de '+(anio-1)); });
+  $('#peOk',m).addEventListener('click', async()=>{ const ok=filas.filter(f=>f.categoria); if(new Set(ok.map(f=>f.categoria)).size!==ok.length){ toast('Hay categorías repetidas'); return; }
+    try{ const quitar=ps.filter(p=>!ok.some(f=>f.categoria===p.categoria)).map(p=>p.categoria);
+      if(quitar.length) await q(T('presupuestos').delete().eq('anio',anio).in('categoria',quitar));
+      if(ok.length) await q(T('presupuestos').upsert(ok.map(f=>({anio, categoria:f.categoria, montos:f.montos, actualizado:new Date().toISOString()}))));
+      closeModal(); toast('Presupuesto guardado'); listo(); }catch(err){ toast('Error: '+errMsg(err)); } });
+  pinta(); }
+
+// ---------- Rendición de cuentas mensual ----------
+async function panelRendicion(el, X, sigue=()=>true){ const {D, movs, fondos, fmov}=X; const mes=el.dataset.mes||monthStr(); const [y,mm]=mes.split('-').map(Number);
+  const ini=mes+'-01', fin=new Date(y,mm,0).toISOString().slice(0,10), enMes=f=>f>=ini&&f<=fin;
+  let banco=[], pre=[]; try{ [banco,pre]=await Promise.all([q(T('banco_movimientos').select('estado,monto,fecha').lte('fecha',fin)).catch(()=>[]), q(T('presupuestos').select('*').eq('anio',y)).catch(()=>[])]); }catch(e){}
+  if(!sigue()) return;
+  const g=D.G[mes], items=g?.publicado?(g.items||[]):[], emitido=Object.values(D.U).flatMap(z=>z.rows).filter(r=>r.periodo===mes).reduce((a,r)=>a+Number(r.monto),0);
+  const pagosMes=D.pagos.filter(p=>enCaja(p)&&enMes(p.fecha)), gcMes=pagosMes.reduce((a,p)=>a+Number(p.monto),0);
+  const recPer=D.pagos.filter(p=>enCaja(p)&&p.periodo===mes&&p.concepto!=='interes').reduce((a,p)=>a+Number(p.monto),0);
+  const porCat=t=>{ const o={}; movs.filter(x=>x.tipo===t&&enMes(x.fecha)).forEach(x=>o[x.categoria||'Otros']=(o[x.categoria||'Otros']||0)+Number(x.monto)); return o; };
+  const ing=porCat('ingreso'), egr=porCat('egreso');
+  const saldoAl=f=>D.pagos.filter(p=>enCaja(p)&&p.fecha<=f).reduce((a,p)=>a+Number(p.monto),0)+movs.filter(x=>x.fecha<=f).reduce((a,x)=>a+(x.tipo==='egreso'?-1:1)*Number(x.monto),0);
+  const prevFin=new Date(y,mm-1,0).toISOString().slice(0,10), sIni=saldoAl(prevFin), sFin=saldoAl(fin);
+  const fondoEn=(f,hasta)=>Number(f.saldo_inicial)+fmov.filter(v=>v.fondo_id===f.id&&v.fecha<=hasta).reduce((a,v)=>a+(v.tipo==='uso'?-1:1)*Number(v.monto),0);
+  const fondoMes=(f,t)=>fmov.filter(v=>v.fondo_id===f.id&&v.tipo===t&&enMes(v.fecha)).reduce((a,v)=>a+Number(v.monto),0);
+  const us=Object.values(D.U), morosos=us.filter(z=>z.vencido>0).sort((a,b)=>b.vencido-a.vencido);
+  const R=realPorCategoria(D.gastos, y), P={}; pre.forEach(p=>P[p.categoria]=p.montos.map(Number)); const catsP=[...new Set([...Object.keys(P),...Object.keys(R)])].sort();
+  const bp=banco.filter(b=>b.estado==='pendiente');
+  const cuerpo=`<h2>1. Gastos comunes de ${esc(fmtMonth(mes))}</h2>${items.length?`<table><thead><tr><th>Ítem</th><th class="num">Monto</th></tr></thead><tbody>${items.map(it=>`<tr><td>${esc(it.categoria||'')}${it.descripcion?' · '+esc(it.descripcion):''}</td><td class="num">${clp(it.monto)}</td></tr>`).join('')}<tr><th>Total</th><th class="num">${clp(g.total)}</th></tr></tbody></table>
+      <p>Emitido a las unidades: <b>${clp(emitido)}</b> · recaudado de este período a la fecha: <b>${clp(recPer)}</b> (${emitido?Math.round(recPer/emitido*100):0} %).</p>`:'<p class="muted">El período no está publicado.</p>'}
+    <h2>2. Ingresos y egresos del mes</h2><table><tbody><tr><td>Saldo de caja al inicio del mes</td><td class="num">${clp(sIni)}</td></tr><tr><td>Pagos de gastos comunes recibidos (${pagosMes.length})</td><td class="num">${clp(gcMes)}</td></tr>${Object.entries(ing).sort((a,b)=>b[1]-a[1]).map(([k,v])=>`<tr><td>Otro ingreso: ${esc(k)}</td><td class="num">${clp(v)}</td></tr>`).join('')}
+      ${Object.entries(egr).sort((a,b)=>b[1]-a[1]).map(([k,v])=>`<tr><td>Egreso: ${esc(k)}</td><td class="num">−${clp(v)}</td></tr>`).join('')}<tr><th>Saldo de caja al cierre</th><th class="num">${clp(sFin)}</th></tr></tbody></table>
+    <h2>3. Fondos</h2>${fondos.length?`<table><thead><tr><th>Fondo</th><th class="num">Saldo inicial</th><th class="num">Aportes</th><th class="num">Usos</th><th class="num">Saldo al cierre</th></tr></thead><tbody>${fondos.map(f=>`<tr><td>${esc(f.nombre)}</td><td class="num">${clp(fondoEn(f,prevFin))}</td><td class="num">${clp(fondoMes(f,'aporte'))}</td><td class="num">${clp(fondoMes(f,'uso'))}</td><td class="num">${clp(fondoEn(f,fin))}</td></tr>`).join('')}</tbody></table>`:'<p class="muted">Sin fondos.</p>'}
+    <h2>4. Morosidad (hoy)</h2><p>Por cobrar ${clp(us.reduce((a,z)=>a+z.deuda,0))} · vencido ${clp(us.reduce((a,z)=>a+z.vencido,0))} · en convenio ${clp(us.reduce((a,z)=>a+z.convenio,0))} · ${morosos.length} ${morosos.length===1?'unidad morosa':'unidades morosas'}.</p>
+      ${morosos.length?`<table><thead><tr><th>Unidad</th><th class="num">Vencido</th><th class="num">Deuda total</th></tr></thead><tbody>${morosos.map(z=>`<tr><td>${esc(z.depto)}</td><td class="num">${clp(z.vencido)}</td><td class="num">${clp(z.deuda)}</td></tr>`).join('')}</tbody></table>`:''}
+    <h2>5. Presupuesto ${y}</h2>${catsP.length?`<table><thead><tr><th>Categoría</th><th class="num">Presupuesto del mes</th><th class="num">Real del mes</th><th class="num">Presupuesto a la fecha</th><th class="num">Real a la fecha</th></tr></thead><tbody>${catsP.map(k=>{ const p=P[k]||Array(12).fill(0), r=R[k]||Array(12).fill(0); const s=a=>a.slice(0,mm).reduce((x,z)=>x+z,0); return `<tr><td>${esc(k)}</td><td class="num">${clp(p[mm-1])}</td><td class="num">${clp(r[mm-1])}</td><td class="num">${clp(s(p))}</td><td class="num">${clp(s(r))}</td></tr>`; }).join('')}</tbody></table>`:'<p class="muted">Sin presupuesto.</p>'}
+    <h2>6. Conciliación bancaria</h2><p>${banco.length?(bp.length?`${bp.length} movimientos de la cartola hasta el ${fmtDay(fin)} están sin conciliar, por ${clp(bp.reduce((a,b)=>a+Number(b.monto),0))} neto.`:'Todos los movimientos importados de la cartola están conciliados.'):'No se ha importado la cartola bancaria.'}</p>`;
+  el.innerHTML=`<div class="row wrap" style="margin-bottom:10px"><label class="f" style="margin:0"><span>Mes</span><select id="rnMes" style="width:auto">${opcionesMes(mes,{atras:24,adelante:0})}</select></label><span class="grow"></span><button class="btn" id="bRnImp">Imprimir</button></div>
+    <p class="small muted">Resumen mensual para rendir cuenta a la comunidad y al comité: gastos del período, ingresos y egresos, fondos, morosidad, presupuesto y conciliación bancaria. Adjunta las boletas y facturas del mes.</p><div class="card rendicion">${cuerpo}</div>`;
+  $('#rnMes',el).addEventListener('change',e=>{ el.dataset.mes=e.target.value; panelRendicion(el, X, sigue); });
+  $('#bRnImp',el).addEventListener('click', async()=>{ const c=S.cfg||{}; imprimir('rendicion-'+mes, `${await cabeceraImpresion()}<h1>Rendición de cuentas · ${esc(fmtMonth(mes))}</h1><p class="sub">Emitida el ${fmtDay(todayStr())}</p>${cuerpo}<p style="margin-top:40px">______________________________ &nbsp; &nbsp; ______________________________<br>Administración · ${esc(c.nombre||'')} &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; Comité de administración</p>`); }); }
+
 VIEWS.finanzas = function(param){
-  const adm=isAdmin(); const TABS={estado:'Estado',pagos:'Pagos',convenios:'Convenios',cargos:'Cargos',fondos:'Fondos',caja:'Flujo de caja',suspension:'Suspensión de luz',certificados:'Certificados'};
+  const adm=isAdmin(); const TABS={estado:'Estado',pagos:'Pagos',convenios:'Convenios',cargos:'Cargos',fondos:'Fondos',caja:'Flujo de caja',banco:'Banco',presupuesto:'Presupuesto',rendicion:'Rendición',suspension:'Suspensión de luz',certificados:'Certificados'};
   let tab=TABS[param]?param:'estado', D=null, movs=[], anio=new Date().getFullYear(), cargos=[], fondos=[], fmov=[], saldos=[], verAnul=false;
   setMain(`<h1>Finanzas</h1><div class="tabs" id="fTabs">${Object.entries(TABS).map(([k,v])=>`<button data-t="${k}" class="${k===tab?'on':''}">${v}</button>`).join('')}</div><div id="fBody"><div class="empty">Cargando…</div></div>`);
   const w=watch(['gastos','gasto_unidades','pagos','convenios','convenio_cuotas','caja_movimientos','cargos','fondos','fondo_movimientos','suspensiones','suspension_votos','suspension_eventos','condiciones_especiales'], async()=>{ const [d,mv,cg,fo,fm,sd]=await Promise.all([finDatos(), q(T('caja_movimientos').select('*').order('fecha',{ascending:false}).limit(5000)), q(T('cargos').select('*').order('ts',{ascending:false}).limit(2000)), q(T('fondos').select('*').order('creado')), q(T('fondo_movimientos').select('*').order('fecha',{ascending:false}).limit(2000)), q(sb.rpc('saldos_fondos')).catch(()=>[])]); return {d,mv,cg,fo,fm,sd}; },
@@ -1305,6 +1461,9 @@ VIEWS.finanzas = function(param){
       <p class="small muted">Los fondos se provisionan con ítems del gasto común marcados "Va al fondo…": al publicar el período, el aporte se anota solo. Al usar un fondo se registra en qué y, si se quiere, también el egreso en el flujo de caja.</p>`; }
     else if(tab==='suspension'){ panelSuspension(el, listo, ()=>tab==='suspension'); }
     else if(tab==='certificados'){ panelCertificados(el, ()=>tab==='certificados'); }
+    else if(tab==='banco'){ panelBanco(el, listo, ()=>tab==='banco'); }
+    else if(tab==='presupuesto'){ panelPresupuesto(el, D, ()=>tab==='presupuesto'); }
+    else if(tab==='rendicion'){ panelRendicion(el, {D, movs, fondos, fmov}, ()=>tab==='rendicion'); }
     else if(tab==='pagos'){ el.innerHTML=`${adm?'<div style="margin-bottom:10px"><button class="btn" id="bPago">+ Registrar pago</button></div>':''}<div class="list">${D.pagos.slice(0,400).map(p=>filaPago(p,true)).join('')||'<div class="empty">Aún no hay pagos registrados</div>'}</div>`; }
     else if(tab==='convenios'){ const cs=Object.values(D.C).sort((a,b)=>a.ts<b.ts?1:-1); el.innerHTML=`<p class="small muted">Para proponer un convenio, usa el botón "Convenio" de la unidad en la pestaña Estado.</p><div class="list">${cs.map(c=>`<div class="item" data-cv="${c.id}"><div class="hd"><b>Depto ${esc(c.depto)} · ${clp(c.monto_total)} en ${c.cuotas} ${c.cuotas===1?'cuota':'cuotas'}</b>${pillConv(c)}</div><div class="meta">${c.lista.filter(k=>Number(k.pagado_monto)>=Number(k.monto)).length} de ${c.cuotas} cuotas pagadas · saldo ${clp(c.saldo)}${c.atraso?' · atrasado '+clp(c.atraso):''} · ${fmtDate(c.ts)}</div></div>`).join('')||'<div class="empty">Sin convenios</div>'}</div>`; }
     else { const {previo,filas}=filasAnio(); const anios=[...new Set([new Date().getFullYear(), ...D.pagos.map(p=>+p.fecha.slice(0,4)), ...movs.map(x=>+x.fecha.slice(0,4))])].sort((a,b)=>b-a); const s=k=>filas.reduce((a,f)=>a+f[k],0);

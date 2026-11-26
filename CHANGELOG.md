@@ -2,6 +2,9 @@
 
 ## Sin publicar
 
+- **Cartola bancaria**: importación desde Excel o CSV, unidad sugerida por RUT, unidad mencionada, nombre, monto o pagador conocido; al confirmar se registran los pagos con un solo comprobante; los cargos pasan al flujo de caja; sin duplicados y con deshacer.
+- **Presupuesto anual** por categoría y mes, comparado con lo gastado.
+- **Rendición de cuentas mensual** imprimible: gastos, caja, fondos, morosidad, presupuesto y conciliación.
 - **Correo en la instalación con Supabase**: Edge Function `correos` que envía la cola por SMTP (puerto 465) o Resend, llamada cada minuto por pg_cron.
 - **Avisos de cobro por correo**: al publicar el gasto común, a cada unidad su monto, vencimiento y saldo anterior; recordatorio antes del vencimiento y aviso de atraso configurables; comprobante por cada pago.
 - **Comprobante de pago** imprimible con número, para la unidad y la administración.

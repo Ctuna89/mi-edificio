@@ -558,3 +558,43 @@ select t.ok((select estado = 'error' from correos where id = :'cor'), 'al sexto 
 update correos set estado = 'pendiente', intentos = 0 where id = :'cor'; select public.correos_resultado('secreto-de-prueba', :'cor', true, null, '<id@x>');
 select t.ok((select estado = 'enviado' and mensaje_id = '<id@x>' and enviado_at is not null from correos where id = :'cor'), 'enviado con su identificador');
 \echo 'OK: envío de correos'
+
+-- ============ cartola bancaria y presupuesto ============
+select t.soy(:'a1');
+update edificios set correo_avisos = correo_avisos || '{"comprobante": true}' where id = public.mi_edificio();
+select public.importar_cartola('[
+  {"fecha":"2026-11-20","monto":50000,"glosa":"TRANSF. DE 12.345.678-5 RITA ROJAS","documento":"001","n":0},
+  {"fecha":"2026-11-21","monto":20000,"glosa":"Abono Transferencia Dpto. 103 gc","documento":"","n":0},
+  {"fecha":"2026-11-21","monto":20000,"glosa":"Abono Transferencia Dpto. 103 gc","documento":"","n":1},
+  {"fecha":"2026-11-22","monto":3000,"glosa":"DEPOSITO EN EFECTIVO","documento":"","n":0},
+  {"fecha":"2026-11-23","monto":-45000,"glosa":"PAGO PROVEEDOR ASEO SPA","documento":"9","n":0}]') as imp \gset
+select t.ok((:'imp'::jsonb->>'nuevas')::int = 5, 'se importan los movimientos de la cartola, incluso dos idénticos del mismo día');
+select t.ok((public.importar_cartola('[{"fecha":"2026-11-20","monto":50000,"glosa":"TRANSF. DE 12.345.678-5 RITA ROJAS","documento":"001","n":0}]')->>'repetidas')::int = 1, 'importar de nuevo la misma cartola no duplica');
+select t.ok((select sugerido = '101' and motivo = 'RUT de Rita Rojas' from banco_movimientos where documento = '001'), 'sugiere la unidad por el RUT del registro');
+select t.ok((select bool_and(sugerido = '103') from banco_movimientos where glosa like 'Abono%'), 'sugiere la unidad mencionada en la glosa');
+select t.ok((select sugerido = '104' from banco_movimientos where glosa = 'DEPOSITO EN EFECTIVO'), 'sugiere la unidad cuyo cobro pendiente tiene el mismo monto');
+select t.ok((select sugerido is null from banco_movimientos where monto < 0), 'los cargos no se asignan a unidades');
+select id as m103 from banco_movimientos where glosa like 'Abono%' order by huella limit 1 \gset
+select public.conciliar_movimiento(:'m103', '103') as c103 \gset
+select t.ok((select estado = 'conciliado' and cardinality(pagos) >= 1 from banco_movimientos where id = :'m103'), 'conciliar registra los pagos de la unidad');
+select t.ok((select count(*) = 1 from correos where referencia = 'banco/' || :'m103') and not exists (select 1 from correos c, banco_movimientos b, unnest(b.pagos) p where b.id = :'m103' and c.referencia = 'pagos/' || p), 'un solo comprobante por transferencia');
+select t.falla(format($$select public.conciliar_movimiento(%L, '103')$$, :'m103'), 'conciliar dos veces el mismo movimiento');
+select public.importar_cartola('[{"fecha":"2026-12-21","monto":15000,"glosa":"Abono Transferencia Dpto. 103 gc dic","n":0}]');
+select t.ok((select motivo = 'pagador conocido' and sugerido = '103' from banco_movimientos where fecha = '2026-12-21'), 'recuerda al pagador para la próxima cartola');
+select public.conciliar_movimiento((select id from banco_movimientos where glosa = 'DEPOSITO EN EFECTIVO'), '104');
+select public.importar_cartola('[{"fecha":"2026-11-25","monto":10000,"glosa":"Transferencia 104 adelantado","n":0}]');
+select public.conciliar_movimiento((select id from banco_movimientos where glosa = 'Transferencia 104 adelantado'), '104') as c104 \gset
+select t.ok((:'c104'::jsonb->>'sobrante')::numeric = 10000 and exists (select 1 from caja_movimientos where categoria = 'Saldo a favor' and monto = 10000), 'lo que sobra queda como saldo a favor en el flujo de caja');
+select t.falla(format($$select public.clasificar_movimiento(%L, true, '')$$, (select id from banco_movimientos where monto < 0)), 'pasar a caja sin categoría');
+select public.clasificar_movimiento((select id from banco_movimientos where monto < 0), true, 'Aseo');
+select t.ok(exists (select 1 from caja_movimientos where tipo = 'egreso' and categoria = 'Aseo' and monto = 45000 and descripcion like 'PAGO PROVEEDOR%'), 'un cargo de la cartola se registra como egreso');
+select public.deshacer_movimiento(:'m103');
+select t.ok((select estado = 'pendiente' and cardinality(pagos) = 0 from banco_movimientos where id = :'m103') and not exists (select 1 from pagos where nota like 'Cartola: Abono%' and fecha = '2026-11-21' and not anulado), 'deshacer anula los pagos y deja el movimiento pendiente');
+insert into presupuestos (anio, categoria, montos) values (2026, 'Aseo', array_fill(500000::numeric, array[12]));
+select t.falla($$insert into presupuestos (anio, categoria, montos) values (2026, 'Agua', '{1,2}')$$, 'presupuesto sin los 12 meses');
+select t.soy(:'a2');
+select t.ok((select count(*) = 0 from banco_movimientos), 'un residente no ve la cartola');
+select t.falla($$select public.importar_cartola('[]')$$, 'un residente importa cartolas');
+select t.ok((select count(*) = 1 from presupuestos), 'la comunidad ve el presupuesto');
+select t.falla($$insert into presupuestos (anio, categoria) values (2026, 'Gas')$$, 'un residente edita el presupuesto');
+\echo 'OK: cartola bancaria y presupuesto'
