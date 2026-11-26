@@ -564,7 +564,6 @@ setInterval(tareas, 5 * 60000).unref(); setTimeout(tareas, 15000).unref();
 // solo en config.json de este computador y nunca vuelve al navegador.
 // ---------------------------------------------------------------------
 const SMTP_PRESETS = { gmail: { host: 'smtp.gmail.com', puerto: 465, seguridad: 'tls' }, outlook: { host: 'smtp-mail.outlook.com', puerto: 587, seguridad: 'starttls' } };
-const MAX_INTENTOS = 6;
 const correo = { error: '', ultimo: null, enviando: false, transporte: null };
 const estadoCorreo = () => { const c = CFG.correo || {}; return { disponible: !!nodemailer, configurado: !!(c.host && c.remitente), activo: c.activo !== false, proveedor: c.proveedor || 'otro', host: c.host || '', puerto: c.puerto || 587, seguridad: c.seguridad || 'starttls', usuario: c.usuario || '', remitente: c.remitente || '', tieneClave: !!c.clave, error: correo.error, ultimo: correo.ultimo }; };
 function transporte() {
@@ -606,22 +605,24 @@ async function despacharCorreos() {
   const t = transporte(); if (!t || CFG.correo?.activo === false || correo.enviando) return 0;
   correo.enviando = true; let n = 0;
   try {
-    const r = await db.query(`select c.*, coalesce(e.nombre, '') as ed_nombre, coalesce(e.email, '') as ed_email from public.correos c left join public.edificios e on e.id = c.edificio_id
-                              where c.estado = 'pendiente' and c.proximo <= now() order by c.ts limit 20`);
-    for (const x of r.rows) {
+    const r = await db.query(`select * from privado.correos_reclamar(20)`);
+    for (let k = 0; k < r.rows.length; k++) {
+      const x = r.rows[k];
       try {
         const id = await enviarUno(t, { nombre: x.ed_nombre, email: x.ed_email }, x);
-        await db.query(`update public.correos set estado = 'enviado', enviado_at = now(), mensaje_id = $2, intentos = intentos + 1, error = null where id = $1`, [x.id, id]);
+        await db.query(`select privado.correos_resultado($1, true, null, $2)`, [x.id, id]);
         n++; correo.ultimo = new Date().toISOString(); correo.error = '';
       } catch (e) {
         const msg = String(e.message || e).slice(0, 500);
-        // Si el servidor rechaza la cuenta o no responde, se detiene la ronda y se reintenta más tarde (no se cuenta contra cada correo)
+        // Si el servidor rechaza la cuenta o no responde, se detiene la ronda sin contar el intento a cada correo
         const deCuenta = ['EAUTH', 'ECONNECTION', 'ETIMEDOUT', 'ESOCKET', 'EDNS', 'ECONNREFUSED'].includes(e.code);
         correo.error = msg;
-        if (deCuenta) { log('correo:', msg); correo.transporte = null; break; }
-        const i = x.intentos + 1;
-        await db.query(`update public.correos set intentos = $2, error = $3, estado = case when $2 >= ${MAX_INTENTOS} then 'error' else 'pendiente' end,
-                        proximo = now() + make_interval(mins => power(2, $2)::int * 5) where id = $1`, [x.id, i, msg]);
+        if (deCuenta) {
+          log('correo:', msg); correo.transporte = null;
+          for (const y of r.rows.slice(k)) await db.query(`select privado.correos_resultado($1, false, $2, null, true)`, [y.id, msg]);
+          break;
+        }
+        await db.query(`select privado.correos_resultado($1, false, $2)`, [x.id, msg]);
       }
     }
   } finally { correo.enviando = false; }

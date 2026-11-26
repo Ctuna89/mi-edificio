@@ -344,7 +344,7 @@ Se configura en **Administración → Edificio → Correo**, con una cuenta crea
 - **Outlook / Microsoft 365**: igual, con una contraseña de aplicación. Algunas cuentas de empresa tienen el SMTP desactivado.
 - **Otro**: el servidor SMTP del dominio del edificio (puerto 587 con STARTTLS o 465 con TLS).
 
-El botón "Enviar correo de prueba" confirma que funciona. La contraseña queda solo en `config.json` del computador del edificio y no vuelve a mostrarse. Si en **Datos del edificio** hay un correo distinto, las respuestas llegan ahí. En la instalación con Supabase el envío automático aún no existe: los correos quedan en la misma lista para abrirlos y enviarlos a mano. El envío por Gmail u Outlook reales no está probado por el proyecto (sí con un servidor SMTP de prueba).
+El botón "Enviar correo de prueba" confirma que funciona. La contraseña queda solo en `config.json` del computador del edificio y no vuelve a mostrarse. Si en **Datos del edificio** hay un correo distinto, las respuestas llegan ahí. En la instalación con Supabase se envían con una Edge Function que se configura una vez (paso 4 de [Instalación alternativa: Supabase](#instalación-alternativa-supabase)); mientras no esté, los correos quedan en la misma lista para abrirlos y enviarlos a mano. El envío por Gmail u Outlook reales no está probado por el proyecto (sí con un servidor SMTP de prueba).
 
 ![Correo: cuenta conectada y constancia de envíos](docs/capturas/correo.png)
 
@@ -396,6 +396,7 @@ La misma app puede funcionar sobre un proyecto de [Supabase](https://supabase.co
 1. Crea un proyecto, ejecuta `supabase/schema.sql` completo en el SQL Editor y habilita el proveedor *Email* en Authentication.
 2. Copia *Project URL* y *anon public key* en `web/config.js` y sube la carpeta `web/` a un hosting estático (Vercel, Netlify, Cloudflare Pages).
 3. Para notificaciones push: genera claves VAPID (`npx web-push generate-vapid-keys`), pon la pública en `config.js`, despliega `supabase/functions/push` con sus secretos (`VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT`, `PUSH_SECRET`) e indica su URL y secreto en la tabla `plataforma` (`push_url`, `push_secret`). Activa las extensiones `pg_net` y `pg_cron`.
+4. Para enviar correos: despliega `supabase/functions/correos` (`supabase functions deploy correos --no-verify-jwt`) con los secretos `CORREO_SECRET` (un valor largo al azar), `CORREO_REMITENTE` y, para enviar, **o** `SMTP_HOST`, `SMTP_USER`, `SMTP_PASS` (puerto 465, por ejemplo Gmail con contraseña de aplicación: Supabase bloquea los puertos 25 y 587) **o** `RESEND_API_KEY` de [Resend](https://resend.com). Después indica su URL y el mismo secreto en la tabla `plataforma` (`correo_url`, `correo_secret`). pg_cron la llama cada minuto si hay correos pendientes. La prueba de la función está en `supabase/functions/correos/prueba.mjs` (necesita Deno); el envío por Resend no está probado.
 
 Este modo comparte el esquema y sus pruebas con el modo local, pero **nunca se ha desplegado en un proyecto Supabase real**. Si tu Supabase es autoalojado, agrega su dominio en la política `connect-src` de `web/index.html`.
 

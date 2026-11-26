@@ -538,3 +538,23 @@ select t.soy(:'a2');
 select t.falla($$select public.emitir_certificado('101')$$, 'un residente emite certificados');
 select t.ok((select count(*) = 0 from certificados where depto = '102'), 'un residente no ve certificados de otras unidades');
 \echo 'OK: cobro por correo, comprobantes y certificados'
+
+-- ============ envío de correos (servidor local y Edge Function) ============
+reset role;
+update correos set estado = 'enviado' where estado = 'pendiente' and id <> :'cor';
+update correos set estado = 'pendiente', proximo = now() where id = :'cor';
+update plataforma set correo_secret = 'secreto-de-prueba' where id = 1;
+select t.falla($$select * from public.correos_reclamar('otro')$$, 'reclamar correos sin el secreto');
+select t.falla($$select * from public.correos_reclamar('')$$, 'reclamar correos con secreto vacío');
+select count(*) = 1 as uno from public.correos_reclamar('secreto-de-prueba') \gset
+select t.ok(:'uno', 'con el secreto se toma el lote de pendientes');
+select t.ok((select count(*) = 0 from public.correos_reclamar('secreto-de-prueba')), 'un lote tomado no se vuelve a entregar');
+select public.correos_resultado('secreto-de-prueba', :'cor', false, 'Buzón lleno');
+select t.ok((select estado = 'pendiente' and intentos = 1 and error = 'Buzón lleno' and proximo > now() from correos where id = :'cor'), 'un error se reintenta más tarde');
+select public.correos_resultado('secreto-de-prueba', :'cor', false, 'Clave mala', null, true);
+select t.ok((select intentos = 1 from correos where id = :'cor'), 'un error de la cuenta no cuenta como intento');
+update correos set intentos = 5 where id = :'cor'; select public.correos_resultado('secreto-de-prueba', :'cor', false, 'No existe');
+select t.ok((select estado = 'error' from correos where id = :'cor'), 'al sexto intento queda con error');
+update correos set estado = 'pendiente', intentos = 0 where id = :'cor'; select public.correos_resultado('secreto-de-prueba', :'cor', true, null, '<id@x>');
+select t.ok((select estado = 'enviado' and mensaje_id = '<id@x>' and enviado_at is not null from correos where id = :'cor'), 'enviado con su identificador');
+\echo 'OK: envío de correos'

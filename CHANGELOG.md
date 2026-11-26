@@ -2,6 +2,7 @@
 
 ## Sin publicar
 
+- **Correo en la instalación con Supabase**: Edge Function `correos` que envía la cola por SMTP (puerto 465) o Resend, llamada cada minuto por pg_cron.
 - **Avisos de cobro por correo**: al publicar el gasto común, a cada unidad su monto, vencimiento y saldo anterior; recordatorio antes del vencimiento y aviso de atraso configurables; comprobante por cada pago.
 - **Comprobante de pago** imprimible con número, para la unidad y la administración.
 - **Certificados de deuda o de no deuda** con folio correlativo y detalle, emitidos por la administración y visibles para la unidad.

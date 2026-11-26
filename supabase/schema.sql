@@ -96,6 +96,8 @@ create table if not exists public.plataforma (
   push_url         text default '',                 -- URL de la Edge Function "push"
   push_secret      text default ''                  -- mismo valor que el secreto PUSH_SECRET de la función
 );
+alter table public.plataforma add column if not exists correo_url text default '';      -- URL de la Edge Function "correos"
+alter table public.plataforma add column if not exists correo_secret text default '';   -- mismo valor que su secreto CORREO_SECRET
 alter table public.plataforma drop column if exists creacion_abierta;
 insert into public.plataforma (id) values (1) on conflict do nothing;
 alter table public.plataforma enable row level security;
@@ -2836,6 +2838,72 @@ begin
 end $$;
 drop trigger if exists correo_solicitud on public.solicitudes_datos;
 create trigger correo_solicitud after update on public.solicitudes_datos for each row execute function privado.tg_correo_solicitud();
+
+-- Envío: quien envía (el servidor local o la Edge Function "correos") toma un lote de pendientes y después informa
+-- el resultado de cada uno. Tomar un lote los aparta 10 minutos, para que dos envíos simultáneos no se repitan.
+create or replace function privado.correos_reclamar(p_n int default 20)
+returns table (id uuid, para text, nombre text, asunto text, texto text, intentos int, ed_nombre text, ed_email text)
+language sql security definer set search_path = public as $$
+  with x as (
+    select c.id from public.correos c where c.estado = 'pendiente' and c.proximo <= now()
+    order by c.ts limit greatest(1, least(coalesce(p_n, 20), 100)) for update skip locked),
+  u as (update public.correos c set proximo = now() + interval '10 minutes' from x where c.id = x.id returning c.*)
+  select u.id, u.para, u.nombre, u.asunto, u.texto, u.intentos, coalesce(e.nombre, ''), coalesce(e.email, '')
+  from u left join public.edificios e on e.id = u.edificio_id order by u.ts
+$$;
+-- p_cuenta: el error es de la cuenta o la conexión (no del correo): se reintenta en 5 minutos sin contar el intento
+create or replace function privado.correos_resultado(p_id uuid, p_ok boolean, p_error text default null, p_mensaje_id text default null, p_cuenta boolean default false) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  if p_ok then
+    update public.correos set estado = 'enviado', enviado_at = now(), mensaje_id = p_mensaje_id, intentos = intentos + 1, error = null where id = p_id;
+  elsif p_cuenta then
+    update public.correos set error = left(p_error, 500), proximo = now() + interval '5 minutes' where id = p_id and estado = 'pendiente';
+  else
+    update public.correos set intentos = intentos + 1, error = left(p_error, 500),
+      estado = case when intentos + 1 >= 6 then 'error' else 'pendiente' end,
+      proximo = now() + make_interval(mins => power(2, intentos + 1)::int * 5)
+    where id = p_id and estado = 'pendiente';
+  end if;
+end $$;
+-- Lo mismo para la Edge Function, que se identifica con el secreto guardado en plataforma.correo_secret
+create or replace function privado.secreto_correo_ok(p_secreto text) returns void
+language plpgsql stable security definer set search_path = public as $$
+begin
+  if coalesce(p_secreto, '') = '' or coalesce((select correo_secret from public.plataforma where id = 1), '') <> p_secreto then raise exception 'No autorizado'; end if;
+end $$;
+create or replace function public.correos_reclamar(p_secreto text, p_n int default 20)
+returns table (id uuid, para text, nombre text, asunto text, texto text, intentos int, ed_nombre text, ed_email text)
+language plpgsql security definer set search_path = public as $$
+begin
+  perform privado.secreto_correo_ok(p_secreto);
+  return query select * from privado.correos_reclamar(p_n);
+end $$;
+create or replace function public.correos_resultado(p_secreto text, p_id uuid, p_ok boolean, p_error text default null, p_mensaje_id text default null, p_cuenta boolean default false) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  perform privado.secreto_correo_ok(p_secreto);
+  perform privado.correos_resultado(p_id, p_ok, p_error, p_mensaje_id, p_cuenta);
+end $$;
+-- pg_cron llama cada minuto a la Edge Function si hay correos por enviar
+create or replace function privado.despachar_correos() returns void
+language plpgsql security definer set search_path = public as $$
+declare c record;
+begin
+  select correo_url, correo_secret into c from public.plataforma where id = 1;
+  if coalesce(c.correo_url, '') = '' or coalesce(c.correo_secret, '') = '' then return; end if;
+  if not exists (select 1 from public.correos where estado = 'pendiente' and proximo <= now()) then return; end if;
+  perform net.http_post(url := c.correo_url, body := '{}'::jsonb,
+    headers := jsonb_build_object('Content-Type', 'application/json', 'x-correo-secret', c.correo_secret));
+exception when others then
+  raise warning 'correos: %', sqlerrm;
+end $$;
+do $$ begin
+  create extension if not exists pg_cron;
+  perform cron.schedule('mi-edificio-correos', '* * * * *', 'select privado.despachar_correos()');
+exception when others then
+  raise notice 'pg_cron no disponible: los correos se envían solo con el servidor local';
+end $$;
 
 -- La administración reintenta o descarta un correo con error
 create or replace function public.reintentar_correo(p_id uuid, p_descartar boolean default false) returns void
