@@ -460,10 +460,11 @@ La versión vigente está en el archivo [`VERSION`](VERSION) y los cambios de ca
 
 ## Próximos pasos sugeridos
 
-1. Probarla en un edificio real, con túnel y notificaciones en teléfonos.
+1. Probarla en un edificio real, con túnel, notificaciones en teléfonos y correo con Gmail u Outlook reales.
 2. Firmar el instalador de Windows y dejar el servidor como servicio, para que parta sin iniciar sesión.
 3. Respaldo con inicio de sesión directo en Google Drive o OneDrive, sin instalar su aplicación.
-4. Pagos en línea e intereses por mora.
+4. Pagos en línea (Khipu, Flow o Webpay).
+5. Remuneraciones del personal (liquidaciones y Previred).
 
 ## Contribuir
 

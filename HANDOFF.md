@@ -68,11 +68,11 @@ Funciones RPC: `crear_edificio`, `buscar_edificio`, `puede_crear_edificio`, `rec
 
 ## Pendientes sugeridos (en orden)
 
-1. Usarla en un edificio real con túnel y teléfonos.
+1. Usarla en un edificio real con túnel, teléfonos y correo real (Gmail/Outlook); desplegar una vez en Supabase.
 2. Probar el instalador en Windows real; firmarlo; arranque como servicio.
-3. Respaldo automático fuera del computador.
-4. Retirar la columna `edificio_id`.
-5. Pagos en línea e intereses por mora.
+3. Retirar la columna `edificio_id`.
+4. Pagos en línea (Khipu, Flow o Webpay).
+5. Remuneraciones y Previred (descartado por ahora por complejidad).
 
 ## Prompt para pegar en Claude (o similar)
 
