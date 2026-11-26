@@ -1,6 +1,6 @@
 # Cambios
 
-## Sin publicar
+## 0.3.0 — 2026-11-26
 
 - **Libro de novedades** de conserjería que no se puede editar ni borrar, con turnos: entrega con pendientes y resumen automático, y recepción registrada.
 - **Fichas de las unidades**: vehículos y mascotas registrados por cada unidad, bodegas y estacionamientos asignados por la administración, con buscador para conserjería.
