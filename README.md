@@ -374,6 +374,8 @@ Requieren que la app esté publicada con HTTPS (paso 2) y que el computador del 
 
 La app envía sola por correo los **avisos de cobro**: al publicar el gasto común, a cada unidad su monto, el vencimiento, el saldo anterior y los datos para transferir; un recordatorio antes del vencimiento y un aviso de atraso (una vez por período, solo a unidades con saldo y fuera de convenio, con los días que elija la administración); y un comprobante por cada pago registrado. Se activan o apagan en la misma tarjeta. Al actualizar, los períodos ya publicados no se reenvían.
 
+Los **comunicados** se pueden enviar también por correo a toda la comunidad. La app registra qué unidades abrieron cada comunicado; si se marca como importante, cada unidad debe confirmar con "Lo leí" (el inicio se lo recuerda) y la administración ve qué unidades faltan. El correo en sí no registra lectura.
+
 También envía las **notificaciones formales**: cargos y resoluciones de multas, aviso previo y reposición de la suspensión de luz, citaciones a asamblea, el requerimiento anual del Registro de copropietarios y las respuestas a solicitudes sobre datos personales. Cada correo va al correo de la unidad en el Registro de copropietarios (el domicilio para notificaciones) y a las cuentas de la app de esa unidad, sin repetir a nadie, y sale a nombre del edificio. La administración ve cada envío con su fecha y estado, puede abrirlo, y reintentar o descartar los que fallen. Los envíos fallidos se reintentan solos, con esperas crecientes.
 
 Se configura en **Administración → Edificio → Correo**, con una cuenta creada para el edificio:

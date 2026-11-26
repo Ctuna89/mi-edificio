@@ -645,3 +645,19 @@ select t.soy(:'a1'); insert into unidad_espacios (depto, tipo, numero) values ('
 select t.falla($$insert into unidad_espacios (depto, tipo, numero) values ('102', 'bodega', 'B-1')$$, 'asignar la misma bodega a dos unidades');
 select t.soy(:'a4'); select t.ok((select count(*) = 1 from unidad_vehiculos where patente = 'ABCD12') and (select count(*) = 1 from unidad_espacios), 'conserjería busca patentes, mascotas y bodegas');
 \echo 'OK: libro de novedades y fichas de la unidad'
+
+-- ============ comunicados por correo y lecturas ============
+select t.soy(:'a1');
+insert into comunicados (titulo, cuerpo) values ('Corte de agua', 'Mañana de 9 a 13 h.') returning id as com1 \gset
+select t.ok((select count(*) = 0 from correos where referencia = 'comunicados/' || :'com1'), 'un comunicado sin correo no se envía');
+insert into comunicados (titulo, cuerpo, por_correo, importante) values ('Cambio de reglamento', 'Se aprobó…', true, true) returning id as com2 \gset
+select t.ok((select count(*) > 3 and count(*) = count(distinct para) and bool_and(asunto = 'Importante: Cambio de reglamento' and tipo = 'aviso') from correos where referencia = 'comunicados/' || :'com2'), 'por correo a cada persona una vez, como aviso');
+update comunicados set cuerpo = 'Se aprobó (corregido)' where id = :'com2';
+select t.ok((select count(*) = count(distinct para) from correos where referencia = 'comunicados/' || :'com2'), 'editarlo no lo reenvía');
+select t.soy(:'a2'); select public.marcar_leidos(array[:'com1', :'com2']::uuid[]);
+select t.ok((select count(*) = 2 and not bool_or(confirmado) from comunicado_lecturas), 'abrir la lista los marca leídos');
+select public.marcar_leidos(array[:'com2']::uuid[], true); select public.marcar_leidos(array[:'com2']::uuid[]);
+select t.ok((select confirmado and depto = '101' from comunicado_lecturas where comunicado_id = :'com2'), 'la confirmación de un importante queda con la unidad');
+select t.soy(:'a3'); select t.ok((select count(*) = 0 from comunicado_lecturas), 'un residente no ve lo que leyeron otros');
+select t.soy(:'a5'); select t.ok((select count(*) = 2 from comunicado_lecturas), 'el comité ve quién leyó');
+\echo 'OK: comunicados por correo y lecturas'

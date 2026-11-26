@@ -1,5 +1,9 @@
 # Cambios
 
+## Sin publicar
+
+- **Comunicados por correo y con lectura registrada**: al publicar se puede enviar también por correo a toda la comunidad (cuentas y Registro de copropietarios, una vez por persona); la app registra qué unidades lo abrieron, y en los importantes cada unidad confirma con "Lo leí" y el inicio se lo recuerda. La administración y el comité ven qué unidades faltan.
+
 ## 0.3.0 — 2026-11-26
 
 - **Libro de novedades** de conserjería que no se puede editar ni borrar, con turnos: entrega con pendientes y resumen automático, y recepción registrada.
