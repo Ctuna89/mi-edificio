@@ -19,7 +19,7 @@ create or replace function t.soy(u uuid) returns void language sql as $$
   select set_config('request.jwt.claim.sub', u::text, false), set_config('role', 'authenticated', false)
 $$;
 
-insert into auth.users (id) values (:'a1'),(:'a2'),(:'a3');
+insert into auth.users (id) values (:'a1'),(:'a2'),(:'a3'); update auth.users set email = 'u' || replace(id::text, '-', '') || '@ejemplo.cl' where email is null;
 select t.soy(:'a1');
 select public.crear_edificio('Torre A', 'Ana Admin') as ea \gset
 select t.soy(:'a2'); insert into usuarios (id, edificio_id, nombre, depto, rol) values (:'a2', :'ea', 'Rita', '101', 'propietario');
@@ -92,7 +92,7 @@ select t.ok((select interes = 1600 from public.intereses_mora() where depto = '1
 
 -- ---------- medidores, lecturas y reparto por consumo ----------
 \set a4 '00000000-0000-0000-0000-0000000000a4'
-reset role; insert into auth.users (id) values (:'a4');
+reset role; insert into auth.users (id) values (:'a4'); update auth.users set email = 'u' || replace(id::text, '-', '') || '@ejemplo.cl' where email is null;
 select t.soy(:'a4'); insert into usuarios (id, edificio_id, nombre, rol) values (:'a4', :'ea', 'Carla Conserje', 'conserje');
 select t.soy(:'a1'); update usuarios set estado = 'activo', rol = 'conserje' where id = :'a4';
 insert into unidades (depto, alicuota) values ('103', 0);   -- unidad sin alícuota (p. ej. un local), con consumo propio
@@ -194,7 +194,7 @@ select t.ok((select estado = 'anulado' from cargos where reserva_id = :'rq') and
 -- ---------- multas con debido proceso ----------
 \set a5 '00000000-0000-0000-0000-0000000000a5'
 \set a6 '00000000-0000-0000-0000-0000000000a6'
-reset role; insert into auth.users (id) values (:'a5'), (:'a6');
+reset role; insert into auth.users (id) values (:'a5'), (:'a6'); update auth.users set email = 'u' || replace(id::text, '-', '') || '@ejemplo.cl' where email is null;
 select t.soy(:'a5'); insert into usuarios (id, edificio_id, nombre, rol) values (:'a5', :'ea', 'Cora Comité', 'comite');
 select t.soy(:'a6'); insert into usuarios (id, edificio_id, nombre, rol) values (:'a6', :'ea', 'Cata Comité', 'comite');
 select t.soy(:'a1'); update usuarios set estado = 'activo', rol = 'comite' where id in (:'a5', :'a6');
@@ -289,7 +289,7 @@ select t.ok((select count(*) = 0 from infracciones where depto <> '102') and (se
 
 -- ---------- datos personales (Ley 21.719) ----------
 \set a7 '00000000-0000-0000-0000-0000000000a7'
-reset role; insert into auth.users (id) values (:'a7');
+reset role; insert into auth.users (id) values (:'a7'); update auth.users set email = 'u' || replace(id::text, '-', '') || '@ejemplo.cl' where email is null;
 select t.soy(:'a7'); insert into usuarios (id, edificio_id, nombre, depto, telefono, privacidad_at) values (:'a7', :'ea', 'Sara Sánchez', '103', '+56 9 1111 2222', now());
 select t.soy(:'a1'); update usuarios set estado = 'activo', rol = 'propietario' where id = :'a7';
 select t.ok((select count(*) = 1 and bool_and(tipo = 'privacidad' and length(texto) > 10) from consentimientos where uid = :'a7'), 'aceptar el aviso de privacidad queda como consentimiento, con su texto');
@@ -357,7 +357,7 @@ reset role; select t.ok(privado.avisos_seguros() = 1, 'al propietario se le avis
 
 -- ---------- suspensión de luz por morosidad ----------
 \set a8 '00000000-0000-0000-0000-0000000000a8'
-reset role; insert into auth.users (id) values (:'a8');
+reset role; insert into auth.users (id) values (:'a8'); update auth.users set email = 'u' || replace(id::text, '-', '') || '@ejemplo.cl' where email is null;
 select t.soy(:'a8'); insert into usuarios (id, edificio_id, nombre, depto) values (:'a8', :'ea', 'Tomás Torres', '104');
 select t.soy(:'a1'); insert into unidades (depto, alicuota) values ('104', 0); update usuarios set estado = 'activo', rol = 'propietario' where id = :'a8';
 insert into gastos (periodo, total, publicado, items) select p, 1000, false, '[{"categoria":"Reparación","monto":1000,"prorrateo":"unidades","deptos":["104"]}]' from unnest(array['2031-01','2031-02','2031-03']) p;
@@ -441,7 +441,7 @@ select t.soy(:'a4'); select t.ok((select count(*) = 0 from registro_personas), '
 
 -- ---------- asambleas ----------
 \set a9 '00000000-0000-0000-0000-0000000000a9'
-reset role; insert into auth.users (id) values (:'a9');
+reset role; insert into auth.users (id) values (:'a9'); update auth.users set email = 'u' || replace(id::text, '-', '') || '@ejemplo.cl' where email is null;
 select t.soy(:'a9'); insert into usuarios (id, edificio_id, nombre, depto) values (:'a9', :'ea', 'Ana Arrendataria', '103');
 select t.soy(:'a1'); update usuarios set estado = 'activo', rol = 'residente' where id = :'a9';
 select public.crear_asamblea('ordinaria', 'mixta', now() + interval '3 days', 'Cuenta anual') as asm_pronto \gset
@@ -493,3 +493,19 @@ select t.ok((select not constituida from public.quorum_asamblea(:'ref')), 'con 6
 select t.falla(format($$select public.abrir_mocion(%L)$$, (select public.agregar_mocion(:'ref', 'Modificar el reglamento'))), 'votar sin quórum');
 \echo 'OK: asambleas'
 
+
+-- ============ correos ============
+select t.soy(:'a1');
+select t.ok((select count(*) > 0 from correos where referencia like 'infracciones/%' and asunto like 'Notificación de cargos%'), 'formular cargos encola el correo de notificación');
+select t.ok((select count(*) > 0 from correos where referencia like 'infracciones/%' and asunto like 'Resolución%'), 'la resolución se notifica por correo');
+select t.ok((select count(*) > 0 from correos where referencia like 'asambleas/%' and asunto like 'Citación%'), 'citar a asamblea encola las citaciones');
+select t.ok((select bool_and(para ~ '^[^@\s]+@[^@\s]+\.[^@\s]+$' and estado = 'pendiente') from correos), 'solo se encolan correos válidos, pendientes');
+select t.ok((select count(*) = count(distinct (para, referencia, asunto)) from correos where referencia like 'asambleas/%'), 'un correo por persona aunque esté en el registro y tenga cuenta');
+select id as cor from correos limit 1 \gset
+reset role; update correos set estado = 'error', intentos = 5 where id = :'cor';
+select t.soy(:'a1'); select public.reintentar_correo(:'cor');
+select t.ok((select estado = 'pendiente' and intentos = 0 from correos where id = :'cor'), 'la administración reintenta un correo con error');
+select t.soy(:'a2');
+select t.ok((select count(*) = 0 from correos), 'un residente no ve la cola de correos');
+select t.falla(format($$select public.reintentar_correo(%L)$$, :'cor'), 'un residente reintenta correos');
+\echo 'OK: correos'

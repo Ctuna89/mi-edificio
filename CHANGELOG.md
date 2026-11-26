@@ -2,6 +2,7 @@
 
 ## Sin publicar
 
+- **Envío de correos** (instalación local): la administración conecta una cuenta de Gmail, Outlook o el correo del edificio y la app envía sola las notificaciones formales (multas, suspensión de luz, citaciones a asamblea, registro de copropietarios, solicitudes de datos), con constancia de cada envío, reintentos y correo de prueba.
 - **Asambleas** (adaptado de CactusOne): citación con plazo, poderes simples revocables, representación del arrendatario, asistencia y quórum en vivo ponderado por alícuota, votaciones por moción con la mayoría de cada tipo de sesión (solo unidades hábiles), votos inmodificables, acta con plazo de firma y casos por inasistencia.
 - **Registro de copropietarios, arrendatarios y ocupantes** (Ley 21.442 y Decreto 7; adaptado de CactusOne): RUT validado, correo para notificaciones, permanencia y arriendo; los propietarios informan cambios y confirman cada año; requerimiento anual, panel de faltantes, exportación registrada y declaración de representación en asambleas.
 - **Módulos activables**: cada módulo opcional puede estar activo, solo para el personal o apagado.

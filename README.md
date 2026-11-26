@@ -328,6 +328,20 @@ Avisos en el teléfono o computador cuando llega una encomienda o una visita, ha
 
 Requieren que la app esté publicada con HTTPS (paso 2) y que el computador del edificio tenga internet. En iPhone/iPad solo funcionan con la app agregada a la pantalla de inicio (iOS 16.4 o superior). El envío real a teléfonos no está probado por el proyecto.
 
+## Correo
+
+La app envía sola por correo las **notificaciones formales**: cargos y resoluciones de multas, aviso previo y reposición de la suspensión de luz, citaciones a asamblea, el requerimiento anual del Registro de copropietarios y las respuestas a solicitudes sobre datos personales. Cada correo va al correo de la unidad en el Registro de copropietarios (el domicilio para notificaciones) y a las cuentas de la app de esa unidad, sin repetir a nadie, y sale a nombre del edificio. La administración ve cada envío con su fecha y estado, puede abrirlo, y reintentar o descartar los que fallen. Los envíos fallidos se reintentan solos, con esperas crecientes.
+
+Se configura en **Administración → Edificio → Correo**, con una cuenta creada para el edificio:
+
+- **Gmail**: activa la verificación en 2 pasos y crea una *contraseña de aplicación* (Cuenta de Google → Seguridad → Contraseñas de aplicaciones). Gmail gratuito permite unos 500 correos al día.
+- **Outlook / Microsoft 365**: igual, con una contraseña de aplicación. Algunas cuentas de empresa tienen el SMTP desactivado.
+- **Otro**: el servidor SMTP del dominio del edificio (puerto 587 con STARTTLS o 465 con TLS).
+
+El botón "Enviar correo de prueba" confirma que funciona. La contraseña queda solo en `config.json` del computador del edificio y no vuelve a mostrarse. Si en **Datos del edificio** hay un correo distinto, las respuestas llegan ahí. En la instalación con Supabase el envío automático aún no existe: los correos quedan en la misma lista para abrirlos y enviarlos a mano. El envío por Gmail u Outlook reales no está probado por el proyecto (sí con un servidor SMTP de prueba).
+
+![Correo: cuenta conectada y constancia de envíos](docs/capturas/correo.png)
+
 ## Fotos y archivos
 
 Se guardan en `local/datos/archivos`. Nadie puede abrirlos sin sesión: la app pide al servidor un enlace firmado que dura 1 hora, y el servidor solo lo entrega a quien puede leer ese archivo según su rol (por ejemplo, la foto de una encomienda la ven conserjería, administración y la unidad destinataria). Las imágenes se comprimen en el navegador a 1280 px antes de subir; el máximo por archivo es 15 MB.

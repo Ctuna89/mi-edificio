@@ -63,6 +63,7 @@ Funciones RPC: `crear_edificio`, `buscar_edificio`, `puede_crear_edificio`, `rec
 - La prueba en navegador y las de interfaz con cliente simulado no están en el repositorio.
 - Actualización con un clic probada con Wine de 0.1.1 a 0.1.2 contra un servidor de publicaciones local: descarga, suma, reemplazo, reinicio, copia previa y datos intactos; y rechazo de un instalador con suma alterada. No se ha probado contra GitHub real.
 - Instalador y servidor probados con Wine (Node para Windows): instalación silenciosa, accesos directos, arranque por `iniciar.vbs`, archivos, respaldo en una carpeta OneDrive, detener, actualizar encima y desinstalar. Las páginas del asistente se revisaron por captura.
+- Correo: cola `correos` en la base (la llenan triggers de multas, suspensiones, asambleas, solicitudes de datos y el requerimiento del registro) y envío por SMTP con nodemailer en el servidor local. Probado con un servidor SMTP falso (`local/test.mjs` y en navegador); no con Gmail ni Outlook reales. En Supabase no se envía.
 - **Sin probar**: un Windows real (SmartScreen, Firewall, antivirus, inicio con la sesión), un túnel de Cloudflare conectado de verdad (el entorno de desarrollo bloqueaba esa red), envío de notificaciones push a teléfonos, y cualquier uso en un edificio real. La instalación en Supabase nunca se ha desplegado.
 
 ## Pendientes sugeridos (en orden)

@@ -67,7 +67,8 @@ function createClient(){
       sistema:{ estado:()=>api('/api/sistema/estado'), buscar:()=>api('/api/sistema/buscar'), actualizar:()=>api('/api/sistema/actualizar') },
       // acceso desde internet mediante un túnel de Cloudflare que maneja el servidor
       tunel:{ estado:()=>api('/api/tunel/estado'), configurar:d=>api('/api/tunel/configurar',d) },
-      respaldo:{ estado:()=>api('/api/respaldo/estado'), configurar:d=>api('/api/respaldo/configurar',d), ahora:()=>api('/api/respaldo/ahora') } },
+      correo:{ estado:()=>api('/api/correo/estado'), configurar:d=>api('/api/correo/configurar',d), probar:para=>api('/api/correo/probar',{para}), enviar:()=>api('/api/correo/enviar') },
+  respaldo:{ estado:()=>api('/api/respaldo/estado'), configurar:d=>api('/api/respaldo/configurar',d), ahora:()=>api('/api/respaldo/ahora') } },
   };
 }
 window.supabase={createClient};

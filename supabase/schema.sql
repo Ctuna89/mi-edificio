@@ -87,7 +87,7 @@ alter table public.edificios add column if not exists visita_patente boolean not
 alter table public.edificios add column if not exists est_alerta_min int not null default 0;
 alter table public.edificios add column if not exists est_aviso_min int not null default 0;
 -- Plazos de conservación en meses, definidos por la administración de cada edificio.
--- Claves: visitas, registros, encomiendas, mensajes, reservas, incidencias, estacionamientos, auditoria. Sin clave o 0 = no se borra.
+-- Claves: visitas, registros, encomiendas, mensajes, reservas, incidencias, estacionamientos, auditoria, correos. Sin clave o 0 = no se borra.
 alter table public.edificios add column if not exists retencion jsonb not null default '{}'::jsonb;
 
 -- Ajustes de la instalación (1 fila). Sin políticas RLS: solo se edita desde el SQL Editor.
@@ -903,6 +903,27 @@ create table if not exists public.asamblea_votos (
   primary key (mocion_id, depto)
 );
 
+-- Correos salientes: la base de datos los encola y el servidor local los envía por SMTP con la cuenta que configura
+-- la administración. Quedan como constancia del envío de cada notificación formal (fecha, destinatario, estado).
+create table if not exists public.correos (
+  id          uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  para        text not null,
+  nombre      text default '',
+  asunto      text not null,
+  texto       text not null,
+  tipo        text not null default 'formal' check (tipo in ('formal','aviso','prueba')),
+  referencia  text,                         -- p. ej. 'infracciones/<id>'
+  estado      text not null default 'pendiente' check (estado in ('pendiente','enviado','error','descartado')),
+  intentos    int not null default 0,
+  error       text,
+  proximo     timestamptz not null default now(),
+  enviado_at  timestamptz,
+  mensaje_id  text,
+  ts          timestamptz default now()
+);
+create index if not exists correos_pendientes_idx on public.correos (estado, proximo) where estado = 'pendiente';
+
 -- Archivos de filas borradas por plazo de conservación, pendientes de eliminar del bucket.
 -- Los elimina la app de la administración (la base de datos no puede borrar archivos de Storage).
 create table if not exists public.archivos_por_borrar (
@@ -941,7 +962,7 @@ begin
   end if;
 
   select id into def from public.edificios order by creado, id limit 1;
-  foreach t in array array['empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos']
+  foreach t in array array['empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos']
   loop
     execute format('alter table public.%I add column if not exists edificio_id uuid references public.edificios(id) on delete cascade', t);
     execute format('select count(*) from public.%I where edificio_id is null', t) into n;
@@ -1054,7 +1075,7 @@ $$;
 do $$
 declare t text;
 begin
-  foreach t in array array['empresas','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos']
+  foreach t in array array['empresas','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos']
   loop
     execute format('alter table public.%I alter column edificio_id set default public.mi_edificio()', t);
   end loop;
@@ -2328,6 +2349,10 @@ begin
   if not public.es_admin() then raise exception 'Solo administración'; end if;
   u := privado.usuarios_de(e, '{propietario}');
   update public.edificios set registro = registro || jsonb_build_object('requerido', public.hoy()) where id = e;
+  perform privado.correo_unidad(e, x.depto, 'Requerimiento anual del Registro de Copropietarios',
+    'Le pedimos revisar y confirmar los datos de copropietarios, arrendatarios y ocupantes de la unidad ' || x.depto || ', como exige la Ley de Copropiedad (Decreto 7, art. 5). '
+    || 'Hágalo en la app (módulo Registro) o respondiendo a este correo con los cambios.', 'registro/' || x.depto, true)
+  from public.unidades x where x.edificio_id = e;
   perform privado.push(e, u, '📇 Actualiza el registro de tu unidad', 'Revisa los datos de copropietarios, arrendatarios y ocupantes y confírmalos (Ley de Copropiedad).', '#registro');
   return coalesce(cardinality(u), 0);
 end $$;
@@ -2560,6 +2585,123 @@ create or replace function privado.votos_fijos() returns trigger
 language plpgsql as $$ begin raise exception 'Los votos de una asamblea no se modifican ni se borran'; end $$;
 drop trigger if exists asamblea_votos_fijos on public.asamblea_votos;
 create trigger asamblea_votos_fijos before update or delete on public.asamblea_votos for each row execute function privado.votos_fijos();
+
+-- ---------- Correos ----------
+create or replace function privado.encolar_correo(p_e uuid, p_para text, p_nombre text, p_asunto text, p_texto text, p_tipo text, p_ref text) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  if coalesce(trim(p_para), '') !~ '^[^@\s]+@[^@\s]+\.[^@\s]+$' then return; end if;
+  insert into public.correos (edificio_id, para, nombre, asunto, texto, tipo, referencia)
+  values (p_e, lower(trim(p_para)), coalesce(p_nombre, ''), p_asunto, p_texto, p_tipo, p_ref);
+end $$;
+-- Correos de una unidad: los del Registro de copropietarios (el domicilio legal para notificaciones) y, además,
+-- los de las cuentas de la unidad. Con p_solo_propietarios, solo copropietarios. Sin depto, todas las unidades
+-- (cada persona recibe un solo correo aunque tenga varias unidades).
+create or replace function privado.correos_unidad(p_e uuid, p_depto text, p_solo_propietarios boolean default false)
+returns table (correo text, nombre text)
+language sql stable security definer set search_path = public as $$
+  select distinct on (lower(x.correo)) lower(x.correo), x.nombre from (
+    select r.correo, r.nombre from public.registro_personas r
+    where r.edificio_id = p_e and r.depto = coalesce(p_depto, r.depto) and r.estado = 'vigente' and r.hasta is null and coalesce(r.correo, '') <> ''
+      and (not p_solo_propietarios or r.relacion = 'copropietario')
+    union all
+    select a.email, u.nombre from public.usuarios u join auth.users a on a.id = u.id
+    where u.edificio_id = p_e and u.depto = coalesce(p_depto, u.depto) and u.estado = 'activo'
+      and u.rol in ('propietario','residente') and (not p_solo_propietarios or u.rol = 'propietario')) x
+  order by lower(x.correo)
+$$;
+create or replace function privado.correo_unidad(p_e uuid, p_depto text, p_asunto text, p_texto text, p_ref text, p_solo_propietarios boolean default false) returns int
+language plpgsql security definer set search_path = public as $$
+declare c record; n int := 0;
+begin
+  for c in select * from privado.correos_unidad(p_e, p_depto, p_solo_propietarios) loop
+    perform privado.encolar_correo(p_e, c.correo, c.nombre, p_asunto, 'Estimado/a ' || coalesce(nullif(c.nombre, ''), 'copropietario/a') || ':' || E'\n\n' || p_texto, 'formal', p_ref);
+    n := n + 1;
+  end loop;
+  return n;
+end $$;
+create or replace function privado.cuenta_correo(p_uid uuid) returns text
+language sql stable security definer set search_path = public as $$ select email from auth.users where id = p_uid $$;
+
+-- Notificaciones formales (Art. 59 del reglamento de Los Cactus; la ley fija el correo registrado como domicilio)
+create or replace function privado.tg_correo_infraccion() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare k public.multas_catalogo;
+begin
+  if new.depto is null or new.estado = old.estado then return null; end if;
+  select * into k from public.multas_catalogo where id = new.catalogo_id;
+  if new.estado = 'cargos' then
+    perform privado.correo_unidad(new.edificio_id, new.depto, 'Notificación de cargos · caso nº ' || new.folio,
+      'Se le notifican los siguientes cargos (unidad ' || new.depto || '):' || E'\n\n' || coalesce(new.cargos_texto, '') || E'\n\n' ||
+      'Conducta: ' || coalesce(k.conducta, '') || coalesce(' (artículo ' || nullif(k.articulo, '') || ')', '') || '.' || E'\n' ||
+      'Puede presentar sus descargos hasta el ' || to_char(new.descargos_hasta, 'DD-MM-YYYY') || ', en la app (módulo Multas) o por escrito a la administración.', 'infracciones/' || new.id);
+  elsif new.estado in ('resuelto','absuelto') then
+    perform privado.correo_unidad(new.edificio_id, new.depto, 'Resolución · caso nº ' || new.folio,
+      'Resolución del caso nº ' || new.folio || ' (unidad ' || new.depto || ').' || E'\n\n' || 'Fundamentos: ' || coalesce(new.resolucion_texto, '') || E'\n\n' ||
+      case when new.estado = 'absuelto' then 'Se resuelve absolver a la unidad, sin multa.'
+        else 'Se aplica una multa de ' || trim(to_char(new.multa_monto, 'FM999990.##')) || ' ' || new.multa_unidad || ' ($' || new.multa_clp || '), que se cobra con los gastos comunes' ||
+             coalesce('; plazo para restituir: ' || to_char(new.restituir_antes, 'DD-MM-YYYY') || ', y mientras no se restituya la multa se repite cada mes', '') || '.' end,
+      'infracciones/' || new.id);
+  end if;
+  return null;
+end $$;
+drop trigger if exists correo_infraccion on public.infracciones;
+create trigger correo_infraccion after update on public.infracciones for each row execute function privado.tg_correo_infraccion();
+
+create or replace function privado.tg_correo_suspension() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if new.estado = old.estado then return null; end if;
+  if new.estado = 'avisada' then
+    perform privado.correo_unidad(new.edificio_id, new.depto, 'Aviso previo de suspensión del suministro eléctrico · unidad ' || new.depto,
+      'La unidad ' || new.depto || ' registra ' || new.cuotas || ' cuotas de gasto común impagas, por $' || new.deuda || '. Con el acuerdo del comité de administración, y conforme al artículo 20 nº 9 de la Ley 21.442, '
+      || 'a partir del ' || to_char(new.fecha_prevista, 'DD-MM-YYYY') || ' se podrá suspender o solicitar la suspensión del suministro eléctrico de la unidad.' || E'\n\n'
+      || 'Para evitarlo, regularice antes de esa fecha con un pago o un convenio de pago. Si en la unidad vive una persona electrodependiente o que usa oxígeno medicinal, avise de inmediato a la administración: en ese caso la ley prohíbe la suspensión. El agua no se suspende.',
+      'suspensiones/' || new.id);
+  elsif new.estado = 'por_reponer' then
+    perform privado.correo_unidad(new.edificio_id, new.depto, 'Reposición del suministro eléctrico · unidad ' || new.depto,
+      'Se registró la regularización (' || coalesce(new.regularizacion, '') || '). El suministro eléctrico se repondrá a más tardar el ' || to_char(new.reponer_antes, 'DD-MM-YYYY') || '.', 'suspensiones/' || new.id);
+  end if;
+  return null;
+end $$;
+drop trigger if exists correo_suspension on public.suspensiones;
+create trigger correo_suspension after update on public.suspensiones for each row execute function privado.tg_correo_suspension();
+
+create or replace function privado.tg_correo_asamblea() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare t text;
+begin
+  if not (new.estado = 'citada' and old.estado = 'borrador') then return null; end if;
+  t := 'Se cita a asamblea ' || replace(new.tipo, '_', ' ') || ' (' || new.modalidad || ') el ' || to_char(new.fecha at time zone 'America/Santiago', 'DD-MM-YYYY "a las" HH24:MI') ||
+       coalesce(', en ' || nullif(new.lugar, ''), '') || coalesce('. Enlace: ' || nullif(new.enlace, ''), '') || '.' || E'\n\nTabla:\n' || new.tabla || E'\n\n' ||
+       'Si no puede asistir, puede otorgar un poder simple en la app (módulo Asambleas) o por escrito. Si el copropietario no asiste ni otorga poder, lo representa el arrendatario u ocupante de la unidad, salvo que lo haya excluido' ||
+       case when new.tipo = 'extraordinaria_reforzada' then ' (en esta asamblea, por ser de mayoría reforzada, el arrendatario necesita un poder)' else '' end || '.';
+  perform privado.correo_unidad(new.edificio_id, null, 'Citación a asamblea nº ' || new.folio, t, 'asambleas/' || new.id);
+  return null;
+end $$;
+drop trigger if exists correo_asamblea on public.asambleas;
+create trigger correo_asamblea after update on public.asambleas for each row execute function privado.tg_correo_asamblea();
+
+create or replace function privado.tg_correo_solicitud() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if new.estado in ('respondida','rechazada') and old.estado not in ('respondida','rechazada') then
+    perform privado.encolar_correo(new.edificio_id, privado.cuenta_correo(new.uid), (select nombre from public.usuarios where id = new.uid),
+      'Respuesta a su solicitud sobre datos personales', 'Su solicitud de ' || new.tipo || ' fue ' || new.estado || '.' || E'\n\n' || coalesce(new.respuesta, ''), 'formal', 'solicitudes_datos/' || new.id);
+  end if;
+  return null;
+end $$;
+drop trigger if exists correo_solicitud on public.solicitudes_datos;
+create trigger correo_solicitud after update on public.solicitudes_datos for each row execute function privado.tg_correo_solicitud();
+
+-- La administración reintenta o descarta un correo con error
+create or replace function public.reintentar_correo(p_id uuid, p_descartar boolean default false) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  if not public.es_admin() then raise exception 'Solo administración'; end if;
+  update public.correos set estado = case when p_descartar then 'descartado' else 'pendiente' end, proximo = now(), intentos = case when p_descartar then intentos else 0 end
+  where id = p_id and edificio_id = public.mi_edificio() and estado in ('error','pendiente');
+end $$;
 
 -- ---------- Multas con debido proceso ----------
 -- Fecha que resulta de sumar p_n días hábiles (sin sábados, domingos ni feriados del edificio)
@@ -3236,6 +3378,12 @@ begin
   select retencion into r from public.edificios where id = p_e;
   if r is null then return res; end if;
 
+  m := privado.meses(r, 'correos');
+  if m > 0 then
+    delete from public.correos where edificio_id = p_e and ts < now() - make_interval(months => m) and estado in ('enviado','descartado');
+    get diagnostics n = row_count; res := res || jsonb_build_object('correos', n);
+  end if;
+
   m := privado.meses(r, 'auditoria');
   if m > 0 then
     perform set_config('mi_edificio.interno', '1', true);
@@ -3398,6 +3546,7 @@ alter table public.asamblea_poderes enable row level security;
 alter table public.asamblea_asistencia enable row level security;
 alter table public.asamblea_mociones enable row level security;
 alter table public.asamblea_votos   enable row level security;
+alter table public.correos          enable row level security;
 
 -- helper para (re)crear políticas sin errores. Salvo que se indique lo contrario, toda
 -- política queda además limitada a las filas del edificio del usuario.
@@ -3603,6 +3752,7 @@ select public._pol('asamblea_poderes','ap_sel','select','public.mi_rol() in (''c
 select public._pol('asamblea_asistencia','aa_sel','select','public.mi_rol() in (''residente'',''propietario'',''comite'',''admin'')');
 select public._pol('asamblea_mociones','am_sel','select','public.mi_rol() in (''residente'',''propietario'',''comite'',''admin'')');
 select public._pol('asamblea_votos','av_sel','select','public.mi_rol() in (''residente'',''propietario'',''comite'',''admin'')');
+select public._pol('correos','cor_sel','select','public.es_admin()');
 select public._pol('suspension_eventos','se_sel','select','exists (select 1 from public.suspensiones x where x.id = suspension_id)');
 
 -- archivos_por_borrar: la administración los lee y los quita de la cola al borrarlos del bucket
@@ -3678,7 +3828,7 @@ create policy "fotos_delete" on storage.objects for delete to authenticated usin
 do $$
 declare t text;
 begin
-  foreach t in array array['edificios','empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos']
+  foreach t in array array['edificios','empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos']
   loop
     begin
       execute format('alter publication supabase_realtime add table public.%I', t);
