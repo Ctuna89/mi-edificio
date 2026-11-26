@@ -190,6 +190,7 @@ Límites: está pensada para un edificio. La base de datos atiende una consulta 
 | Encuestas y votaciones de asamblea | vota, ve resultados | – | crea, cierra, ve totales | crea, cierra, ve totales | – |
 | Emergencias: plan, teléfonos, responsables y simulacros | ve el plan y declara condiciones | ve, consulta condiciones especiales | edita responsables y simulacros | edita todo | – |
 | Proveedores, contratos y certificaciones | – | ve teléfonos en Emergencias | ve | gestiona | – |
+| Ingresos de proveedores | – | registra entrada y salida | programa visitas, ve | programa visitas, ve | – |
 | Libro de novedades y turnos | – | anota, inicia y entrega turnos | lee | lee, anota | – |
 | Fichas de unidades: vehículos, mascotas, bodegas | registra los de su unidad (en Mi cuenta) | busca | busca | busca, asigna bodegas y estacionamientos | – |
 | Documentos (reglamento, actas, balances) | lee | lee | sube | sube | – |
@@ -261,11 +262,25 @@ La Ley 21.442 (art. 20 nº 9) permite suspender o pedir la suspensión del sumin
 
 Adaptado de [CactusOne](https://github.com/Ctuna89/cactusone), con permiso de sus autores.
 
+## Ingresos de proveedores
+
+En el módulo Ingresos, la conserjería registra a los técnicos y proveedores que entran al edificio: empresa (de la lista de proveedores o escrita), quién viene, RUT y patente (validados), motivo y destino o unidad, con la hora de entrada y de salida que pone el servidor. La administración y el comité programan visitas ("viene el técnico de ascensores el martes") que la conserjería ve en su inicio y marca al llegar. La entrega de turno avisa quién sigue dentro. El historial se busca y se descarga en Excel, y se conserva con el plazo de las visitas.
+
 ## Libro de novedades y turnos
 
 La conserjería anota cada novedad (seguridad, mantención, aseo, visitas, reclamos…) con hora, unidad, foto y si es importante. **Lo anotado no se edita ni se borra**: para corregir se agrega otra anotación. Cada conserje inicia y entrega su turno: al entregar deja lo pendiente y la app agrega un resumen (encomiendas por entregar, visitas dentro, estacionamientos ocupados, incidencias abiertas). Quien llega lee la entrega y las novedades importantes antes de "recibir el turno", y queda registrado. El libro se filtra, se busca y se descarga en Excel; la administración y el comité lo leen y ven en su inicio las novedades importantes del último día. Tiene su propio plazo de conservación.
 
 ![Libro de novedades](docs/capturas/novedades.png)
+
+## Plantillas de documentos
+
+En Administración → Plantillas se guardan cartas y documentos con variables que se completan solas para cada unidad: `{{depto}}`, `{{nombre}}`, `{{fecha}}`, `{{deuda}}`, `{{vencido}}`, `{{detalle_deuda}}` (la deuda por período), `{{edificio}}`, `{{direccion}}`, `{{datos_bancarios}}` y `{{correo_edificio}}`. Hay seis ejemplos para partir (dos cartas de cobranza, aviso de trabajos, bienvenida, citación y acta del comité); lo que está entre corchetes se completa a mano. Al usar una plantilla se eligen las unidades (una, las que tienen deuda vencida, todas o algunas), se ajusta el texto, se revisa la vista previa y se imprime (una página por unidad) o se envía por correo. Las cobranzas y citaciones salen como notificación formal, con constancia del envío.
+
+![Plantilla de cobranza](docs/capturas/plantillas.png)
+
+## Varias unidades por persona
+
+Una cuenta puede tener varias unidades: un segundo depto, o un estacionamiento o una bodega que tengan su propia alícuota. La administración las agrega en Administración → Usuarios ("+ unidad"), con el rol de la persona en cada una (propietario o residente). La persona ve en su inicio el saldo de todas sus unidades y elige con un selector cuál está usando: el gasto común, el estado de cuenta, las reservas, los votos y lo demás se muestran y se hacen para esa unidad. Los avisos y correos de cualquiera de sus unidades le llegan siempre.
 
 ## Fichas de las unidades
 
@@ -325,6 +340,10 @@ Este módulo está adaptado de [CactusOne](https://github.com/Ctuna89/cactusone)
 
 ![Conciliación de la cartola bancaria](docs/capturas/banco.png)
 
+**Facturas de proveedores.** En Finanzas → Facturas se sube el XML de la factura electrónica que llega del SII o del proveedor (puede traer varias) y la app lee emisor, folio, fechas, neto, IVA, total y detalle; las boletas y otros documentos se registran a mano con su PDF o foto. Cada factura se liga al proveedor por su RUT (si es nuevo, se agrega a Proveedores), no se puede registrar dos veces, y queda por pagar hasta que se registra el pago, que la pasa al flujo de caja como egreso con su categoría. Al conciliar la cartola, un cargo con el mismo total que una factura por pagar se marca como su pago, con un solo egreso. Los montos leídos del documento no se pueden cambiar; una factura por pagar se anula con un motivo. Las notas de crédito no se importan todavía. El inicio avisa las facturas vencidas.
+
+![Facturas de proveedores](docs/capturas/facturas.png)
+
 **Presupuesto.** En Finanzas → Presupuesto la administración define el presupuesto anual por categoría, con un monto por mes (puede partir del promedio gastado el año anterior). La app lo compara con los ítems de los gastos comunes publicados, mes a mes y en el año. La comunidad lo puede ver.
 
 ![Presupuesto contra gasto real](docs/capturas/presupuesto.png)
@@ -373,6 +392,8 @@ Requieren que la app esté publicada con HTTPS (paso 2) y que el computador del 
 ## Correo
 
 La app envía sola por correo los **avisos de cobro**: al publicar el gasto común, a cada unidad su monto, el vencimiento, el saldo anterior y los datos para transferir; un recordatorio antes del vencimiento y un aviso de atraso (una vez por período, solo a unidades con saldo y fuera de convenio, con los días que elija la administración); y un comprobante por cada pago registrado. Se activan o apagan en la misma tarjeta. Al actualizar, los períodos ya publicados no se reenvían.
+
+Los **comunicados** se pueden enviar también por correo a toda la comunidad. La app registra qué unidades abrieron cada comunicado; si se marca como importante, cada unidad debe confirmar con "Lo leí" (el inicio se lo recuerda) y la administración ve qué unidades faltan. El correo en sí no registra lectura.
 
 También envía las **notificaciones formales**: cargos y resoluciones de multas, aviso previo y reposición de la suspensión de luz, citaciones a asamblea, el requerimiento anual del Registro de copropietarios y las respuestas a solicitudes sobre datos personales. Cada correo va al correo de la unidad en el Registro de copropietarios (el domicilio para notificaciones) y a las cuentas de la app de esa unidad, sin repetir a nadie, y sale a nombre del edificio. La administración ve cada envío con su fecha y estado, puede abrirlo, y reintentar o descartar los que fallen. Los envíos fallidos se reintentan solos, con esperas crecientes.
 

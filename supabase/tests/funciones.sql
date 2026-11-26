@@ -645,3 +645,95 @@ select t.soy(:'a1'); insert into unidad_espacios (depto, tipo, numero) values ('
 select t.falla($$insert into unidad_espacios (depto, tipo, numero) values ('102', 'bodega', 'B-1')$$, 'asignar la misma bodega a dos unidades');
 select t.soy(:'a4'); select t.ok((select count(*) = 1 from unidad_vehiculos where patente = 'ABCD12') and (select count(*) = 1 from unidad_espacios), 'conserjería busca patentes, mascotas y bodegas');
 \echo 'OK: libro de novedades y fichas de la unidad'
+
+-- ============ comunicados por correo y lecturas ============
+select t.soy(:'a1');
+insert into comunicados (titulo, cuerpo) values ('Corte de agua', 'Mañana de 9 a 13 h.') returning id as com1 \gset
+select t.ok((select count(*) = 0 from correos where referencia = 'comunicados/' || :'com1'), 'un comunicado sin correo no se envía');
+insert into comunicados (titulo, cuerpo, por_correo, importante) values ('Cambio de reglamento', 'Se aprobó…', true, true) returning id as com2 \gset
+select t.ok((select count(*) > 3 and count(*) = count(distinct para) and bool_and(asunto = 'Importante: Cambio de reglamento' and tipo = 'aviso') from correos where referencia = 'comunicados/' || :'com2'), 'por correo a cada persona una vez, como aviso');
+update comunicados set cuerpo = 'Se aprobó (corregido)' where id = :'com2';
+select t.ok((select count(*) = count(distinct para) from correos where referencia = 'comunicados/' || :'com2'), 'editarlo no lo reenvía');
+select t.soy(:'a2'); select public.marcar_leidos(array[:'com1', :'com2']::uuid[]);
+select t.ok((select count(*) = 2 and not bool_or(confirmado) from comunicado_lecturas), 'abrir la lista los marca leídos');
+select public.marcar_leidos(array[:'com2']::uuid[], true); select public.marcar_leidos(array[:'com2']::uuid[]);
+select t.ok((select confirmado and depto = '101' from comunicado_lecturas where comunicado_id = :'com2'), 'la confirmación de un importante queda con la unidad');
+select t.soy(:'a3'); select t.ok((select count(*) = 0 from comunicado_lecturas), 'un residente no ve lo que leyeron otros');
+select t.soy(:'a5'); select t.ok((select count(*) = 2 from comunicado_lecturas), 'el comité ve quién leyó');
+\echo 'OK: comunicados por correo y lecturas'
+
+-- ============ varias unidades por persona ============
+select t.soy(:'a2');
+select t.ok(public.mis_deptos() = array['101'], 'la unidad propia está en la lista');
+select t.ok((select count(*) = 0 from gasto_unidades where depto = '104'), 'antes de asignarle otra unidad, no la ve');
+select t.falla($$insert into usuario_unidades (uid, depto, rol) values (auth.uid(), '104', 'propietario')$$, 'asignarse una unidad');
+select t.falla($$select public.cambiar_unidad('104')$$, 'cambiar a una unidad ajena');
+select t.soy(:'a1'); insert into usuario_unidades (edificio_id, uid, depto, rol) values (public.mi_edificio(), :'a2', '104', 'residente');
+select t.soy(:'a2');
+select t.ok(public.mis_deptos() = array['101','104'] and (select count(*) > 0 from gasto_unidades where depto = '104') and (select count(*) > 0 from gasto_unidades where depto = '101'), 've sus dos unidades a la vez');
+select t.ok((select count(*) = 0 from gasto_unidades where depto = '102'), 'pero no las ajenas');
+select public.cambiar_unidad('104');
+select t.ok((select depto = '104' and rol = 'residente' from usuarios where id = :'a2'), 'elige la unidad activa y toma su rol en ella');
+update usuarios set depto = '102' where id = auth.uid();
+select t.ok((select depto = '104' from usuarios where id = :'a2'), 'su unidad no cambia por otra vía');
+select public.cambiar_unidad('101');
+reset role; select t.ok(:'a2' = any(privado.usuarios_de((select edificio_id from usuarios where id = :'a2'), '{residente,propietario}', '104')), 'recibe los avisos de todas sus unidades');
+select t.soy(:'a1'); update usuarios set depto = '103' where id = :'a2';
+select t.ok((select array_agg(depto order by depto) = array['103','104'] from usuario_unidades where uid = :'a2'), 'si la administración le cambia el depto, se reemplaza el anterior');
+update usuarios set depto = '101' where id = :'a2'; delete from usuario_unidades where uid = :'a2' and depto = '104';
+\echo 'OK: varias unidades por persona'
+
+-- ============ ingresos de proveedores ============
+select t.soy(:'a1');
+insert into proveedor_ingresos (proveedor_id, motivo, programado, estado) values ((select id from proveedores limit 1), 'Mantención mensual de ascensores', public.hoy() + 1, 'programado') returning id as pi1 \gset
+select t.ok((select empresa <> '' and ingreso_at is null from proveedor_ingresos where id = :'pi1'), 'la administración programa la visita; la empresa se toma del proveedor');
+select t.falla($$insert into proveedor_ingresos (motivo) values ('x')$$, 'ingreso sin empresa');
+select t.soy(:'a4');
+insert into proveedor_ingresos (empresa, nombre, rut, patente, motivo, depto) values ('Gasfitería Pérez', 'Juan Pérez', '12.345.678-5', 'ab-cd 12', 'Filtración', '102') returning id as pi2 \gset
+select t.ok((select estado = 'dentro' and ingreso_at is not null and rut = '12345678-5' and patente = 'ABCD12' and registrado_por = :'a4' from proveedor_ingresos where id = :'pi2'), 'conserjería registra el ingreso con hora, RUT y patente normalizados');
+select t.falla($$insert into proveedor_ingresos (empresa, rut) values ('X', '12.345.678-9')$$, 'RUT no válido');
+update proveedor_ingresos set estado = 'salio', ingreso_at = now() - interval '5 hours' where id = :'pi2';
+select t.ok((select salida_at is not null and ingreso_at > now() - interval '1 hour' from proveedor_ingresos where id = :'pi2'), 'la salida queda con hora y la hora de ingreso no se cambia');
+select t.falla(format($$update proveedor_ingresos set estado = 'dentro' where id = %L$$, :'pi2'), 'reabrir un ingreso cerrado');
+update proveedor_ingresos set estado = 'dentro' where id = :'pi1';
+select t.ok((select ingreso_at is not null from proveedor_ingresos where id = :'pi1'), 'una visita programada se registra al llegar');
+select t.soy(:'a2'); select t.ok((select count(*) = 0 from proveedor_ingresos), 'los residentes no ven los ingresos de proveedores');
+\echo 'OK: ingresos de proveedores'
+
+-- ============ plantillas de documentos ============
+select t.soy(:'a1');
+insert into plantillas (nombre, tipo, asunto, cuerpo) values ('Cobranza', 'cobranza', 'Deuda', '…') returning id as pla \gset
+select public.enviar_documento(:'pla', '[{"depto":"102","asunto":"Deuda de gastos comunes · 102","texto":"La unidad 102 registra una deuda de $1.000."}]') as nenv \gset
+select t.ok(:nenv > 0 and (select bool_and(tipo = 'formal' and texto like 'Estimado/a %La unidad 102 registra%') from correos where referencia = 'plantillas/' || :'pla' || '/102'), 'una carta de cobranza sale como notificación formal a la unidad');
+select t.falla(format($$select public.enviar_documento(%L, '[{"depto":"999","asunto":"x","texto":"y"}]')$$, :'pla'), 'enviar a una unidad que no existe');
+select t.falla(format($$select public.enviar_documento(%L, '[{"depto":"102","asunto":"x","texto":" "}]')$$, :'pla'), 'enviar un texto vacío');
+select t.soy(:'a5'); select t.ok((select count(*) = 1 from plantillas), 'el comité ve las plantillas');
+select t.falla(format($$select public.enviar_documento(%L, '[]')$$, :'pla'), 'el comité envía documentos');
+select t.soy(:'a2'); select t.ok((select count(*) = 0 from plantillas), 'los residentes no ven las plantillas');
+\echo 'OK: plantillas de documentos'
+
+-- ============ facturas de proveedores ============
+select t.soy(:'a1');
+update proveedores set rut = '76.543.210-3' where nombre = 'Ascensores del Sur';
+insert into facturas (tipo_dte, folio, rut_emisor, emisor, fecha, neto, iva, total) values (33, 1501, '76543210-3', 'Ascensores del Sur SpA', '2026-11-10', 100000, 19000, 119000) returning id as fac \gset
+select t.ok((select proveedor_id is not null and rut_emisor = '76543210-3' and estado = 'por_pagar' from facturas where id = :'fac'), 'la factura queda por pagar y ligada al proveedor por su RUT');
+select t.falla($$insert into facturas (tipo_dte, folio, rut_emisor, fecha, total) values (33, 1501, '76.543.210-3', '2026-11-10', 1)$$, 'registrar dos veces la misma factura');
+select t.falla($$insert into facturas (folio, rut_emisor, fecha, total) values (1, '76.543.210-0', '2026-11-10', 1)$$, 'RUT del emisor no válido');
+update facturas set total = 1 where id = :'fac';
+select t.falla(format($$update facturas set estado = 'pagada' where id = %L$$, :'fac'), 'marcarla pagada sin registrar el pago');
+select t.ok((select total = 119000 and estado = 'por_pagar' from facturas where id = :'fac'), 'los montos del documento no se cambian');
+select public.importar_cartola('[{"fecha":"2026-11-28","monto":-119000,"glosa":"PAGO ASCENSORES DEL SUR","n":0}]');
+select id as carg from banco_movimientos where glosa = 'PAGO ASCENSORES DEL SUR' \gset
+select t.falla(format($$select public.pagar_factura(%L, null, 'Mantención', %L)$$, :'fac', (select id from banco_movimientos where monto > 0 limit 1)), 'pagar con un abono');
+select public.pagar_factura(:'fac', null, 'Mantención', :'carg') as cajf \gset
+select t.ok((select estado = 'pagada' and pagada_fecha = '2026-11-28' and caja_id = :'cajf' from facturas where id = :'fac')
+  and (select estado = 'caja' and caja_id = :'cajf' from banco_movimientos where id = :'carg')
+  and (select tipo = 'egreso' and monto = 119000 and descripcion like 'Factura nº 1501%' from caja_movimientos where id = :'cajf'), 'pagarla con el cargo de la cartola: un solo egreso, y el cargo queda conciliado');
+select t.falla(format($$select public.pagar_factura(%L, null, 'x')$$, :'fac'), 'pagar dos veces');
+select public.deshacer_movimiento(:'carg');
+select t.ok((select estado = 'por_pagar' and caja_id is null from facturas where id = :'fac') and not exists (select 1 from caja_movimientos where id = :'cajf'), 'deshacer el cargo deja la factura por pagar');
+select public.pagar_factura(:'fac', '2026-11-30', 'Mantención');
+select t.ok((select estado = 'pagada' and pagada_fecha = '2026-11-30' from facturas where id = :'fac'), 'también se paga sin cartola');
+select t.falla(format($$update facturas set estado = 'anulada' where id = %L$$, :'fac'), 'anular una factura pagada');
+select t.soy(:'a2'); select t.ok((select count(*) = 0 from facturas), 'los residentes no ven las facturas');
+\echo 'OK: facturas de proveedores'
