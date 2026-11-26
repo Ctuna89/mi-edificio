@@ -20,7 +20,8 @@ function consulta(t){
     select(){ if(st.op!=='select') st.ret=true; return b; },
     insert(p){ st.op='insert'; st.p=p; return b; }, upsert(p){ st.op='upsert'; st.p=p; return b; },
     update(p){ st.op='update'; st.p=p; return b; }, delete(){ st.op='delete'; return b; },
-    eq(k,v){ st.f.push([k,'eq',v]); return b; }, gte(k,v){ st.f.push([k,'gte',v]); return b; },
+    eq(k,v){ st.f.push([k,'eq',v]); return b; }, gte(k,v){ st.f.push([k,'gte',v]); return b; }, gt(k,v){ st.f.push([k,'gt',v]); return b; },
+    lt(k,v){ st.f.push([k,'lt',v]); return b; }, lte(k,v){ st.f.push([k,'lte',v]); return b; }, neq(k,v){ st.f.push([k,'neq',v]); return b; },
     is(k,v){ st.f.push([k,'is',v]); return b; }, in(k,v){ st.f.push([k,'in',v]); return b; },
     order(k,o){ st.ord={k, asc:!o||o.ascending!==false}; return b; }, limit(n){ st.lim=n; return b; }, maybeSingle(){ st.one=true; return b; },
     then(ok,mal){ return api('/api/db',st).then(ok,mal); },
@@ -66,7 +67,8 @@ function createClient(){
       sistema:{ estado:()=>api('/api/sistema/estado'), buscar:()=>api('/api/sistema/buscar'), actualizar:()=>api('/api/sistema/actualizar') },
       // acceso desde internet mediante un túnel de Cloudflare que maneja el servidor
       tunel:{ estado:()=>api('/api/tunel/estado'), configurar:d=>api('/api/tunel/configurar',d) },
-      respaldo:{ estado:()=>api('/api/respaldo/estado'), configurar:d=>api('/api/respaldo/configurar',d), ahora:()=>api('/api/respaldo/ahora') } },
+      correo:{ estado:()=>api('/api/correo/estado'), configurar:d=>api('/api/correo/configurar',d), probar:para=>api('/api/correo/probar',{para}), enviar:()=>api('/api/correo/enviar') },
+  respaldo:{ estado:()=>api('/api/respaldo/estado'), configurar:d=>api('/api/respaldo/configurar',d), ahora:()=>api('/api/respaldo/ahora') } },
   };
 }
 window.supabase={createClient};

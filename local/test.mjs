@@ -158,6 +158,42 @@ test('acceso desde internet: dirección fija con token, errores y apagado', asyn
   await ana.pedir('/api/tunel/configurar', { modo: 'fijo', direccion: 'https://app.miedificio.cl' }); await hasta(async () => (await est()).estado === 'conectado');   // queda activo (con el token ya guardado) para comprobar que vuelve tras reiniciar
 });
 
+test('correo: la administración configura el SMTP y la app envía las notificaciones formales', async () => {
+  // Un servidor SMTP de mentira que guarda lo que recibe
+  const recibidos = []; const net = await import('node:net');
+  const smtp = net.createServer(c => {
+    let datos = false, buf = '', msg = { para: [] }; c.write('220 prueba ESMTP\r\n');
+    c.on('data', d => { buf += d; let i; while ((i = buf.indexOf('\r\n')) >= 0) { const l = buf.slice(0, i); buf = buf.slice(i + 2);
+      if (datos) { if (l === '.') { datos = false; recibidos.push(msg); msg = { para: [] }; c.write('250 OK id=1\r\n'); } else msg.cuerpo = (msg.cuerpo || '') + l + '\n'; continue; }
+      const v = l.slice(0, 4).toUpperCase();
+      if (v === 'EHLO' || v === 'HELO') c.write('250-prueba\r\n250 8BITMIME\r\n');
+      else if (v === 'RCPT') { msg.para.push(l.match(/<(.*)>/)[1]); c.write('250 OK\r\n'); }
+      else if (v === 'DATA') { datos = true; c.write('354 adelante\r\n'); }
+      else if (v === 'QUIT') { c.end('221 chao\r\n'); }
+      else c.write('250 OK\r\n'); } });
+  }).listen(0); const puerto = smtp.address().port;
+  try {
+    assert.equal((await rita.pedir('/api/correo/estado')).estado, 403, 'solo administración');
+    assert.equal((await ana.pedir('/api/correo/probar', {})).estado, 400, 'sin configurar no envía');
+    assert.equal((await ana.pedir('/api/correo/configurar', { proveedor: 'otro', host: 'localhost', puerto, seguridad: 'ninguna', remitente: 'no-es-correo' })).estado, 400);
+    let e = (await ana.pedir('/api/correo/configurar', { proveedor: 'otro', host: 'localhost', puerto, seguridad: 'ninguna', usuario: '', remitente: 'Edificio@Test.cl', clave: 'secreta' })).data;
+    assert.equal(e.configurado, true); assert.equal(e.remitente, 'edificio@test.cl'); assert.equal(e.tieneClave, true); assert.ok(!JSON.stringify(e).includes('secreta'), 'la contraseña no vuelve al navegador');
+    e = (await ana.pedir('/api/correo/configurar', { proveedor: 'gmail', remitente: 'x@gmail.com', clave: 'abcd efgh ijkl mnop' })).data;
+    assert.equal(e.host, 'smtp.gmail.com'); assert.equal(e.puerto, 465); assert.equal(e.seguridad, 'tls');
+    assert.equal(JSON.parse(fs.readFileSync(path.join(DATOS, 'config.json'), 'utf8')).correo.clave, 'abcdefghijklmnop', 'Gmail: sin los espacios con que se muestra');
+    await ana.pedir('/api/correo/configurar', { proveedor: 'otro', host: 'localhost', puerto, seguridad: 'ninguna', usuario: '', remitente: 'edificio@test.cl' });
+    const p = await ana.pedir('/api/correo/probar', {}); assert.equal(p.estado, 200, p.error); assert.equal(p.data.enviado, 'ana@test.cl');
+    assert.ok(await hasta(() => recibidos.length >= 1)); assert.deepEqual(recibidos[0].para, ['ana@test.cl']); assert.match(recibidos[0].cuerpo, /Subject: Prueba de correo/);
+    // Citar a asamblea encola una citación por persona y el servidor la envía sola
+    const asm = (await ana.rpc('crear_asamblea', { p_tipo: 'ordinaria', p_modalidad: 'presencial', p_fecha: new Date(Date.now() + 8 * 864e5).toISOString(), p_tabla: 'Cuenta anual' })); assert.equal(asm.estado, 200, asm.error);
+    const cit = await ana.rpc('citar_asamblea', { p_id: asm.data }); assert.equal(cit.estado, 200, cit.error);
+    const env = await hasta(async () => { const r = (await ana.db({ t: 'correos', op: 'select', f: [['referencia', 'eq', 'asambleas/' + asm.data]] })).data; return r.length && r.every(x => x.estado === 'enviado') && r; });
+    assert.ok(env, 'las citaciones quedan enviadas'); assert.ok(env.some(x => x.para === 'rita@test.cl'));
+    const cita = recibidos.find(m => m.para.includes('rita@test.cl') && /Citaci/.test(m.cuerpo)); assert.match(cita.cuerpo, /Citaci/); assert.match(cita.cuerpo, /Reply-To|From: Torre Local|Torre Local/);
+    assert.equal((await rita.db({ t: 'correos', op: 'select' })).data.length, 0, 'la cola es solo de la administración');
+  } finally { smtp.close(); await ana.pedir('/api/correo/configurar', { borrar: true, proveedor: 'otro', host: 'x', remitente: 'a@b.cl' }); }
+});
+
 test('respaldo cifrado en una carpeta, con aviso si no es de nube, y restauración en un equipo nuevo', async () => {
   const nube = fs.mkdtempSync(path.join(os.tmpdir(), 'me-nube-')), simple = path.join(nube, 'Documentos', 'Respaldo'), deNube = path.join(nube, 'OneDrive', 'Respaldo Mi Edificio');
   assert.equal((await rita.pedir('/api/respaldo/estado')).estado, 403, 'solo administración');
@@ -215,7 +251,7 @@ test('una actualización que falla no toca los datos, y un programa más antiguo
   const VERSION = fs.readFileSync(path.join(AQUI, '..', 'VERSION'), 'utf8').trim(), pagina = async (cab = {}) => { const r = await fetch(B + '/', { headers: cab }); return { e: r.status, t: await r.text() }; };
   // "versión 50": su esquema borra una columna y las unidades… y después falla
   const malo = path.join(DATOS, 'esquema-malo.sql');
-  fs.writeFileSync(malo, fs.readFileSync(path.join(AQUI, '..', 'supabase', 'schema.sql'), 'utf8') + '\nalter table public.usuarios drop column telefono;\ndelete from public.unidades;\nselect 1/0;\n');
+  fs.writeFileSync(malo, fs.readFileSync(path.join(AQUI, '..', 'supabase', 'schema.sql'), 'utf8') + '\nalter table public.unidades drop column prop;\ndelete from public.unidades;\nselect 1/0;\n');
   await bajar(); await levantar({ MI_EDIFICIO_VERSION: '50.0.0', MI_EDIFICIO_ESQUEMA: malo });
   let p = await pagina(); assert.equal(p.e, 503); assert.match(p.t, /Los datos del edificio no se modificaron/); assert.match(p.t, /division by zero/, 'en el computador del edificio se ve el detalle');
   assert.ok(p.t.includes(`releases/tag/v${VERSION}`), 'indica a qué versión volver');
@@ -224,7 +260,7 @@ test('una actualización que falla no toca los datos, y un programa más antiguo
   assert.ok(fs.readdirSync(path.join(DATOS, 'respaldos')).some(x => x.startsWith(`antes-de-actualizar-${VERSION}-a-50.0.0-`)), 'antes de intentar, guardó una copia');
   // se vuelve a la versión anterior: todo sigue como estaba
   await bajar(); await levantar();
-  const yo = (await ana.db({ t: 'usuarios', op: 'select' })).data; assert.ok('telefono' in yo[0], 'la columna que el esquema fallido borraba sigue ahí');
+  const yo = (await ana.db({ t: 'unidades', op: 'select' })).data; assert.ok(yo.length > 0 && 'prop' in yo[0], 'la columna que el esquema fallido borraba sigue ahí');
   assert.equal((await ana.db({ t: 'unidades', op: 'select' })).data.length, 2, 'y las unidades también');
   assert.equal((await ana.pedir('/api/sistema/estado')).data.historial.at(-1).a, VERSION, 'la base sigue marcada con la versión anterior');
   // una versión nueva que sí funciona

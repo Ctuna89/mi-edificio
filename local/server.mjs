@@ -9,6 +9,7 @@
 //
 //  Uso:  npm install && npm start          (dentro de local/)
 //  Variables: PUERTO (8080) · MI_EDIFICIO_DATOS (local/datos) · MI_EDIFICIO_CONTACTO (mailto:…)
+//  El correo saliente (SMTP) se configura en la app: Administración → Correo.
 // =====================================================================
 import http from 'node:http';
 import https from 'node:https';
@@ -154,6 +155,8 @@ const rutaCfg = path.join(DATOS, 'config.json');
 let CFG = fs.existsSync(rutaCfg) ? JSON.parse(fs.readFileSync(rutaCfg, 'utf8')) : {};
 let webpush = null;
 try { webpush = (await import('web-push')).default; } catch { log('web-push no está instalado: sin notificaciones push'); }
+let nodemailer = null;
+try { nodemailer = (await import('nodemailer')).default; } catch { log('nodemailer no está instalado: sin envío de correos'); }
 if (!CFG.secreto) CFG.secreto = crypto.randomBytes(32).toString('hex');
 if (!CFG.vapid && webpush) CFG.vapid = webpush.generateVAPIDKeys();
 const guardarCfg = () => fs.writeFileSync(rutaCfg, JSON.stringify(CFG, null, 2), { mode: 0o600 });
@@ -260,7 +263,8 @@ async function consultar(uid, q) {
     const c = ident(k), tip = x => `(jsonb_populate_record(null::${T}, ${p({ [k]: x })})).${c}`;
     if (op === 'is' || (op === 'eq' && v === null)) return v === null ? `${c} is null` : `${c} is ${v === true ? 'true' : v === false ? 'false' : 'null'}`;
     if (op === 'eq') return `${c} = ${tip(v)}`;
-    if (op === 'gte') return `${c} >= ${tip(v)}`;
+    const CMP = { gte: '>=', gt: '>', lte: '<=', lt: '<', neq: '<>' };
+    if (CMP[op]) return `${c} ${CMP[op]} ${tip(v)}`;
     if (op === 'in') return `${c} in (select x.${c} from jsonb_populate_recordset(null::${T}, ${p((v || []).map(x => ({ [k]: x })))}) x)`;
     throw new Fallo('Filtro no válido');
   });
@@ -364,7 +368,7 @@ async function despacharPush() {
     }
   } catch (e) { log('push:', e.message); } finally { despachando = false; }
 }
-const trasCambio = () => { difundir(); despacharPush(); };
+const trasCambio = () => { difundir(); despacharPush(); setTimeout(() => despacharCorreos().catch(e => log('correo:', e.message)), 500); };
 
 async function respaldar() {
   const f = await db.dumpDataDir('gzip');
@@ -543,7 +547,7 @@ async function tareas() {
     const hoy = new Date(); const dia = diaLocal(hoy);
     if (dia !== CFG.diarioHecho && hoy.getHours() >= horaDiaria()) {
       CFG.diarioHecho = dia; guardarCfg();   // se anota antes: si algo falla no se reintenta cada 5 minutos
-      await db.query(`select privado.depurar()`);
+      await db.query(`select privado.tareas_diarias()`);
       const pend = await db.query(`delete from public.archivos_por_borrar returning path`);
       for (const x of pend.rows) { if (rutaValida(x.path)) { fs.rmSync(enDisco(x.path), { force: true }); await db.query(`delete from storage.objects where name = $1`, [x.path]); } }
       log('Respaldo diario:', await respaldar());
@@ -553,6 +557,90 @@ async function tareas() {
   } catch (e) { log('tareas:', e.message); }
 }
 setInterval(tareas, 5 * 60000).unref(); setTimeout(tareas, 15000).unref();
+
+// ---------------------------------------------------------------------
+// Correos: la base de datos encola (tabla correos) y aquí se envían por SMTP con la cuenta que configura la
+// administración (Gmail u Outlook con contraseña de aplicación, o el correo del edificio). La contraseña queda
+// solo en config.json de este computador y nunca vuelve al navegador.
+// ---------------------------------------------------------------------
+const SMTP_PRESETS = { gmail: { host: 'smtp.gmail.com', puerto: 465, seguridad: 'tls' }, outlook: { host: 'smtp-mail.outlook.com', puerto: 587, seguridad: 'starttls' } };
+const correo = { error: '', ultimo: null, enviando: false, transporte: null };
+const estadoCorreo = () => { const c = CFG.correo || {}; return { disponible: !!nodemailer, configurado: !!(c.host && c.remitente), activo: c.activo !== false, proveedor: c.proveedor || 'otro', host: c.host || '', puerto: c.puerto || 587, seguridad: c.seguridad || 'starttls', usuario: c.usuario || '', remitente: c.remitente || '', tieneClave: !!c.clave, error: correo.error, ultimo: correo.ultimo }; };
+function transporte() {
+  if (correo.transporte) return correo.transporte;
+  const c = CFG.correo || {}; if (!nodemailer || !c.host || !c.remitente) return null;
+  correo.transporte = nodemailer.createTransport({
+    host: c.host, port: Number(c.puerto) || 587, secure: c.seguridad === 'tls', requireTLS: c.seguridad === 'starttls', ignoreTLS: c.seguridad === 'ninguna',
+    auth: c.usuario ? { user: c.usuario, pass: c.clave || '' } : undefined,
+    connectionTimeout: 20000, greetingTimeout: 20000, socketTimeout: 60000,
+  });
+  return correo.transporte;
+}
+function configurarCorreo(d) {
+  const c = { ...(CFG.correo || {}) };
+  const proveedor = ['gmail', 'outlook', 'otro'].includes(d.proveedor) ? d.proveedor : 'otro';
+  const p = SMTP_PRESETS[proveedor] || {};
+  const host = String(p.host || d.host || '').trim(), remitente = String(d.remitente || '').trim().toLowerCase();
+  const usuario = String(d.usuario ?? remitente).trim();
+  const puerto = Number(p.puerto || d.puerto || 587), seguridad = p.seguridad || (['tls', 'starttls', 'ninguna'].includes(d.seguridad) ? d.seguridad : 'starttls');
+  if (!host || !/^[a-z0-9.-]+$/i.test(host)) throw new Fallo('Indica el servidor SMTP');
+  if (!Number.isInteger(puerto) || puerto < 1 || puerto > 65535) throw new Fallo('Puerto no válido');
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(remitente)) throw new Fallo('Indica el correo desde el que se enviará');
+  Object.assign(c, { proveedor, host, puerto, seguridad, usuario, remitente, activo: d.activo !== false });
+  if (d.clave) c.clave = String(d.clave).replace(/\s+/g, proveedor === 'gmail' ? '' : ' ');   // Gmail muestra la contraseña de aplicación en grupos de 4
+  if (d.borrar) { delete CFG.correo; } else CFG.correo = c;
+  guardarCfg(); correo.transporte = null; correo.error = '';
+}
+const pieCorreo = ed => `\n\n—\n${ed.nombre}${ed.email ? ` · ${ed.email}` : ''}\nEste correo lo envió Mi Edificio en nombre de la administración. Queda registro de la fecha de envío.`;
+async function enviarUno(t, ed, x) {
+  const c = CFG.correo;
+  const r = await t.sendMail({
+    from: { name: ed.nombre || 'Mi Edificio', address: c.remitente }, to: x.nombre ? { name: x.nombre, address: x.para } : x.para,
+    replyTo: ed.email && ed.email.toLowerCase() !== c.remitente ? ed.email : undefined,
+    subject: x.asunto, text: x.texto + pieCorreo(ed), headers: { 'Auto-Submitted': 'auto-generated' },
+  });
+  return r.messageId || '';
+}
+async function despacharCorreos() {
+  const t = transporte(); if (!t || CFG.correo?.activo === false || correo.enviando) return 0;
+  correo.enviando = true; let n = 0;
+  try {
+    const r = await db.query(`select * from privado.correos_reclamar(20)`);
+    for (let k = 0; k < r.rows.length; k++) {
+      const x = r.rows[k];
+      try {
+        const id = await enviarUno(t, { nombre: x.ed_nombre, email: x.ed_email }, x);
+        await db.query(`select privado.correos_resultado($1, true, null, $2)`, [x.id, id]);
+        n++; correo.ultimo = new Date().toISOString(); correo.error = '';
+      } catch (e) {
+        const msg = String(e.message || e).slice(0, 500);
+        // Si el servidor rechaza la cuenta o no responde, se detiene la ronda sin contar el intento a cada correo
+        const deCuenta = ['EAUTH', 'ECONNECTION', 'ETIMEDOUT', 'ESOCKET', 'EDNS', 'ECONNREFUSED'].includes(e.code);
+        correo.error = msg;
+        if (deCuenta) {
+          log('correo:', msg); correo.transporte = null;
+          for (const y of r.rows.slice(k)) await db.query(`select privado.correos_resultado($1, false, $2, null, true)`, [y.id, msg]);
+          break;
+        }
+        await db.query(`select privado.correos_resultado($1, false, $2)`, [x.id, msg]);
+      }
+    }
+  } finally { correo.enviando = false; }
+  if (n) difundir();
+  return n;
+}
+async function probarCorreo(uid, para) {
+  const t = transporte(); if (!t) throw new Fallo('Primero configura la cuenta de correo');
+  const r = await db.query(`select a.email, e.nombre, e.email as ed_email from auth.users a join public.usuarios u on u.id = a.id left join public.edificios e on e.id = u.edificio_id where a.id = $1`, [uid]);
+  const destino = String(para || r.rows[0]?.email || '').trim();
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(destino)) throw new Fallo('Indica un correo de destino');
+  try { await t.verify(); await enviarUno(t, { nombre: r.rows[0]?.nombre || 'Mi Edificio', email: r.rows[0]?.ed_email || '' }, { para: destino, nombre: '', asunto: 'Prueba de correo de Mi Edificio', texto: 'Si recibiste este mensaje, el envío de correos está bien configurado.' }); }
+  catch (e) { correo.transporte = null; correo.error = String(e.message || e).slice(0, 500); throw new Fallo('No se pudo enviar: ' + correo.error + (e.code === 'EAUTH' ? '. Revisa el usuario y la contraseña (en Gmail y Outlook se usa una contraseña de aplicación).' : '')); }
+  correo.error = ''; correo.ultimo = new Date().toISOString();
+  setTimeout(() => despacharCorreos().catch(e => log('correo:', e.message)), 100);
+  return destino;
+}
+setInterval(() => despacharCorreos().catch(e => log('correo:', e.message)), 60000).unref();
 
 // ---------------------------------------------------------------------
 // HTTP
@@ -628,6 +716,15 @@ async function api(req, res, url) {
     else if (ruta === '/api/respaldo/ahora') { if (!estadoRespaldo().configurado) throw new Fallo('Primero configura la carpeta y la contraseña del respaldo'); await respaldarNube(); }
     else if (ruta !== '/api/respaldo/estado') throw new Fallo('No encontrado', 404);
     return responder(res, 200, { data: estadoRespaldo() });
+  }
+  if (ruta.startsWith('/api/correo/')) {   // solo administración
+    const adm = await como(uid, tx => tx.query(`select public.es_admin() as ok`)); if (!adm.rows[0]?.ok) throw new Fallo('Solo la administración puede configurar el correo', 403);
+    let enviado = null;
+    if (ruta === '/api/correo/configurar') configurarCorreo(cuerpo);
+    else if (ruta === '/api/correo/probar') enviado = await probarCorreo(uid, cuerpo.para);
+    else if (ruta === '/api/correo/enviar') await despacharCorreos();
+    else if (ruta !== '/api/correo/estado') throw new Fallo('No encontrado', 404);
+    return responder(res, 200, { data: { ...estadoCorreo(), enviado } });
   }
   throw new Fallo('No encontrado', 404);
 }

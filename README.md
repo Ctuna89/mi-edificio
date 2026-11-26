@@ -11,10 +11,12 @@ Se instala **en un computador del propio edificio**: un solo programa sirve la a
 | ![Inicio de la administración](docs/capturas/inicio-administracion.png) | ![Estado económico y morosidad](docs/capturas/finanzas-estado.png) |
 | ![Votación de asamblea por alícuota](docs/capturas/votacion-asamblea.png) | ![Estacionamientos de visita](docs/capturas/estacionamientos.png) |
 | ![Flujo de caja](docs/capturas/finanzas-caja.png) | ![Reservas con horas bloqueadas](docs/capturas/reservas-bloqueo.png) |
+| ![Prorrateo con consumos de calefacción y agua caliente](docs/capturas/gasto-prorrateo.png) | ![Lecturas de medidores](docs/capturas/lecturas.png) |
+| ![Fondos de reserva y mantención](docs/capturas/fondos.png) | |
 
 En el teléfono de un residente:
 
-<img src="docs/capturas/inicio-residente.png" width="260" alt="Inicio del residente"> <img src="docs/capturas/residente-estado-cuenta.png" width="260" alt="Estado de cuenta del residente">
+<img src="docs/capturas/inicio-residente.png" width="260" alt="Inicio del residente"> <img src="docs/capturas/residente-estado-cuenta.png" width="260" alt="Estado de cuenta del residente"> <img src="docs/capturas/residente-desglose.png" width="260" alt="Desglose del gasto común con el consumo de la unidad">
 
 Las capturas son de un edificio de demostración con datos inventados.
 
@@ -173,13 +175,23 @@ Límites: está pensada para un edificio. La base de datos atiende una consulta 
 
 | Módulo | Residente / Propietario | Conserje | Comité | Admin | Empresa mantención |
 |---|---|---|---|---|---|
-| Gastos comunes (desglose, prorrateo, estado de pago, PDF/Excel) | ve y descarga su aviso de cobro | – | ve todo y exporta | edita, registra pagos, exporta | – |
-| Finanzas: pagos, morosidad, convenios y flujo de caja | ve su estado de cuenta, acepta convenios | – | ve todo | registra pagos, propone convenios, anota egresos | – |
+| Gastos comunes (desglose, prorrateo por alícuota o consumo, PDF/Excel) | ve su aviso de cobro con sus consumos | – | ve todo y exporta | edita, registra pagos, exporta | – |
+| Lecturas de medidores (agua caliente, calefacción, gas…) | ve las suyas en su desglose | ingresa | ve | configura, ingresa | – |
+| Suspensión de luz por morosidad (con resguardos legales) | ve el aviso previo; declara condiciones especiales | consulta condiciones especiales en emergencias | aprueba cada unidad | propone, avisa, solicita y repone | – |
+| Asambleas: citación, poderes, quórum, votaciones y acta | da poderes, registra su asistencia y vota | – | convoca y conduce la mesa | convoca y conduce la mesa | – |
+| Registro de copropietarios, arrendatarios y ocupantes | el propietario informa cambios y confirma cada año | – | ve todo | mantiene el registro | – |
+| Seguros: pólizas del edificio y documentos de cada unidad | el propietario sube los de su unidad | – | ve todo | gestiona pólizas y revisa documentos | – |
+| Multas con debido proceso (cargos, descargos, resolución) | ve los casos de su unidad y presenta descargos | abre casos | aprueba multas, abre casos | formula cargos, resuelve, configura el catálogo | – |
+| Finanzas: pagos, morosidad, convenios, cargos, fondos y flujo de caja | ve su estado de cuenta y los saldos de los fondos, acepta convenios | – | ve todo | registra pagos, cargos y usos de fondos, propone convenios, anota egresos | – |
 | Reservas de áreas comunes | reserva / cancela | ve agenda | aprueba | aprueba, configura | – |
 | Incidencias con fotos | reporta, cierra las suyas | gestiona, se asigna | gestiona | gestiona, crea OT | ve las ligadas a sus OT |
 | Mensajes (canales conserjería / comité / administración) | chat por canal | canal conserjería | canal comité | todos | – |
 | Comunicados | lee | lee | publica | publica | lee |
 | Encuestas y votaciones de asamblea | vota, ve resultados | – | crea, cierra, ve totales | crea, cierra, ve totales | – |
+| Emergencias: plan, teléfonos, responsables y simulacros | ve el plan y declara condiciones | ve, consulta condiciones especiales | edita responsables y simulacros | edita todo | – |
+| Proveedores, contratos y certificaciones | – | ve teléfonos en Emergencias | ve | gestiona | – |
+| Libro de novedades y turnos | – | anota, inicia y entrega turnos | lee | lee, anota | – |
+| Fichas de unidades: vehículos, mascotas, bodegas | registra los de su unidad (en Mi cuenta) | busca | busca | busca, asigna bodegas y estacionamientos | – |
 | Documentos (reglamento, actas, balances) | lee | lee | sube | sube | – |
 | Encomiendas | ve las suyas | registra / entrega | – | registra / entrega | – |
 | Visitas con QR | anuncia y comparte el QR | escanea, registra ingreso/salida | – | escanea, registra | – |
@@ -190,15 +202,134 @@ Límites: está pensada para un edificio. La base de datos atiende una consulta 
 
 La seguridad está en la base de datos (permisos por rol y reglas en `schema.sql`), no en el navegador: aunque alguien modifique el JS, solo puede leer y escribir lo que su rol permite.
 
+## Cálculo de los gastos comunes
+
+Cada período tiene sus ítems (remuneraciones, agua, calefacción…) y **cada ítem dice cómo se reparte**:
+
+- **Por alícuota**: lo normal. Cada unidad paga según su alícuota (Administración → Unidades).
+- **En partes iguales** entre todas las unidades.
+- **Según consumo**: con las lecturas de un medidor individual (agua caliente, calefacción, gas, lo que tenga el edificio). Se puede indicar un **% fijo por alícuota** para la parte que no depende del consumo (pérdidas de la caldera, mantención del equipo, áreas comunes); el resto se reparte en proporción al consumo de cada unidad. Ejemplo: calefacción central de $1.600.000 con 25 % fijo → $400.000 por alícuota y $1.200.000 según los kWh de cada unidad.
+- **Solo a algunas unidades**: en partes iguales entre las que se indiquen (por ejemplo, un gasto de una sola torre o piso).
+
+Cada ítem se redondea al peso y la diferencia de redondeo se asigna a las unidades con mayor fracción: **la suma de las unidades cuadra exactamente con el total**. El cobro de cada unidad guarda su desglose, que el residente ve con sus consumos y descarga en su aviso de cobro (PDF o Excel); el Excel de la administración trae el prorrateo ítem por ítem.
+
+**Lecturas de medidores.** En el módulo **Lecturas**, la administración define qué medidores tiene cada unidad y conserjería (o la administración) ingresa cada mes, por medidor, **el número que marca el medidor** de cada unidad. El consumo es la diferencia con la lectura del mes anterior, que la app toma sola (solo la primera lectura de una unidad se ingresa a mano), y **nunca puede ser negativo**: una lectura menor que la del mes pasado no se acepta. Si se corrige una lectura, el mes siguiente se actualiza solo. **Cambio de medidor**: se marca en la fila de la unidad y se indican la última lectura del medidor retirado y la inicial del nuevo (normalmente 0); el consumo del mes es (retirado − mes anterior) + (actual − inicial del nuevo), y el mes siguiente parte de la lectura del medidor nuevo. También se pueden **pegar desde Excel** (unidad y lectura). La app marca consumos en cero o muy por sobre lo típico, para revisar errores de lectura. Al guardar un período con ítems según consumo, avisa cuántas unidades tienen lectura; **no deja publicar un ítem según consumo sin lecturas**, y una vez publicado el período sus lecturas ya no se pueden cambiar (para corregir, se despublica). Una unidad sin lectura paga solo la parte fija.
+
+**Fondos.** En Finanzas → Fondos se crean el **fondo común de reserva** (la Ley de Copropiedad Inmobiliaria exige formarlo; el porcentaje lo fija el reglamento dentro del mínimo legal, confírmalo) y otros, como uno de mantención. Cada fondo tiene un aporte sugerido en % de los gastos del período y su saldo al empezar a usar la app. Al crear un período se agrega el ítem de cada fondo y **"Calcular aportes a fondos"** calcula su monto. Al publicar el período, el aporte se anota solo en el fondo (y se quita si se despublica). Para **usar un fondo** se registra en qué y cuánto, y si se quiere también el egreso en el flujo de caja; no se puede usar más que el saldo. Los ajustes (intereses del banco, diferencias) se anotan aparte. La comunidad ve los saldos.
+
+**Cargos individuales.** Multas, arriendo de espacios comunes y otros cobros a una unidad se registran en Finanzas → Cargos y **se suman al gasto común de esa unidad** en el período indicado (por defecto, el primero sin publicar; no se pueden agregar a uno publicado). El **arriendo** se carga solo al aprobarse la reserva de un espacio con costo, y se anula solo si la reserva se cancela. Desde Estacionamientos → Excedidos se puede **cursar una multa** con los datos del uso. Un cargo no se borra: se **rebaja o se anula (condonación) con un motivo**, y queda el registro de multas condonadas o rebajadas.
+
+## Asambleas
+
+En el módulo **Asambleas**, la administración o el comité crean la asamblea (ordinaria, extraordinaria de mayoría absoluta o reforzada; presencial, telemática o mixta) con su tabla, y la app acompaña cada paso:
+
+- **Citación** entre 5 y 15 días antes (configurable): aviso a copropietarios y residentes, y citación imprimible con tabla, quórum y reglas de representación.
+- **Poderes simples**: el copropietario designa a alguien para esa asamblea (con o sin cuenta en la app), lo imprime y puede revocarlo hasta que empiece.
+- **Representación del arrendatario**: si el copropietario no asiste ni da poder, lo representa el arrendatario u ocupante, salvo que el copropietario lo haya excluido en el Registro. En materias de mayoría reforzada necesita un poder.
+- **Asistencia y quórum en vivo**, ponderado por la alícuota: cada persona registra su asistencia desde la app o la mesa la registra en la sala. Ordinaria: 33 % para constituirse; extraordinaria absoluta: más del 50 %; reforzada: 66 %. Sin quórum no se puede abrir una votación.
+- **Votaciones por moción**: votan las unidades presentes y sin cuotas de gasto común impagas, desde la app o como voto presencial registrado por la mesa. El resultado se calcula con la mayoría de cada tipo (mayoría de los derechos presentes, más del 50 % o el 66 % de todos los derechos) y muestra qué votó cada unidad. Los votos no se pueden cambiar ni borrar.
+- **Acta**: al terminar, plazo de 30 días para firmarla, con aviso en el inicio; una vez firmada no se modifica. Las unidades que no asistieron se pueden llevar a un caso de multa por inasistencia (Multas), con su procedimiento.
+
+Los porcentajes de quórum y mayoría siguen la especificación de CactusOne para la Ley 21.442; confírmalos con tu reglamento. Adaptado de [CactusOne](https://github.com/Ctuna89/cactusone), con permiso de sus autores. Para consultas fuera de asamblea sigue disponible Encuestas.
+
+## Registro de copropietarios
+
+La Ley 21.442 y su reglamento (Decreto 7, arts. 5 a 7) exigen un **Registro de Copropietarios, Arrendatarios y demás Ocupantes**. En el módulo **Registro**:
+
+- Por cada unidad: copropietarios, arrendatarios y ocupantes con nombre, RUT (validado, sin guardar copia de la cédula), correo (el domicilio para citaciones y notificaciones), domicilio, si es ocupante permanente o transitorio, vigencia del arriendo y, si es una empresa, su representante legal. A los menores no se les pide RUT.
+- La administración lo mantiene. Los propietarios **informan los cambios** de su unidad desde la app (quedan por revisar) y **confirman los datos una vez al año**; la administración envía el requerimiento anual con un botón y ve qué unidades confirmaron y a cuáles les falta información.
+- Nada se borra: al vender o terminar un arriendo se registra la fecha de término y el historial queda.
+- El propietario puede declarar que su arrendatario u ocupante **no** lo representa en asambleas (por ley lo representa si el dueño no asiste ni da poder).
+- Es reservado: lo ven la administración y el comité, y cada unidad lo suyo. La exportación a Excel queda en la bitácora. El nombre de los copropietarios vigentes se usa automáticamente en el resto de la app.
+
+## Módulos activables
+
+En Administración → Edificio → **Módulos**, cada módulo opcional puede quedar activo, **solo para el personal** (para probarlo antes de abrirlo a los residentes) o **apagado**. Apagar no borra datos. Inicio, Gastos comunes, Finanzas, Administración y Mi cuenta siempre están. Es un ajuste de la interfaz: los permisos de cada dato siguen en la base de datos.
+
+## Suspensión de luz por morosidad
+
+La Ley 21.442 (art. 20 nº 9) permite suspender o pedir la suspensión del suministro eléctrico de una unidad con deuda de gastos comunes, y los tribunales han anulado cortes que no cumplieron cada requisito. En Finanzas → **Suspensión de luz** la app detecta y prepara, pero **nunca corta sola**, y la base de datos exige cada resguardo:
+
+1. Solo unidades con **3 o más cuotas de gasto común impagas** (continuas o no). No cuentan multas, otros cargos, intereses, períodos en un convenio vigente ni los períodos que se marquen como estado de catástrofe.
+2. **Nunca** una unidad donde viva una persona electrodependiente o que use oxígeno medicinal: no se puede proponer, y si se registra durante el proceso, este se cancela solo (o, si ya estaba suspendida, hay que reponer de inmediato).
+3. **Aprobación del comité** para cada unidad (por defecto, una aprobación).
+4. **Aviso previo** a la unidad con al menos **5 días corridos** (en la app y en un aviso imprimible).
+5. Recién después, y comprobando de nuevo deuda y protección, la **solicitud** a la empresa eléctrica (carta imprimible).
+6. Con pago o convenio, la **reposición a más tardar el día hábil siguiente**, con orden imprimible y alerta en el inicio. Solo electricidad: el agua nunca se corta.
+
+**Condiciones especiales.** Los residentes declaran en Mi cuenta, con consentimiento expreso, si en su unidad vive alguien electrodependiente, que usa oxígeno medicinal, con movilidad reducida o un adulto mayor que vive solo; la administración puede registrarlo con un consentimiento en papel. Es un registro reservado: lo ven la administración y la propia unidad. Conserjería lo consulta en una emergencia con el botón "🚨 Unidades con condiciones especiales", indicando el motivo, que queda en la bitácora. Revocar el consentimiento termina la condición.
+
+Adaptado de [CactusOne](https://github.com/Ctuna89/cactusone), con permiso de sus autores.
+
+## Libro de novedades y turnos
+
+La conserjería anota cada novedad (seguridad, mantención, aseo, visitas, reclamos…) con hora, unidad, foto y si es importante. **Lo anotado no se edita ni se borra**: para corregir se agrega otra anotación. Cada conserje inicia y entrega su turno: al entregar deja lo pendiente y la app agrega un resumen (encomiendas por entregar, visitas dentro, estacionamientos ocupados, incidencias abiertas). Quien llega lee la entrega y las novedades importantes antes de "recibir el turno", y queda registrado. El libro se filtra, se busca y se descarga en Excel; la administración y el comité lo leen y ven en su inicio las novedades importantes del último día. Tiene su propio plazo de conservación.
+
+![Libro de novedades](docs/capturas/novedades.png)
+
+## Fichas de las unidades
+
+Cada unidad registra en Mi cuenta sus **vehículos** (la patente se guarda en un solo formato) y **mascotas** (con foto y microchip); la administración asigna **bodegas y estacionamientos** (un número no se puede asignar a dos unidades). En el módulo Unidades, la conserjería, el comité y la administración buscan por unidad, propietario, patente, nombre de mascota o número de bodega, por ejemplo para ubicar un auto mal estacionado o una mascota perdida. Las otras unidades no ven estos datos.
+
+## Emergencias
+
+- **Plan de emergencia**: teléfonos de emergencia (Bomberos, SAMU, Carabineros, PDI y los que agregue la administración), punto de encuentro, instrucciones breves y el documento completo del plan, a la vista de toda la comunidad. Un resumen se imprime para tenerlo en conserjería.
+- **Responsables** por piso o sector (jefe de emergencia, líderes de piso, primeros auxilios…), con su teléfono solo si lo autorizan.
+- **Personas que necesitan ayuda para evacuar**: la conserjería y la administración consultan las unidades con condiciones especiales (movilidad reducida, oxígeno, electrodependencia, adultos mayores solos), declaradas con consentimiento; cada consulta queda registrada.
+- **Simulacros** con fecha, participantes, tiempo de evacuación y observaciones. El inicio avisa si falta el plan o si pasó más de un año sin simulacro.
+- Los teléfonos de los proveedores (ascensores, gas…) aparecen para el personal.
+
+![Emergencias](docs/capturas/emergencia.png)
+
+## Proveedores y contratos
+
+Ficha de cada proveedor y sus contratos, certificaciones (ascensores, gas…), mantenciones periódicas, garantías y permisos, con documento, monto, periodicidad y vencimiento. La administración y el comité reciben un aviso los días antes que se elijan, a 7 días y el día del vencimiento, y el inicio muestra lo vencido y por vencer. "Renovar" cierra el período y abre el siguiente. Muestra también el costo mensual comprometido.
+
+## Seguros
+
+- **Pólizas del edificio**: incendio colectivo (obligatoria por la Ley 21.442, art. 43), responsabilidad civil y otras, con aseguradora, número, coberturas, montos, vigencia y el PDF. Si falta una póliza vigente de un tipo obligatorio, aparece una alerta roja en el inicio de administración y comité; los tipos obligatorios se eligen en Seguros → Ajustes. Se avisa a los 60, 30 y 15 días del vencimiento y cada día de la última semana. Cada póliza guarda sus **siniestros** (reclamado, pagado, estado) y las pólizas anteriores.
+- **Documentos de cada unidad**: los propietarios suben su póliza de incendio y sismo, el certificado de dominio u otros, con su vencimiento. La administración los acepta o rechaza con motivo, y ve el % de unidades con póliza vigente acreditada. Al propietario se le avisa 30 días antes de que venza su póliza. Si la póliza colectiva cubre también las unidades, se indica y acreditar una propia es opcional.
+
+Adaptado de [CactusOne](https://github.com/Ctuna89/cactusone), con permiso de sus autores.
+
+## Multas con debido proceso
+
+Una multa no se cobra directo: pasa por un caso con su expediente, que nadie puede borrar.
+
+1. **Apertura**: conserjería, el comité o la administración abren un caso con lo constatado y fotos de evidencia (también desde Estacionamientos → Excedidos). Abrir un caso no es multar.
+2. **Cargos**: la administración elige la conducta del **catálogo** (solo se aplican multas del catálogo, en UTM o UF) y la unidad. La notificación de cargos parte de un borrador con los hechos. Si la conducta exige evidencia mínima (por ejemplo, denuncia de dos unidades), hay que confirmarla. La unidad recibe el aviso y puede verlo en la app; la notificación también se imprime para entregarla en papel.
+3. **Descargos**: la unidad los presenta en la app dentro del plazo (por defecto 5 días hábiles, sin fines de semana ni feriados), o la administración registra los entregados por escrito.
+4. **Resolución fundada**: recién con descargos o con el plazo vencido, la administración absuelve o sanciona, indicando los antecedentes considerados. Si la unidad fue sancionada por la misma conducta en los 6 meses anteriores, se propone la categoría superior o el doble.
+5. **Comité**: si así se configura (por defecto, una aprobación), la multa espera la aprobación del comité; si la rechaza, vuelve a la administración.
+6. **Cobro**: se convierte a pesos con la UTM o UF vigente y queda como cargo en el próximo gasto común abierto de la unidad. Lo cobrado va al **fondo de reserva** (configurable). Las conductas permanentes (obras no autorizadas, por ejemplo) se repiten cada mes hasta que se restituya. Las que corresponden al Juzgado de Policía Local se derivan, no se multan.
+
+En **Multas → Catálogo y ajustes** se cargan las conductas (hay un catálogo de ejemplo basado en el borrador del reglamento de Los Cactus, que hay que ajustar al propio), los valores de UTM y UF, los plazos, las aprobaciones del comité y los feriados. Ningún plazo ni monto está fijo en el código.
+
+Este módulo está adaptado de [CactusOne](https://github.com/Ctuna89/cactusone), con permiso de sus autores.
+
 ## Pagos, convenios y flujo de caja
 
 **Pagos.** No hay pago en línea: la administración registra cada pago al recibirlo (Finanzas → Pagos, o el botón "Registrar pago" de la unidad). Se indica a qué se aplica, el monto, la fecha, el medio y el comprobante. Puede ser un abono parcial; el cobro queda pagado cuando los abonos completan su monto. Un pago no se edita ni se borra: se anula con un motivo y queda en el historial.
+
+**Comprobantes.** Cada pago tiene un comprobante numerado que la unidad y la administración imprimen desde el pago, y que también llega por correo (ver [Correo](#correo)).
+
+**Certificados de deuda.** En Finanzas → Certificados la administración emite el certificado de deuda o de no deuda de una unidad, con folio correlativo, el detalle de los períodos con saldo, intereses y convenios, y para qué se pide. Queda registrado y la unidad lo ve e imprime en su estado de cuenta.
 
 **Convenios de pago.** Para una unidad morosa, la administración elige los cobros atrasados, el número de cuotas mensuales y la fecha de la primera. El convenio queda *propuesto* hasta que alguien de la unidad lo acepta en la app (o la administración registra la aceptación, si se firmó en papel). Mientras está vigente y al día, esos cobros no cuentan como vencidos. Lo que se abona al convenio salda las cuotas en orden y los períodos del más antiguo al más nuevo. Si se anula, lo abonado se conserva y el resto vuelve a ser deuda corriente. El total es la deuda de los cobros incluidos: no calcula intereses ni multas.
 
 **Estado económico.** La administración y el comité ven en Finanzas → Estado lo por cobrar, lo vencido, lo que está en convenio, cuántas unidades están morosas, lo recaudado en el mes y la lista de unidades con deuda. Cada residente ve en Gastos comunes el estado de cuenta de su unidad.
 
 **Interés por mora.** En Administración → Edificio se define la tasa mensual (0 = no se cobra) y, si se quiere, desde qué fecha se cuenta. Es interés simple, calculado por día (tasa ÷ 30) sobre el saldo impago de cada cobro vencido; cada abono reduce la base desde su fecha. Se muestra aparte de la deuda, a la administración, al comité y a la unidad. Se paga desde "Registrar pago" eligiendo *Interés por mora*, o se perdona con el medio *Condonación*, que queda en el historial y no entra al flujo de caja. Al pagarse el capital, el interés de ese cobro queda fijo; mientras un cobro está en un convenio, deja de sumar. Cambiar la tasa recalcula las deudas pendientes, no los cobros ya pagados. **La app no sabe cuál es la tasa máxima legal ni la de tu reglamento de copropiedad: confírmala antes de activarla.**
+
+**Cartola bancaria.** En Finanzas → Banco se importa la cartola descargada del banco (Excel .xlsx o CSV, o las filas copiadas y pegadas). La app reconoce las columnas de fecha, descripción, cargos y abonos, omite títulos y totales, y no duplica movimientos si se importa dos veces. Para cada abono sugiere la unidad que pagó: por el RUT del Registro de copropietarios, la unidad mencionada en la transferencia, el nombre, el monto o porque ya conoce a ese pagador. Al confirmar se registran los pagos (primero los cobros más antiguos, después el convenio y los intereses), se envía un solo comprobante y, si sobra, queda como saldo a favor en el flujo de caja. Los cargos (pagos a proveedores, comisiones) se pasan al flujo de caja como egresos con su categoría. Todo se puede deshacer. Los .xls antiguos no se leen: se guardan como .xlsx o se copian y pegan.
+
+![Conciliación de la cartola bancaria](docs/capturas/banco.png)
+
+**Presupuesto.** En Finanzas → Presupuesto la administración define el presupuesto anual por categoría, con un monto por mes (puede partir del promedio gastado el año anterior). La app lo compara con los ítems de los gastos comunes publicados, mes a mes y en el año. La comunidad lo puede ver.
+
+![Presupuesto contra gasto real](docs/capturas/presupuesto.png)
+
+**Rendición de cuentas.** Finanzas → Rendición arma, para cada mes, el informe para la comunidad y el comité: gastos del período y su recaudación, ingresos y egresos con el saldo de caja, fondos, morosidad, presupuesto y estado de la conciliación bancaria; se imprime con espacio para las firmas.
 
 **Flujo de caja.** Finanzas → Flujo de caja muestra, por mes y con totales del año, los ingresos por gastos comunes (tomados de los pagos registrados), otros ingresos, egresos, flujo neto y saldo acumulado; se exporta a Excel. Los egresos y otros ingresos los anota la administración; para partir con la caja real, anota un ingreso de categoría "Saldo inicial". Los ítems de un período de gastos comunes son lo que se cobra, no egresos: no entran solos al flujo.
 
@@ -239,6 +370,22 @@ Avisos en el teléfono o computador cuando llega una encomienda o una visita, ha
 
 Requieren que la app esté publicada con HTTPS (paso 2) y que el computador del edificio tenga internet. En iPhone/iPad solo funcionan con la app agregada a la pantalla de inicio (iOS 16.4 o superior). El envío real a teléfonos no está probado por el proyecto.
 
+## Correo
+
+La app envía sola por correo los **avisos de cobro**: al publicar el gasto común, a cada unidad su monto, el vencimiento, el saldo anterior y los datos para transferir; un recordatorio antes del vencimiento y un aviso de atraso (una vez por período, solo a unidades con saldo y fuera de convenio, con los días que elija la administración); y un comprobante por cada pago registrado. Se activan o apagan en la misma tarjeta. Al actualizar, los períodos ya publicados no se reenvían.
+
+También envía las **notificaciones formales**: cargos y resoluciones de multas, aviso previo y reposición de la suspensión de luz, citaciones a asamblea, el requerimiento anual del Registro de copropietarios y las respuestas a solicitudes sobre datos personales. Cada correo va al correo de la unidad en el Registro de copropietarios (el domicilio para notificaciones) y a las cuentas de la app de esa unidad, sin repetir a nadie, y sale a nombre del edificio. La administración ve cada envío con su fecha y estado, puede abrirlo, y reintentar o descartar los que fallen. Los envíos fallidos se reintentan solos, con esperas crecientes.
+
+Se configura en **Administración → Edificio → Correo**, con una cuenta creada para el edificio:
+
+- **Gmail**: activa la verificación en 2 pasos y crea una *contraseña de aplicación* (Cuenta de Google → Seguridad → Contraseñas de aplicaciones). Gmail gratuito permite unos 500 correos al día.
+- **Outlook / Microsoft 365**: igual, con una contraseña de aplicación. Algunas cuentas de empresa tienen el SMTP desactivado.
+- **Otro**: el servidor SMTP del dominio del edificio (puerto 587 con STARTTLS o 465 con TLS).
+
+El botón "Enviar correo de prueba" confirma que funciona. La contraseña queda solo en `config.json` del computador del edificio y no vuelve a mostrarse. Si en **Datos del edificio** hay un correo distinto, las respuestas llegan ahí. En la instalación con Supabase se envían con una Edge Function que se configura una vez (paso 4 de [Instalación alternativa: Supabase](#instalación-alternativa-supabase)); mientras no esté, los correos quedan en la misma lista para abrirlos y enviarlos a mano. El envío por Gmail u Outlook reales no está probado por el proyecto (sí con un servidor SMTP de prueba).
+
+![Correo: cuenta conectada y constancia de envíos](docs/capturas/correo.png)
+
 ## Fotos y archivos
 
 Se guardan en `local/datos/archivos`. Nadie puede abrirlos sin sesión: la app pide al servidor un enlace firmado que dura 1 hora, y el servidor solo lo entrega a quien puede leer ese archivo según su rol (por ejemplo, la foto de una encomienda la ven conserjería, administración y la unidad destinataria). Las imágenes se comprimen en el navegador a 1280 px antes de subir; el máximo por archivo es 15 MB.
@@ -261,11 +408,14 @@ Lo que la app ya trae para cumplir:
 
 | Obligación | Cómo se cubre |
 |---|---|
-| Informar al titular | Aviso de privacidad del edificio (Administración → Edificio), mostrado y aceptado al registrarse y disponible en Mi cuenta. Se guarda la fecha de aceptación. |
+| Informar al titular | Aviso de privacidad del edificio (Administración → Edificio), mostrado y aceptado al registrarse. Queda como **consentimiento** con la fecha y el texto exacto aceptado, visible en Mi cuenta → Lo que aceptaste. |
+| Ejercer derechos | Mi cuenta → **Ejercer tus derechos**: acceso, rectificación, supresión, oposición, portabilidad o bloqueo. La administración las ve en Administración → Datos personales con su plazo de 30 días corridos, y la persona recibe la respuesta en la app. |
+| Minimizar quién ve qué | El teléfono de cada persona lo ven ella y la administración. Conserjería y comité lo consultan con el botón "📞 Teléfono de una unidad" indicando un motivo. |
+| Registro de accesos y cambios | **Bitácora de auditoría** (Administración → Datos personales): quién creó, cambió, borró o consultó datos personales o de dinero, con su motivo. No se puede modificar; se exporta a Excel. Los votos no se registran, para no romper el secreto de los sondeos. Al eliminar una cuenta se borran sus datos también de la bitácora. |
 | Acceso y portabilidad | Mi cuenta → **Descargar mis datos** (JSON). |
 | Rectificación | Cada persona edita su nombre y teléfono; unidad y rol los corrige la administración. |
 | Supresión | Mi cuenta → **Eliminar mi cuenta**: borra nombre, teléfono y unidad y bloquea el acceso. |
-| Conservación limitada | Administración → Edificio → **Conservación de datos**: la administración fija cuántos meses se guardan visitas, rondas, encomiendas entregadas, mensajes, reservas, incidencias cerradas y uso de estacionamientos. Lo que supera el plazo se borra a diario, con sus fotos. |
+| Conservación limitada | Administración → Edificio → **Conservación de datos** (también la bitácora, con la clave `auditoria`): la administración fija cuántos meses se guardan visitas, rondas, encomiendas entregadas, mensajes, reservas, incidencias cerradas y uso de estacionamientos. Lo que supera el plazo se borra a diario, con sus fotos. |
 | Seguridad y mínimo acceso | Permisos por rol; cada unidad ve solo sus cobros, encomiendas, visitas y voto. |
 
 Lo que debe resolver cada comunidad (no lo hace el software):
@@ -284,6 +434,7 @@ La misma app puede funcionar sobre un proyecto de [Supabase](https://supabase.co
 1. Crea un proyecto, ejecuta `supabase/schema.sql` completo en el SQL Editor y habilita el proveedor *Email* en Authentication.
 2. Copia *Project URL* y *anon public key* en `web/config.js` y sube la carpeta `web/` a un hosting estático (Vercel, Netlify, Cloudflare Pages).
 3. Para notificaciones push: genera claves VAPID (`npx web-push generate-vapid-keys`), pon la pública en `config.js`, despliega `supabase/functions/push` con sus secretos (`VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT`, `PUSH_SECRET`) e indica su URL y secreto en la tabla `plataforma` (`push_url`, `push_secret`). Activa las extensiones `pg_net` y `pg_cron`.
+4. Para enviar correos: despliega `supabase/functions/correos` (`supabase functions deploy correos --no-verify-jwt`) con los secretos `CORREO_SECRET` (un valor largo al azar), `CORREO_REMITENTE` y, para enviar, **o** `SMTP_HOST`, `SMTP_USER`, `SMTP_PASS` (puerto 465, por ejemplo Gmail con contraseña de aplicación: Supabase bloquea los puertos 25 y 587) **o** `RESEND_API_KEY` de [Resend](https://resend.com). Después indica su URL y el mismo secreto en la tabla `plataforma` (`correo_url`, `correo_secret`). pg_cron la llama cada minuto si hay correos pendientes. La prueba de la función está en `supabase/functions/correos/prueba.mjs` (necesita Deno); el envío por Resend no está probado.
 
 Este modo comparte el esquema y sus pruebas con el modo local, pero **nunca se ha desplegado en un proyecto Supabase real**. Si tu Supabase es autoalojado, agrega su dominio en la política `connect-src` de `web/index.html`.
 
@@ -309,10 +460,11 @@ La versión vigente está en el archivo [`VERSION`](VERSION) y los cambios de ca
 
 ## Próximos pasos sugeridos
 
-1. Probarla en un edificio real, con túnel y notificaciones en teléfonos.
+1. Probarla en un edificio real, con túnel, notificaciones en teléfonos y correo con Gmail u Outlook reales.
 2. Firmar el instalador de Windows y dejar el servidor como servicio, para que parta sin iniciar sesión.
 3. Respaldo con inicio de sesión directo en Google Drive o OneDrive, sin instalar su aplicación.
-4. Pagos en línea e intereses por mora.
+4. Pagos en línea (Khipu, Flow o Webpay).
+5. Remuneraciones del personal (liquidaciones y Previred).
 
 ## Contribuir
 

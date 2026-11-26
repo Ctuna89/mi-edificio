@@ -1,5 +1,35 @@
 # Cambios
 
+## 0.3.0 — 2026-11-26
+
+- **Libro de novedades** de conserjería que no se puede editar ni borrar, con turnos: entrega con pendientes y resumen automático, y recepción registrada.
+- **Fichas de las unidades**: vehículos y mascotas registrados por cada unidad, bodegas y estacionamientos asignados por la administración, con buscador para conserjería.
+- **Emergencias**: plan con teléfonos, punto de encuentro, instrucciones y documento; responsables por zona; consulta registrada de quienes necesitan ayuda para evacuar; simulacros; resumen imprimible.
+- **Proveedores y contratos**: contratos, certificaciones, mantenciones y garantías con vencimiento, aviso configurable, renovación y costo mensual comprometido.
+- **Cartola bancaria**: importación desde Excel o CSV, unidad sugerida por RUT, unidad mencionada, nombre, monto o pagador conocido; al confirmar se registran los pagos con un solo comprobante; los cargos pasan al flujo de caja; sin duplicados y con deshacer.
+- **Presupuesto anual** por categoría y mes, comparado con lo gastado.
+- **Rendición de cuentas mensual** imprimible: gastos, caja, fondos, morosidad, presupuesto y conciliación.
+- **Correo en la instalación con Supabase**: Edge Function `correos` que envía la cola por SMTP (puerto 465) o Resend, llamada cada minuto por pg_cron.
+- **Avisos de cobro por correo**: al publicar el gasto común, a cada unidad su monto, vencimiento y saldo anterior; recordatorio antes del vencimiento y aviso de atraso configurables; comprobante por cada pago.
+- **Comprobante de pago** imprimible con número, para la unidad y la administración.
+- **Certificados de deuda o de no deuda** con folio correlativo y detalle, emitidos por la administración y visibles para la unidad.
+- **Envío de correos** (instalación local): la administración conecta una cuenta de Gmail, Outlook o el correo del edificio y la app envía sola las notificaciones formales (multas, suspensión de luz, citaciones a asamblea, registro de copropietarios, solicitudes de datos), con constancia de cada envío, reintentos y correo de prueba.
+- **Asambleas** (adaptado de CactusOne): citación con plazo, poderes simples revocables, representación del arrendatario, asistencia y quórum en vivo ponderado por alícuota, votaciones por moción con la mayoría de cada tipo de sesión (solo unidades hábiles), votos inmodificables, acta con plazo de firma y casos por inasistencia.
+- **Registro de copropietarios, arrendatarios y ocupantes** (Ley 21.442 y Decreto 7; adaptado de CactusOne): RUT validado, correo para notificaciones, permanencia y arriendo; los propietarios informan cambios y confirman cada año; requerimiento anual, panel de faltantes, exportación registrada y declaración de representación en asambleas.
+- **Módulos activables**: cada módulo opcional puede estar activo, solo para el personal o apagado.
+- **Suspensión de luz por morosidad** (adaptado de CactusOne): solo con 3 o más cuotas de gasto común impagas, nunca a unidades con electrodependientes u oxígeno medicinal, con aprobación del comité, aviso previo de 5 días corridos y reposición al día hábil siguiente del pago o convenio; avisos y cartas imprimibles. **Registro reservado de condiciones especiales** con consentimiento expreso, consultable por conserjería en emergencias con motivo registrado.
+- **Seguros** (adaptado de CactusOne): pólizas del edificio con alerta si falta la de incendio obligatoria, avisos a 60, 30 y 15 días y cada día la última semana, y registro de siniestros; documentos de cada unidad (póliza propia, certificado de dominio) revisados por la administración, con panel de cumplimiento y aviso al propietario 30 días antes del vencimiento.
+- **Ley 21.719 de datos personales** (adaptado de CactusOne): bitácora de auditoría que no se puede modificar, teléfonos visibles solo para la persona y la administración (conserjería y comité los consultan con un motivo registrado), consentimientos con el texto aceptado, y solicitudes de acceso, rectificación, supresión, oposición, portabilidad o bloqueo con plazo de 30 días.
+- **Multas con debido proceso** (adaptado de CactusOne): catálogo de conductas en UTM o UF, caso con evidencia, notificación de cargos, descargos en días hábiles, resolución fundada, aprobación del comité, reincidencia, infracciones permanentes y derivación al Juzgado de Policía Local. Lo cobrado va al fondo de reserva. Las multas ya no se pueden cargar a mano.
+- **Reparto por ítem**: cada ítem del gasto común se reparte por alícuota, en partes iguales, según consumo (con un % fijo opcional por alícuota) o solo entre algunas unidades. La suma cuadra al peso.
+- **Lecturas de medidores**: agua caliente, calefacción, gas u otros. Cada mes se anota lo que marca el medidor y el consumo es la diferencia con el mes anterior (nunca negativo). Cambio de medidor: consumo = (última del retirado − mes anterior) + (actual − inicial del nuevo). Conserjería y administración las ingresan o pegan desde Excel; la app avisa consumos raros y faltantes, y bloquea las lecturas de un período publicado.
+- **Fondos**: fondo de reserva, mantención y otros, con aporte sugerido en %, aportes automáticos al publicar el período, usos (con egreso en el flujo de caja) y ajustes. La comunidad ve los saldos.
+- **Cargos individuales**: multas, arriendo de espacios comunes y otros cobros que se suman al gasto común de la unidad. El arriendo se carga solo al aprobarse una reserva con costo. Rebajas y condonaciones con motivo.
+- El residente ve el desglose de su cobro con sus consumos y cargos; el Excel del período trae el prorrateo ítem por ítem.
+- **Inicio según el rol**: el residente ve de entrada su gasto común del mes (monto, vencimiento, estado y deuda anterior) y lo que tiene pendiente; administración, comité y conserjería ven lo que requiere su atención (solicitudes, reservas por aprobar, morosidad, borradores, lecturas faltantes, encomiendas, estacionamientos excedidos…) con enlace directo.
+- **Montos y decimales a la chilena** en los formularios: punto de miles al escribir montos y coma decimal en alícuotas, tasas y lecturas. Los períodos se eligen con los meses escritos en español.
+- **Accesibilidad**: texto secundario más oscuro (cumple contraste AA) y más grande, botones y campos de al menos 44 px en pantallas táctiles, y acciones como anular o rebajar convertidas en botones.
+
 ## 0.2.1 — 2026-11-23
 
 - **Votaciones de asamblea**: al crear una encuesta se elige si es un sondeo (un voto por unidad, secreto) o materia de asamblea, donde el voto pesa según la alícuota y se ve qué votó cada unidad. Detalle descargable en Excel.
