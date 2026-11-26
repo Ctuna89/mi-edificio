@@ -161,6 +161,7 @@ const MODULES = [
   {id:'visitas', ic:'🚪', t:'Visitas', d:'Anunciar y registrar', roles:['residente','propietario','conserje','admin']},
   {id:'estacionamientos', ic:'🅿️', t:'Estacionamientos', d:'Visitas: ocupación y tiempos', roles:['conserje','comite','admin']},
   {id:'lecturas', ic:'🔢', t:'Lecturas', d:'Medidores de agua caliente, calefacción…', roles:['conserje','comite','admin']},
+  {id:'seguros', ic:'🛡️', t:'Seguros', d:'Pólizas del edificio y de cada unidad', roles:['propietario','comite','admin']},
   {id:'multas', ic:'⚖️', t:'Multas', d:'Casos de infracción: cargos, descargos y resolución', roles:['residente','propietario','conserje','comite','admin']},
   {id:'documentos', ic:'📁', t:'Documentos', d:'Reglamento, actas, balances', roles:['residente','propietario','conserje','comite','admin']},
   {id:'rondas', ic:'📍', t:'Rondas', d:'Checkpoints NFC y bitácora', roles:['conserje','comite','admin']},
@@ -361,12 +362,14 @@ function inicioEstado(r){
   const lecturasFaltan=async per=>{ if(!mds.length) return []; const l=await q(T('lecturas').select('medidor,depto').eq('periodo',per)).catch(()=>[]); return mds.map(md=>({md, n:l.filter(x=>x.medidor===md.id&&S.unidades[x.depto]).length})).filter(x=>x.n<nU()); };
   if(['residente','propietario'].includes(r)){
     if(!dep) return;
-    watch(['gastos','gasto_unidades','pagos','convenios','encomiendas','conversaciones','encuestas','votos','reservas','infracciones'], async()=>{
-      const [D,enc,msj,encs,votos,res,infs]=await Promise.all([finDatos(dep).catch(()=>null), cuenta(q(T('encomiendas').select('id').eq('depto',dep).eq('entregado',false))), cuenta(q(T('conversaciones').select('id').eq('depto',dep).eq('no_leido_residente',true))),
+    watch(['gastos','gasto_unidades','pagos','convenios','encomiendas','conversaciones','encuestas','votos','reservas','infracciones','unidad_documentos'], async()=>{
+      const [D,enc,msj,encs,votos,res,infs,udocs]=await Promise.all([finDatos(dep).catch(()=>null), cuenta(q(T('encomiendas').select('id').eq('depto',dep).eq('entregado',false))), cuenta(q(T('conversaciones').select('id').eq('depto',dep).eq('no_leido_residente',true))),
         q(T('encuestas').select('id,cierra,solo_propietarios').eq('estado','abierta')).catch(()=>[]), q(T('votos').select('encuesta_id').eq('depto',dep)).catch(()=>[]),
-        q(T('reservas').select('*').eq('depto',dep).gte('fecha',hoy).order('fecha',{ascending:true})).catch(()=>[]), q(T('infracciones').select('id,estado,descargos_hasta,descargos_at')).catch(()=>[])]);
-      return {D,enc,msj,encs,votos,res,infs}; },
-    ({D,enc,msj,encs,votos,res,infs})=>{ const el=$('#homeEstado'); if(!el) return;
+        q(T('reservas').select('*').eq('depto',dep).gte('fecha',hoy).order('fecha',{ascending:true})).catch(()=>[]), q(T('infracciones').select('id,estado,descargos_hasta,descargos_at')).catch(()=>[]),
+        r==='propietario'?q(T('unidad_documentos').select('*').order('ts',{ascending:false})).catch(()=>[]):[]]);
+      return {D,enc,msj,encs,votos,res,infs,udocs}; },
+    ({D,enc,msj,encs,votos,res,infs,udocs})=>{
+      const ultPol=(udocs||[]).filter(x=>x.tipo==='poliza_incendio')[0], polAviso=ultPol&&(ultPol.estado==='rechazado'||(ultPol.estado==='aceptado'&&ultPol.vence&&diasA(ultPol.vence)<=30)); const el=$('#homeEstado'); if(!el) return;
       const z=D?.U[dep], pubs=(D?.gastos||[]).filter(g=>g.publicado).sort((a,b)=>a.periodo<b.periodo?1:-1), g=pubs[0], mio=g&&z?.rows.find(x=>x.periodo===g.periodo);
       const ya=new Set(votos.map(v=>v.encuesta_id)), porVotar=encs.filter(x=>(!x.cierra||x.cierra>=hoy)&&!ya.has(x.id)&&(!x.solo_propietarios||r==='propietario')).length;
       const conv=(z?.convs||[]).filter(c=>c.estado==='propuesto').length, cargosInf=(infs||[]).filter(c=>c.estado==='cargos'&&c.descargos_hasta>=hoy&&!c.descargos_at), prox=res.filter(x=>['pendiente','aprobada'].includes(x.estado))[0];
@@ -377,14 +380,14 @@ function inicioEstado(r){
           ${otros>0?`<div class="note" style="margin:10px 0 0">Además tienes ${clp(otros)} pendientes de meses anteriores${z?.interes?' e intereses por mora':''}. Total por pagar: <b>${clp(total)}</b>.</div>`:''}
           <div class="row wrap" style="margin-top:12px;gap:8px"><a class="btn" href="#gastos">Ver desglose</a>${S.cfg?.datos_bancarios&&!mio.pagado?'<a class="btn sec" href="#gastos">Datos para transferir</a>':''}</div></div>`
         :`<div class="card resumen"><div class="small muted">Gastos comunes · Depto ${esc(dep)}</div><div style="margin-top:6px">${total>0?`Tienes ${clp(total)} por pagar. <a href="#gastos">Ver detalle</a>`:'Aún no hay un período de gastos comunes publicado.'}</div></div>`;
-      const items=[cargosInf.length?fila(cargosInf.length,cargosInf.length===1?'Notificación de cargos':'Notificaciones de cargos','#multas','er','Puedes presentar descargos hasta el '+fmtDay(cargosInf[0].descargos_hasta)):'', conv?fila(conv,'Convenio de pago por revisar','#gastos','wa','La administración te propuso un convenio'):'', enc?fila(enc,enc===1?'Encomienda por retirar':'Encomiendas por retirar','#encomiendas','in','En conserjería'):'',
+      const items=[polAviso?fila('🛡️',ultPol.estado==='rechazado'?'Tu póliza de incendio fue rechazada':'Tu póliza de incendio vence pronto','#seguros',ultPol.estado==='rechazado'?'er':'wa',ultPol.estado==='rechazado'?(ultPol.motivo||''):'Vence el '+fmtDay(ultPol.vence)+'. Sube la renovación.'):'', cargosInf.length?fila(cargosInf.length,cargosInf.length===1?'Notificación de cargos':'Notificaciones de cargos','#multas','er','Puedes presentar descargos hasta el '+fmtDay(cargosInf[0].descargos_hasta)):'', conv?fila(conv,'Convenio de pago por revisar','#gastos','wa','La administración te propuso un convenio'):'', enc?fila(enc,enc===1?'Encomienda por retirar':'Encomiendas por retirar','#encomiendas','in','En conserjería'):'',
         msj?fila(msj,msj===1?'Mensaje sin leer':'Mensajes sin leer','#mensajes','in'):'', porVotar?fila(porVotar,porVotar===1?'Votación abierta':'Votaciones abiertas','#encuestas','wa','Tu unidad aún no vota'):'',
         prox?fila('📅',`Reserva: ${prox.espacio_nombre}`,'#reservas','mu',`${fmtDay(prox.fecha)} de ${pad(prox.h_ini)}:00 a ${pad(prox.h_fin)}:00${prox.estado==='pendiente'?' · por aprobar':''}`):''].filter(Boolean);
       el.innerHTML=cobro+`<h2>Pendiente</h2><div class="list">${items.join('')||nada}</div>`; }, {silent:true});
     return;
   }
   const canal=Object.keys(canalRol).find(c=>canalRol[c]===r);
-  const tablas=['solicitudes_datos','usuarios','reservas','incidencias','conversaciones','estacionamiento_usos','gastos','gasto_unidades','pagos','convenios','lecturas','encomiendas','visitas','ot','infracciones','infraccion_votos'];
+  const tablas=['polizas','unidad_documentos','solicitudes_datos','usuarios','reservas','incidencias','conversaciones','estacionamiento_usos','gastos','gasto_unidades','pagos','convenios','lecturas','encomiendas','visitas','ot','infracciones','infraccion_votos'];
   watch(tablas, async()=>{ const L=[], add=(n,...a)=>{ if(typeof n==='string'||n>0) L.push(fila(n,...a)); };
     if(r==='mantencion'){ if(S.me.empresa_id) add(await cuenta(q(T('ot').select('id').eq('empresa_id',S.me.empresa_id).eq('estado','asignada'))),'Órdenes de trabajo asignadas','#mantencion','wa'); return L; }
     const [usu,resv,inc,msj,est,borr,enc,vis]=await Promise.all([
@@ -407,6 +410,11 @@ function inicioEstado(r){
     add(excAdm,'Estacionamientos de visita excedidos','#estacionamientos','er','Superaron el tiempo máximo');
     if(r==='conserje') add(excRes,'Visitas cerca del tiempo máximo','#estacionamientos','wa','Ya se avisó al residente');
     add(inc,'Incidencias abiertas','#incidencias','wa');
+    if(['admin','comite'].includes(r)){ const [falt,pols,udocs]=await Promise.all([q(sb.rpc('polizas_faltantes')).catch(()=>[]), q(T('polizas').select('tipo,desde,hasta')).catch(()=>[]), r==='admin'?q(T('unidad_documentos').select('estado')).catch(()=>[]):[]]);
+      (falt||[]).forEach(t=>add('!',`Sin póliza vigente: ${TIPO_POLIZA[t]||t}`,'#seguros','er',t==='incendio'?'Obligatoria por ley (Ley 21.442, art. 43)':''));
+      const porVencer=[...new Set(pols.map(p=>p.tipo))].map(t=>pols.filter(p=>p.tipo===t&&p.desde<=hoy).sort((a,b)=>a.desde<b.desde?1:-1)[0]).filter(p=>p&&p.hasta>=hoy&&diasA(p.hasta)<=60);
+      porVencer.forEach(p=>add(diasA(p.hasta)+' d',`Póliza de ${(TIPO_POLIZA[p.tipo]||p.tipo).split(' (')[0].toLowerCase()} por vencer`,'#seguros',diasA(p.hasta)<=15?'er':'wa','Vence el '+fmtDay(p.hasta)));
+      add(udocs.filter(x=>x.estado==='en_revision').length,'Documentos de unidades por revisar','#seguros--unidades','wa','Pólizas y certificados subidos por propietarios'); }
     if(['admin','comite'].includes(r)){ const cs=await q(T('infracciones').select('id,estado,decidir_antes,descargos_hasta,descargos_at,ronda')).catch(()=>[]), vs=r==='comite'?await q(T('infraccion_votos').select('infraccion_id,ronda,uid')).catch(()=>[]):[];
       if(r==='admin'){ add(cs.filter(c=>c.estado==='abierto').length,'Casos de multa por decidir','#multas','wa','Formular cargos o archivar');
         add(cs.filter(c=>c.estado==='cargos'&&(c.descargos_at||c.descargos_hasta<hoy)).length,'Casos de multa listos para resolver','#multas','wa','Llegaron los descargos o venció el plazo'); }
@@ -737,6 +745,90 @@ VIEWS.multas = function(param){
       else if(f.id==='fFer'){ const arr=[...new Set(d.f.split(/\s+/).filter(x=>/^\d{4}-\d{2}-\d{2}$/.test(x)))].sort(); await q(T('edificios').update({feriados:arr}).eq('id',S.cfg.id)); S.cfg.feriados=arr; toast(arr.length+' feriados guardados'); }
       listo(); }catch(err){ toast('Error: '+errMsg(err)); } });
 };
+
+// SEGUROS (adaptado del módulo E4 de CactusOne): pólizas del edificio con avisos de vencimiento y siniestros,
+// y documentos que acredita cada unidad (póliza propia, certificado de dominio), revisados por la administración.
+const TIPO_POLIZA={incendio:'Incendio (colectivo, obligatorio)', responsabilidad_civil:'Responsabilidad civil', accidentes_personal:'Accidentes del personal', robo:'Robo', equipos:'Equipos', otro:'Otra'};
+const TIPO_DOC={poliza_incendio:'Póliza de incendio y sismo', certificado_dominio:'Certificado de dominio', otro:'Otro documento'};
+const EST_DOC={en_revision:['En revisión','wa'], aceptado:['Aceptado','ok'], rechazado:['Rechazado','er']};
+const EST_SIN={abierto:['Abierto','wa'], en_liquidacion:['En liquidación','in'], pagado:['Pagado','ok'], rechazado:['Rechazado','er'], cerrado:['Cerrado','mu']};
+const diasA=f=>Math.round((new Date(f+'T12:00:00')-new Date(todayStr()+'T12:00:00'))/86400000);
+const pillVence=f=>{ const d=diasA(f); return d<0?`<span class="pill er">Vencida hace ${-d} ${-d===1?'día':'días'}</span>`:d<=60?`<span class="pill ${d<=15?'er':'wa'}">Vence en ${d} ${d===1?'día':'días'}</span>`:'<span class="pill ok">Vigente</span>'; };
+VIEWS.seguros = function(param){
+  const r=role(), adm=isAdmin(), prop=r==='propietario';
+  if(prop) return segurosUnidad();
+  const TABS={polizas:'Pólizas del edificio', unidades:'Unidades', ...(adm?{ajustes:'Ajustes'}:{})};
+  let tab=TABS[param]?param:'polizas', pols=[], sins=[], docs=[], falt=[];
+  setMain(`<h1>Seguros</h1><div class="tabs" id="sgTabs">${Object.entries(TABS).map(([k,v])=>`<button data-t="${k}" class="${k===tab?'on':''}">${v}</button>`).join('')}</div><div id="sgBody"><div class="empty">Cargando…</div></div>`);
+  const w=watch(['polizas','siniestros','unidad_documentos','edificios'], async()=>{ const [a,b,c,d]=await Promise.all([q(T('polizas').select('*').order('desde',{ascending:false})), q(T('siniestros').select('*').order('fecha',{ascending:false})), q(T('unidad_documentos').select('*').order('ts',{ascending:false})), q(sb.rpc('polizas_faltantes')).catch(()=>[])]); return {a,b,c,d}; },
+    ({a,b,c,d})=>{ pols=a; sins=b; docs=c; falt=d||[]; if(!$('.modal')) draw(); });
+  const listo=()=>w.reload(), hoy=todayStr();
+  const vigente=t=>pols.filter(p=>p.tipo===t&&p.desde<=hoy).sort((x,y)=>x.desde<y.desde?1:-1)[0];
+  const draw=()=>{ const el=$('#sgBody'); if(!el) return;
+    if(tab==='polizas'){ const tipos=[...new Set([...(S.cfg?.seguros_obligatorios||['incendio']), ...pols.map(p=>p.tipo)])];
+      el.innerHTML=`${falt.length?`<div class="err" style="margin-bottom:10px">Sin póliza vigente: <b>${falt.map(t=>esc(TIPO_POLIZA[t]||t)).join(', ')}</b>. ${falt.includes('incendio')?'El seguro colectivo contra incendio es obligatorio (Ley 21.442, art. 43). ':''}${adm?'Regístrala con "+ Póliza".':''}</div>`:''}
+        ${adm?'<div style="margin-bottom:10px"><button class="btn" id="bPol">+ Póliza</button></div>':''}
+        <div class="list">${tipos.map(t=>{ const p=vigente(t), ant=pols.filter(x=>x.tipo===t&&x!==p), ns=p?sins.filter(x=>x.poliza_id===p.id):[];
+          return p?`<div class="item" data-pol="${p.id}"><div class="hd"><b>${esc(TIPO_POLIZA[t]||t)}</b>${pillVence(p.hasta)}</div><div class="meta">${esc(p.aseguradora)} · nº ${esc(p.numero)}${p.corredor?' · corredor '+esc(p.corredor):''} · ${fmtDay(p.desde)} al ${fmtDay(p.hasta)}${p.monto_asegurado?' · asegurado '+numCL(p.monto_asegurado,2)+' '+p.moneda:''}${p.prima?' · prima '+numCL(p.prima,2)+' '+p.prima_moneda:''}${t==='incendio'?(p.cubre_unidades?' · cubre también las unidades':' · solo bienes comunes: cada unidad acredita su póliza'):''}${ns.length?' · '+ns.length+(ns.length===1?' siniestro':' siniestros'):''}${ant.length?' · '+ant.length+' anterior(es)':''}</div></div>`
+            :`<div class="item static"><div class="hd"><b>${esc(TIPO_POLIZA[t]||t)}</b><span class="pill er">Sin póliza vigente</span></div></div>`; }).join('')}</div>
+        <p class="small muted">Se avisa a la administración y al comité a los 60, 30 y 15 días del vencimiento y cada día de la última semana.</p>`; }
+    else if(tab==='unidades'){ const inc=vigente('incendio'), us=Object.keys(S.unidades).sort(porNum), ultimo=(d,t)=>docs.filter(x=>x.depto===d&&x.tipo===t).sort((a,b)=>a.ts<b.ts?1:-1)[0];
+      const okInc=us.filter(d=>{ const x=docs.find(y=>y.depto===d&&y.tipo==='poliza_incendio'&&y.estado==='aceptado'&&(!y.vence||y.vence>=hoy)); return !!x; }).length, rev=docs.filter(x=>x.estado==='en_revision');
+      el.innerHTML=`${inc?.cubre_unidades?'<div class="info" style="margin-bottom:10px">La póliza colectiva de incendio cubre también las unidades: acreditar una póliza propia es opcional.</div>':''}
+        <div class="kpi"><div class="k"><b>${us.length?Math.round(okInc/us.length*100):0}%</b><span>Unidades con póliza de incendio vigente acreditada (${okInc} de ${us.length})</span></div><div class="k"><b>${rev.length}</b><span>Documentos por revisar</span></div></div>
+        ${rev.length?`<h2>Por revisar</h2><div class="list">${rev.map(x=>`<div class="item static"><div class="hd"><b>Depto ${esc(x.depto)} · ${esc(TIPO_DOC[x.tipo])}</b><a class="btn sec sm" data-f="${esc(x.archivo)}" target="_blank" rel="noopener">Ver archivo</a></div><div class="meta">${fmtDate(x.ts)} · ${esc(userName(x.subido_por))}${x.vence?' · vence '+fmtDay(x.vence):''}${x.descripcion?' · '+esc(x.descripcion):''}</div>${adm?`<div class="row acc"><button class="btn ok sm" data-acep="${x.id}">Aceptar</button><button class="btn sec sm" data-rech="${x.id}">Rechazar</button></div>`:''}</div>`).join('')}</div>`:''}
+        <h2>Por unidad</h2><div class="card" style="overflow:auto"><table><thead><tr><th>Unidad</th><th>Propietario</th><th>Póliza de incendio</th><th>Certificado de dominio</th></tr></thead><tbody>${us.map(d=>{ const p=ultimo(d,'poliza_incendio'), c=ultimo(d,'certificado_dominio'), cel=x=>x?`${pillOf(EST_DOC,x.estado)}${x.vence&&x.estado==='aceptado'?' '+pillVence(x.vence):''} <a href="#" data-f="${esc(x.archivo)}" target="_blank" rel="noopener" class="small">ver</a>`:'<span class="muted small">—</span>';
+          return `<tr><td><b>${esc(d)}</b></td><td class="small">${esc(S.unidades[d]?.prop||'')}</td><td>${cel(p)}</td><td>${cel(c)}</td></tr>`; }).join('')}</tbody></table></div>
+        <p class="small muted">Los propietarios suben sus documentos desde Seguros en su cuenta. Se les avisa 30 días antes de que venza su póliza.</p>`; }
+    else { const ob=S.cfg?.seguros_obligatorios||['incendio'];
+      el.innerHTML=`<div class="card"><h3>Pólizas que el edificio debe mantener vigentes</h3><form id="fOb">${Object.entries(TIPO_POLIZA).map(([k,v])=>`<label class="sw"><input type="checkbox" name="${k}" ${ob.includes(k)?'checked':''} ${k==='incendio'?'disabled':''}> ${esc(v)}</label>`).join('')}<button class="btn sec sm" style="margin-top:10px">Guardar</button></form><p class="small muted">Si falta una póliza vigente de estos tipos, aparece una alerta roja en el inicio de administración y comité. La de incendio es obligatoria por ley.</p></div>`; }
+    firmarPendientes?.(); };
+  const formPoliza=(p={})=>{ const m=modal(`<h3>${p.id?'Editar':'Nueva'} póliza</h3><form id="fPo"><label class="f"><span>Tipo</span><select name="tipo" ${p.id?'disabled':''}>${Object.entries(TIPO_POLIZA).map(([k,v])=>`<option value="${k}" ${p.tipo===k?'selected':''}>${esc(v)}</option>`).join('')}</select></label>
+      <div class="row"><label class="f grow"><span>Aseguradora</span><input type="text" name="aseguradora" value="${esc(p.aseguradora||'')}" required></label><label class="f grow"><span>Número de póliza</span><input type="text" name="numero" value="${esc(p.numero||'')}" required></label></div>
+      <div class="row"><label class="f grow"><span>Corredor</span><input type="text" name="corredor" value="${esc(p.corredor||'')}"></label><label class="f grow"><span>Deducible</span><input type="text" name="deducible" value="${esc(p.deducible||'')}"></label></div>
+      <label class="f"><span>Coberturas</span><input type="text" name="cobertura" value="${esc(p.cobertura||'')}" placeholder="Incendio, sismo, daños por agua…"></label>
+      <div class="row"><label class="f grow"><span>Monto asegurado</span><input type="text" inputmode="decimal" data-dec name="monto_asegurado" value="${p.monto_asegurado!=null?aDec(p.monto_asegurado):''}"></label><label class="f"><span>&nbsp;</span><select name="moneda">${['UF','CLP'].map(x=>`<option ${p.moneda===x?'selected':''}>${x}</option>`).join('')}</select></label></div>
+      <div class="row"><label class="f grow"><span>Prima</span><input type="text" inputmode="decimal" data-dec name="prima" value="${p.prima!=null?aDec(p.prima):''}"></label><label class="f"><span>&nbsp;</span><select name="prima_moneda">${['UF','CLP'].map(x=>`<option ${p.prima_moneda===x?'selected':''}>${x}</option>`).join('')}</select></label></div>
+      <div class="row"><label class="f grow"><span>Vigente desde</span><input type="date" name="desde" value="${esc(p.desde||'')}" required></label><label class="f grow"><span>Hasta</span><input type="date" name="hasta" value="${esc(p.hasta||'')}" required></label></div>
+      <label class="sw" style="margin-bottom:10px"><input type="checkbox" name="cubre_unidades" ${p.cubre_unidades?'checked':''}> La póliza de incendio cubre también las unidades (si no, cada unidad acredita la suya)</label>
+      <label class="f"><span>PDF de la póliza ${p.archivo?'(ya cargado; elige otro para reemplazarlo)':''}</span><input type="file" name="archivo" accept="application/pdf,image/*"></label><button class="btn full">Guardar</button></form>`);
+    $('#fPo',m).addEventListener('submit', async e=>{ e.preventDefault(); const b=$('button.full',e.target); busy(b,true); const d=formData(e.target);
+      try{ const f=$('[name=archivo]',m).files[0]; const archivo=f?await uploadFile(f,'seguros'):(p.archivo||'');
+        const o={aseguradora:d.aseguradora.trim(), numero:d.numero.trim(), corredor:d.corredor.trim(), deducible:d.deducible.trim(), cobertura:d.cobertura.trim(), monto_asegurado:d.monto_asegurado?Number(d.monto_asegurado):null, moneda:d.moneda, prima:d.prima?Number(d.prima):null, prima_moneda:d.prima_moneda, desde:d.desde, hasta:d.hasta, cubre_unidades:!!d.cubre_unidades, archivo};
+        await q(p.id?T('polizas').update(o).eq('id',p.id):T('polizas').insert({...o, tipo:d.tipo})); closeModal(); toast('Póliza guardada'); listo(); }catch(err){ toast('Error: '+errMsg(err)); busy(b,false); } }); };
+  const detallePoliza=p=>{ const ns=sins.filter(x=>x.poliza_id===p.id), ant=pols.filter(x=>x.tipo===p.tipo&&x.id!==p.id);
+    const m=modal(`<h3>${esc(TIPO_POLIZA[p.tipo])}</h3><div class="row wrap" style="gap:6px;margin-bottom:8px">${pillVence(p.hasta)}${p.archivo?`<a class="btn sec sm" data-f="${esc(p.archivo)}" target="_blank" rel="noopener">Ver PDF</a>`:''}</div>
+      <p class="small">${esc(p.aseguradora)} · nº ${esc(p.numero)} · ${fmtDay(p.desde)} al ${fmtDay(p.hasta)}${p.cobertura?'<br>Coberturas: '+esc(p.cobertura):''}${p.deducible?'<br>Deducible: '+esc(p.deducible):''}</p>
+      <h2>Siniestros</h2><div class="list">${ns.map(x=>`<div class="item static"><div class="hd"><b>${fmtDay(x.fecha)} · ${esc(x.descripcion)}</b>${pillOf(EST_SIN,x.estado)}</div><div class="meta">${x.monto_reclamado?'reclamado '+clp(x.monto_reclamado):''}${x.monto_pagado?' · pagado '+clp(x.monto_pagado):''}</div>${adm?`<div class="row acc"><select data-est-sin="${x.id}" style="width:auto">${Object.entries(EST_SIN).map(([k,v])=>`<option value="${k}" ${x.estado===k?'selected':''}>${v[0]}</option>`).join('')}</select><button class="btn sec sm" data-pag-sin="${x.id}">Monto pagado</button></div>`:''}</div>`).join('')||'<div class="empty">Sin siniestros</div>'}</div>
+      ${ant.length?`<h2>Pólizas anteriores</h2><div class="list">${ant.map(x=>`<div class="item static"><div class="meta">${esc(x.aseguradora)} · nº ${esc(x.numero)} · ${fmtDay(x.desde)} al ${fmtDay(x.hasta)}${x.archivo?` · <a href="#" data-f="${esc(x.archivo)}" target="_blank" rel="noopener">PDF</a>`:''}</div></div>`).join('')}</div>`:''}
+      <div class="row wrap" style="justify-content:flex-end;gap:6px;margin-top:12px">${adm?'<button class="btn sec" id="pdSin">Registrar siniestro</button><button class="btn sec" id="pdEd">Editar</button><button class="btn" id="pdRen">Registrar renovación</button>':''}<button class="btn sec" data-close>Cerrar</button></div>`);
+    firmarPendientes?.();
+    $('#pdEd',m)?.addEventListener('click',()=>formPoliza(p));
+    $('#pdRen',m)?.addEventListener('click',()=>formPoliza({tipo:p.tipo, aseguradora:p.aseguradora, corredor:p.corredor, cobertura:p.cobertura, moneda:p.moneda, prima_moneda:p.prima_moneda, cubre_unidades:p.cubre_unidades, desde:p.hasta}));
+    $('#pdSin',m)?.addEventListener('click',()=>{ const m2=modal(`<h3>Registrar siniestro</h3><form id="fSi"><label class="f"><span>Fecha</span><input type="date" name="fecha" value="${todayStr()}" required></label><label class="f"><span>Qué pasó</span><textarea name="descripcion" required></textarea></label><label class="f"><span>Monto reclamado (opcional)</span><input type="text" inputmode="numeric" data-clp name="monto"></label><button class="btn full">Guardar</button></form>`);
+      $('#fSi',m2).addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); try{ await q(T('siniestros').insert({poliza_id:p.id, fecha:d.fecha, descripcion:d.descripcion.trim(), monto_reclamado:d.monto?Number(d.monto):null})); closeModal(); toast('Siniestro registrado'); listo(); }catch(err){ toast('Error: '+errMsg(err)); } }); });
+    m.addEventListener('change', async e=>{ const x=e.target.closest('[data-est-sin]'); if(!x) return; try{ await q(T('siniestros').update({estado:x.value}).eq('id',x.dataset.estSin)); toast('Siniestro actualizado'); listo(); }catch(err){ toast(errMsg(err)); } });
+    m.addEventListener('click', async e=>{ const x=e.target.closest('[data-pag-sin]'); if(!x) return; const v=await askText('Monto pagado por la aseguradora'); if(v===null) return; try{ await q(T('siniestros').update({monto_pagado:leerMonto(v)}).eq('id',x.dataset.pagSin)); toast('Monto guardado'); listo(); }catch(err){ toast(errMsg(err)); } }); };
+  $('#sgTabs').addEventListener('click',e=>{ const b=e.target.closest('button'); if(!b) return; $$('#sgTabs button').forEach(x=>x.classList.remove('on')); b.classList.add('on'); tab=b.dataset.t; draw(); });
+  $('#sgBody').addEventListener('click', async e=>{ const t=x=>e.target.closest(x); let b;
+    if(t('#bPol')) formPoliza();
+    else if(b=t('[data-pol]')) detallePoliza(pols.find(x=>x.id===b.dataset.pol));
+    else if(b=t('[data-acep]')){ try{ await q(T('unidad_documentos').update({estado:'aceptado'}).eq('id',b.dataset.acep)); toast('Documento aceptado'); listo(); }catch(err){ toast(errMsg(err)); } }
+    else if(b=t('[data-rech]')){ const mo=await askText('Motivo del rechazo (lo recibe el propietario)'); if(!mo) return; try{ await q(T('unidad_documentos').update({estado:'rechazado', motivo:mo.trim()}).eq('id',b.dataset.rech)); toast('Documento rechazado'); listo(); }catch(err){ toast(errMsg(err)); } } });
+  $('#sgBody').addEventListener('submit', async e=>{ e.preventDefault(); if(e.target.id!=='fOb') return; const d=formData(e.target); const arr=['incendio', ...Object.keys(TIPO_POLIZA).filter(k=>k!=='incendio'&&d[k])];
+    try{ await q(T('edificios').update({seguros_obligatorios:arr}).eq('id',S.cfg.id)); S.cfg.seguros_obligatorios=arr; toast('Guardado'); listo(); }catch(err){ toast(errMsg(err)); } });
+};
+function segurosUnidad(){
+  const dep=myDepto();
+  setMain(`<h1>Seguros</h1><div class="card"><h3>Documentos de tu unidad (Depto ${esc(dep)})</h3><p class="small muted">Sube la póliza de incendio y sismo de tu unidad, el certificado de dominio u otros que pida la administración. La administración los revisa y te avisaremos 30 días antes de que venza tu póliza.</p>
+    <form id="fUd"><div class="row"><label class="f grow"><span>Documento</span><select name="tipo">${Object.entries(TIPO_DOC).map(([k,v])=>`<option value="${k}">${esc(v)}</option>`).join('')}</select></label><label class="f grow"><span>Vigente hasta</span><input type="date" name="vence"></label></div>
+    <label class="f"><span>Detalle (opcional)</span><input type="text" name="descripcion" placeholder="Aseguradora y número de póliza"></label><label class="f"><span>Archivo (PDF o foto)</span><input type="file" name="archivo" accept="application/pdf,image/*" required></label><button class="btn">Subir documento</button></form></div>
+    <div id="udList" class="list"></div>`);
+  watch('unidad_documentos', ()=>q(T('unidad_documentos').select('*').order('ts',{ascending:false})), rows=>{ const el=$('#udList'); if(!el) return;
+    el.innerHTML=rows.map(x=>`<div class="item static"><div class="hd"><b>${esc(TIPO_DOC[x.tipo])}</b><span class="row" style="gap:4px">${pillOf(EST_DOC,x.estado)}${x.vence&&x.estado==='aceptado'?pillVence(x.vence):''}</span></div><div class="meta">Subido ${fmtDate(x.ts)}${x.vence?' · vence '+fmtDay(x.vence):''}${x.descripcion?' · '+esc(x.descripcion):''}${x.motivo?' · <b>'+esc(x.motivo)+'</b>':''} · <a href="#" data-f="${esc(x.archivo)}" target="_blank" rel="noopener">ver</a></div></div>`).join('')||'<div class="empty">Aún no has subido documentos</div>'; firmarPendientes?.(); });
+  $('#fUd').addEventListener('submit', async e=>{ e.preventDefault(); const b=$('button',e.target); busy(b,true); const d=formData(e.target);
+    try{ const archivo=await uploadFile($('[name=archivo]',e.target).files[0],'seguros'); await q(T('unidad_documentos').insert({depto:dep, tipo:d.tipo, vence:d.vence||null, descripcion:d.descripcion.trim(), archivo})); e.target.reset(); toast('Documento enviado: la administración lo revisará'); }catch(err){ toast('Error: '+errMsg(err)); } busy(b,false); });
+}
 
 // LECTURAS de medidores individuales. Conserjería y administración las ingresan; el comité las ve.
 VIEWS.lecturas = function(){

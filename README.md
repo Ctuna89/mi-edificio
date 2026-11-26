@@ -177,6 +177,7 @@ Límites: está pensada para un edificio. La base de datos atiende una consulta 
 |---|---|---|---|---|---|
 | Gastos comunes (desglose, prorrateo por alícuota o consumo, PDF/Excel) | ve su aviso de cobro con sus consumos | – | ve todo y exporta | edita, registra pagos, exporta | – |
 | Lecturas de medidores (agua caliente, calefacción, gas…) | ve las suyas en su desglose | ingresa | ve | configura, ingresa | – |
+| Seguros: pólizas del edificio y documentos de cada unidad | el propietario sube los de su unidad | – | ve todo | gestiona pólizas y revisa documentos | – |
 | Multas con debido proceso (cargos, descargos, resolución) | ve los casos de su unidad y presenta descargos | abre casos | aprueba multas, abre casos | formula cargos, resuelve, configura el catálogo | – |
 | Finanzas: pagos, morosidad, convenios, cargos, fondos y flujo de caja | ve su estado de cuenta y los saldos de los fondos, acepta convenios | – | ve todo | registra pagos, cargos y usos de fondos, propone convenios, anota egresos | – |
 | Reservas de áreas comunes | reserva / cancela | ve agenda | aprueba | aprueba, configura | – |
@@ -210,6 +211,13 @@ Cada ítem se redondea al peso y la diferencia de redondeo se asigna a las unida
 **Fondos.** En Finanzas → Fondos se crean el **fondo común de reserva** (la Ley de Copropiedad Inmobiliaria exige formarlo; el porcentaje lo fija el reglamento dentro del mínimo legal, confírmalo) y otros, como uno de mantención. Cada fondo tiene un aporte sugerido en % de los gastos del período y su saldo al empezar a usar la app. Al crear un período se agrega el ítem de cada fondo y **"Calcular aportes a fondos"** calcula su monto. Al publicar el período, el aporte se anota solo en el fondo (y se quita si se despublica). Para **usar un fondo** se registra en qué y cuánto, y si se quiere también el egreso en el flujo de caja; no se puede usar más que el saldo. Los ajustes (intereses del banco, diferencias) se anotan aparte. La comunidad ve los saldos.
 
 **Cargos individuales.** Multas, arriendo de espacios comunes y otros cobros a una unidad se registran en Finanzas → Cargos y **se suman al gasto común de esa unidad** en el período indicado (por defecto, el primero sin publicar; no se pueden agregar a uno publicado). El **arriendo** se carga solo al aprobarse la reserva de un espacio con costo, y se anula solo si la reserva se cancela. Desde Estacionamientos → Excedidos se puede **cursar una multa** con los datos del uso. Un cargo no se borra: se **rebaja o se anula (condonación) con un motivo**, y queda el registro de multas condonadas o rebajadas.
+
+## Seguros
+
+- **Pólizas del edificio**: incendio colectivo (obligatoria por la Ley 21.442, art. 43), responsabilidad civil y otras, con aseguradora, número, coberturas, montos, vigencia y el PDF. Si falta una póliza vigente de un tipo obligatorio, aparece una alerta roja en el inicio de administración y comité; los tipos obligatorios se eligen en Seguros → Ajustes. Se avisa a los 60, 30 y 15 días del vencimiento y cada día de la última semana. Cada póliza guarda sus **siniestros** (reclamado, pagado, estado) y las pólizas anteriores.
+- **Documentos de cada unidad**: los propietarios suben su póliza de incendio y sismo, el certificado de dominio u otros, con su vencimiento. La administración los acepta o rechaza con motivo, y ve el % de unidades con póliza vigente acreditada. Al propietario se le avisa 30 días antes de que venza su póliza. Si la póliza colectiva cubre también las unidades, se indica y acreditar una propia es opcional.
+
+Adaptado de [CactusOne](https://github.com/Ctuna89/cactusone), con permiso de sus autores.
 
 ## Multas con debido proceso
 

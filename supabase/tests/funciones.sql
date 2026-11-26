@@ -330,3 +330,28 @@ select privado.depurar_edificio(:'ea');
 select t.ok((select count(*) = 0 from auditoria where ts < now() - interval '1 month'), 'la bitácora respeta el plazo de conservación que fija la administración');
 \echo 'OK: datos personales'
 
+-- ---------- seguros ----------
+select t.soy(:'a1');
+select t.ok((select public.polizas_faltantes() = '{incendio}'), 'sin póliza de incendio vigente hay alerta');
+select t.falla($$insert into polizas (tipo, aseguradora, numero, desde, hasta) values ('incendio', 'X', '1', '2026-01-01', '2025-01-01')$$, 'póliza que termina antes de empezar');
+insert into polizas (tipo, aseguradora, numero, desde, hasta, cubre_unidades) values ('incendio', 'Seguros Sur', 'INC-001', public.hoy() - 300, public.hoy() + 30, false) returning id as pol \gset
+select t.ok((select public.polizas_faltantes() = '{}'), 'con la póliza vigente desaparece la alerta');
+reset role; select t.ok(privado.avisos_seguros() >= 1, 'a 30 días del vencimiento se avisa'); select t.ok(privado.avisos_seguros() = 0, 'el mismo aviso no se repite'); select t.soy(:'a1');
+select t.ok((select avisos = '{30}' from polizas where id = :'pol'), 'queda anotado qué aviso se envió');
+select t.soy(:'a4'); select t.ok((select count(*) = 0 from polizas), 'conserjería no ve las pólizas');
+select t.soy(:'a5'); select t.ok((select count(*) = 1 from polizas), 'el comité ve las pólizas');
+-- documentos de unidad
+select t.soy(:'a3');
+select t.falla(format($$insert into unidad_documentos (depto, tipo, archivo, vence) values ('101', 'poliza_incendio', %L, '2027-01-01')$$, :'ea' || '/seguros/x.pdf'), 'subir documentos de otra unidad');
+select t.falla(format($$insert into unidad_documentos (depto, tipo, archivo) values ('102', 'poliza_incendio', %L)$$, :'ea' || '/seguros/x.pdf'), 'póliza sin fecha de vencimiento');
+insert into unidad_documentos (depto, tipo, archivo, vence, estado) values ('102', 'poliza_incendio', :'ea' || '/seguros/2026/p102.pdf', public.hoy() + 20, 'aceptado') returning id as doc \gset
+select t.ok((select estado = 'en_revision' from unidad_documentos where id = :'doc'), 'el documento queda en revisión, aunque se envíe aceptado');
+select t.falla(format($$update unidad_documentos set estado = 'aceptado' where id = %L$$, :'doc'), 'un propietario acepta su propio documento');
+select t.soy(:'a2'); select t.ok((select count(*) = 0 from unidad_documentos), 'otra unidad no ve el documento');
+select t.soy(:'a1');
+select t.falla(format($$update unidad_documentos set estado = 'rechazado' where id = %L$$, :'doc'), 'rechazar sin motivo');
+update unidad_documentos set estado = 'aceptado' where id = :'doc';
+select t.ok((select revisado_por = :'a1' and revisado_at is not null from unidad_documentos where id = :'doc'), 'la revisión queda con autor y fecha');
+reset role; select t.ok(privado.avisos_seguros() = 1, 'al propietario se le avisa que su póliza vence en menos de 30 días'); select t.ok(privado.avisos_seguros() = 0, 'una sola vez');
+\echo 'OK: seguros'
+

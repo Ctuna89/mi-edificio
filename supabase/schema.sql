@@ -50,6 +50,8 @@ alter table public.edificios add column if not exists feriados jsonb not null de
 -- Procedimiento de multas: plazos en días hábiles, aprobaciones del comité (0 = no se requieren) y destino del cobro
 alter table public.edificios add column if not exists multas jsonb not null default
   '{"plazo_decision":5,"plazo_descargos":5,"aprobaciones_comite":1,"destino":"fondo_reserva"}'::jsonb;
+-- Tipos de póliza que el edificio debe mantener vigentes (el seguro colectivo de incendio es obligatorio por ley)
+alter table public.edificios add column if not exists seguros_obligatorios jsonb not null default '["incendio"]'::jsonb;
 alter table public.edificios add column if not exists mora_tasa numeric(6,3) not null default 0;   -- interés por mora, % mensual (0 = no se cobra)
 alter table public.edificios add column if not exists mora_desde date;                             -- la mora se cuenta desde esta fecha (o desde el vencimiento, si es posterior)
 alter table public.edificios drop column if exists codigo;   -- los códigos de invitación eran de la versión multi-edificio
@@ -656,6 +658,59 @@ create table if not exists public.solicitudes_datos (
   ts          timestamptz default now()
 );
 
+-- Seguros (adaptado del módulo E4 de CactusOne). Pólizas del condominio: incendio colectivo (Ley 21.442
+-- art. 43, obligatorio), responsabilidad civil y otras, con avisos antes del vencimiento y sus siniestros.
+create table if not exists public.polizas (
+  id          uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  tipo        text not null check (tipo in ('incendio','responsabilidad_civil','accidentes_personal','robo','equipos','otro')),
+  aseguradora text not null,
+  corredor    text default '',
+  numero      text not null,
+  cobertura   text default '',
+  monto_asegurado numeric(14,2),
+  moneda      text not null default 'UF' check (moneda in ('UF','CLP')),
+  deducible   text default '',
+  prima       numeric(14,2),
+  prima_moneda text not null default 'UF' check (prima_moneda in ('UF','CLP')),
+  cubre_unidades boolean not null default false,   -- la póliza de incendio cubre también las unidades
+  desde       date not null,
+  hasta       date not null,
+  archivo     text default '',
+  avisos      int[] not null default '{}',         -- días antes del vencimiento ya avisados
+  creado_por  uuid default auth.uid(),
+  ts          timestamptz default now(),
+  check (hasta > desde)
+);
+create table if not exists public.siniestros (
+  id          uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  poliza_id   uuid not null references public.polizas(id) on delete cascade,
+  fecha       date not null,
+  descripcion text not null,
+  monto_reclamado numeric(14,0),
+  monto_pagado numeric(14,0),
+  estado      text not null default 'abierto' check (estado in ('abierto','en_liquidacion','pagado','rechazado','cerrado')),
+  ts          timestamptz default now()
+);
+-- Documentos que cada unidad acredita (su póliza de incendio y sismo, certificado de dominio, otros), con vencimiento
+create table if not exists public.unidad_documentos (
+  id          uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  depto       text not null,
+  tipo        text not null check (tipo in ('poliza_incendio','certificado_dominio','otro')),
+  descripcion text default '',
+  vence       date,
+  archivo     text not null,
+  estado      text not null default 'en_revision' check (estado in ('en_revision','aceptado','rechazado')),
+  motivo      text,
+  subido_por  uuid default auth.uid(),
+  revisado_por uuid,
+  revisado_at timestamptz,
+  aviso_at    timestamptz,
+  ts          timestamptz default now()
+);
+
 -- Archivos de filas borradas por plazo de conservación, pendientes de eliminar del bucket.
 -- Los elimina la app de la administración (la base de datos no puede borrar archivos de Storage).
 create table if not exists public.archivos_por_borrar (
@@ -694,7 +749,7 @@ begin
   end if;
 
   select id into def from public.edificios order by creado, id limit 1;
-  foreach t in array array['empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos']
+  foreach t in array array['empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos']
   loop
     execute format('alter table public.%I add column if not exists edificio_id uuid references public.edificios(id) on delete cascade', t);
     execute format('select count(*) from public.%I where edificio_id is null', t) into n;
@@ -807,7 +862,7 @@ $$;
 do $$
 declare t text;
 begin
-  foreach t in array array['empresas','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos']
+  foreach t in array array['empresas','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos']
   loop
     execute format('alter table public.%I alter column edificio_id set default public.mi_edificio()', t);
   end loop;
@@ -1533,7 +1588,7 @@ declare t text;
 begin
   -- tablas con datos personales o de dinero (no los votos: el voto de un sondeo es secreto)
   foreach t in array array['edificios','usuarios','contactos','unidades','gastos','pagos','convenios','cargos','caja_movimientos','fondos','fondo_movimientos',
-                           'lecturas','multas_catalogo','indicadores','consentimientos','solicitudes_datos','estacionamientos'] loop
+                           'lecturas','multas_catalogo','indicadores','consentimientos','solicitudes_datos','estacionamientos','polizas','siniestros','unidad_documentos'] loop
     execute format('drop trigger if exists %I on public.%I', t || '_auditoria', t);
     execute format('create trigger %I after insert or update or delete on public.%I for each row execute function privado.auditar()', t || '_auditoria', t);
   end loop;
@@ -1642,6 +1697,84 @@ begin
 end $$;
 drop trigger if exists push_solicitud_datos on public.solicitudes_datos;
 create trigger push_solicitud_datos after insert or update on public.solicitudes_datos for each row execute function privado.tg_push_solicitud_datos();
+
+-- ---------- Seguros ----------
+-- Tipos obligatorios sin póliza vigente hoy (alerta roja en el inicio de administración y comité)
+create or replace function public.polizas_faltantes() returns text[]
+language sql stable security definer set search_path = public as $$
+  select coalesce(array_agg(t order by t), '{}') from public.edificios e, jsonb_array_elements_text(e.seguros_obligatorios) t
+  where e.id = public.mi_edificio() and public.mi_rol() in ('comite','admin')
+    and not exists (select 1 from public.polizas p where p.edificio_id = e.id and p.tipo = t and public.hoy() between p.desde and p.hasta)
+$$;
+
+-- Documentos de unidad: la unidad los sube (propietarios); la administración los acepta o rechaza con motivo
+create or replace function public.unidad_documentos_antes() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if tg_op = 'INSERT' then
+    if auth.uid() is not null and not public.es_admin() then
+      if public.mi_rol() is distinct from 'propietario' or new.depto is distinct from public.mi_depto() then raise exception 'Solo los propietarios suben los documentos de su unidad'; end if;
+      new.estado := 'en_revision'; new.motivo := null; new.revisado_por := null; new.revisado_at := null;
+    end if;
+    if new.archivo not like new.edificio_id::text || '/seguros/%' then raise exception 'Archivo no válido'; end if;
+    if new.tipo = 'poliza_incendio' and new.vence is null then raise exception 'Indica hasta cuándo está vigente la póliza'; end if;
+    new.subido_por := coalesce(auth.uid(), new.subido_por); new.ts := now(); new.aviso_at := null;
+    return new;
+  end if;
+  if current_setting('mi_edificio.interno', true) = '1' then return new; end if;
+  if auth.uid() is not null and not public.es_admin() then raise exception 'Solo la administración revisa los documentos'; end if;
+  new.depto := old.depto; new.tipo := old.tipo; new.archivo := old.archivo; new.subido_por := old.subido_por; new.ts := old.ts;
+  if new.estado <> old.estado then
+    if new.estado = 'rechazado' and coalesce(trim(new.motivo), '') = '' then raise exception 'Indica el motivo del rechazo'; end if;
+    new.revisado_por := auth.uid(); new.revisado_at := now();
+  end if;
+  return new;
+end $$;
+drop trigger if exists unidad_documentos_antes on public.unidad_documentos;
+create trigger unidad_documentos_antes before insert or update on public.unidad_documentos for each row execute function public.unidad_documentos_antes();
+create or replace function privado.tg_push_unidad_documento() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if tg_op = 'INSERT' and new.estado = 'en_revision' then
+    perform privado.push(new.edificio_id, privado.usuarios_de(new.edificio_id, '{admin}'), '🛡️ Documento por revisar', 'Depto ' || new.depto || ': ' ||
+      case new.tipo when 'poliza_incendio' then 'póliza de incendio' when 'certificado_dominio' then 'certificado de dominio' else 'documento' end, '#seguros');
+  elsif tg_op = 'UPDATE' and new.estado <> old.estado and new.estado in ('aceptado','rechazado') then
+    perform privado.push(new.edificio_id, privado.usuarios_de(new.edificio_id, '{propietario}', new.depto), '🛡️ Documento ' || new.estado,
+      coalesce(nullif(new.motivo, ''), 'La administración revisó tu documento.'), '#seguros');
+  end if;
+  return null;
+end $$;
+drop trigger if exists push_unidad_documento on public.unidad_documentos;
+create trigger push_unidad_documento after insert or update on public.unidad_documentos for each row execute function privado.tg_push_unidad_documento();
+
+-- Tarea diaria: avisos a 60, 30 y 15 días del vencimiento de cada póliza vigente, y cada día la última semana
+-- (a administración y comité); a los propietarios, 30 días antes de que venza la póliza propia aceptada.
+create or replace function privado.avisos_seguros() returns int
+language plpgsql security definer set search_path = public as $$
+declare p record; d int; n int := 0; nom text;
+begin
+  for p in select x.* from public.polizas x
+           where public.hoy() between x.desde and x.hasta
+             and not exists (select 1 from public.polizas y where y.edificio_id = x.edificio_id and y.tipo = x.tipo and y.desde > x.desde) loop
+    d := p.hasta - public.hoy();
+    continue when not (d in (60, 30, 15) or d <= 7) or d = any(p.avisos);
+    nom := case p.tipo when 'incendio' then 'incendio' when 'responsabilidad_civil' then 'responsabilidad civil' else replace(p.tipo, '_', ' ') end;
+    perform privado.push(p.edificio_id, privado.usuarios_de(p.edificio_id, '{admin,comite}'), '🛡️ Póliza de ' || nom || ' por vencer',
+      'Vence el ' || to_char(p.hasta, 'DD-MM-YYYY') || ' (' || d || ' días). Renueva a tiempo: ' || p.aseguradora || ' nº ' || p.numero, '#seguros');
+    update public.polizas set avisos = avisos || d where id = p.id;
+    n := n + 1;
+  end loop;
+  for p in select u.* from public.unidad_documentos u where u.estado = 'aceptado' and u.vence is not null and u.aviso_at is null
+             and u.vence - public.hoy() between 0 and 30 loop
+    perform privado.push(p.edificio_id, privado.usuarios_de(p.edificio_id, '{propietario}', p.depto), '🛡️ Tu póliza vence pronto',
+      'Vence el ' || to_char(p.vence, 'DD-MM-YYYY') || '. Sube la renovación en Seguros.', '#seguros');
+    perform set_config('mi_edificio.interno', '1', true);
+    update public.unidad_documentos set aviso_at = now() where id = p.id;
+    perform set_config('mi_edificio.interno', '', true);
+    n := n + 1;
+  end loop;
+  return n;
+end $$;
 
 -- ---------- Multas con debido proceso ----------
 -- Fecha que resulta de sumar p_n días hábiles (sin sábados, domingos ni feriados del edificio)
@@ -1909,6 +2042,7 @@ create or replace function privado.tareas_diarias() returns void
 language plpgsql security definer set search_path = public as $$
 begin
   begin perform privado.multas_permanentes(); exception when others then raise warning 'multas_permanentes: %', sqlerrm; end;
+  begin perform privado.avisos_seguros(); exception when others then raise warning 'avisos_seguros: %', sqlerrm; end;
   perform privado.depurar();
 end $$;
 
@@ -2465,6 +2599,9 @@ alter table public.contactos        enable row level security;
 alter table public.auditoria        enable row level security;
 alter table public.consentimientos  enable row level security;
 alter table public.solicitudes_datos enable row level security;
+alter table public.polizas          enable row level security;
+alter table public.siniestros       enable row level security;
+alter table public.unidad_documentos enable row level security;
 
 -- helper para (re)crear políticas sin errores. Salvo que se indique lo contrario, toda
 -- política queda además limitada a las filas del edificio del usuario.
@@ -2643,6 +2780,16 @@ select public._pol('consentimientos','cons_sel','select','uid = auth.uid() or pu
 select public._pol('solicitudes_datos','sd_sel','select','uid = auth.uid() or public.es_admin()');
 select public._pol('solicitudes_datos','sd_ins','insert','uid = auth.uid() and public.mi_rol() is not null');
 select public._pol('solicitudes_datos','sd_upd','update','public.es_admin()');
+-- seguros: la administración gestiona; el comité ve; cada propietario ve y sube los documentos de su unidad
+select public._pol('polizas','pol_sel','select','public.mi_rol() in (''comite'',''admin'')');
+select public._pol('polizas','pol_ins','insert','public.es_admin()');
+select public._pol('polizas','pol_upd','update','public.es_admin()');
+select public._pol('siniestros','sin_sel','select','public.mi_rol() in (''comite'',''admin'')');
+select public._pol('siniestros','sin_ins','insert','public.es_admin()');
+select public._pol('siniestros','sin_upd','update','public.es_admin()');
+select public._pol('unidad_documentos','ud_sel','select','public.mi_rol() in (''comite'',''admin'') or (public.mi_rol() = ''propietario'' and depto = public.mi_depto())');
+select public._pol('unidad_documentos','ud_ins','insert','public.es_admin() or (public.mi_rol() = ''propietario'' and depto = public.mi_depto())');
+select public._pol('unidad_documentos','ud_upd','update','public.es_admin()');
 
 -- archivos_por_borrar: la administración los lee y los quita de la cola al borrarlos del bucket
 select public._pol('archivos_por_borrar','apb_sel','select','public.es_admin()');
@@ -2686,6 +2833,9 @@ begin
                          select 1 from jsonb_array_elements(i.historial) h where jsonb_typeof(h->'fotos') = 'array' and h->'fotos' ? p_name)))
       or (r = 'mantencion' and exists (select 1 from public.ot o where o.edificio_id = e and o.empresa_id = public.mi_empresa() and p_name = any(o.fotos_antes)));
   end if;
+  if c = 'seguros' then
+    return r in ('comite','admin') or (r = 'propietario' and exists (select 1 from public.unidad_documentos d where d.edificio_id = e and d.archivo = p_name and d.depto = public.mi_depto()));
+  end if;
   if c = 'multas' then
     return r in ('comite','admin') or exists (select 1 from public.infracciones x where x.edificio_id = e
       and (p_name = any(x.evidencias) or p_name = any(x.descargos_fotos))
@@ -2714,7 +2864,7 @@ create policy "fotos_delete" on storage.objects for delete to authenticated usin
 do $$
 declare t text;
 begin
-  foreach t in array array['edificios','empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos']
+  foreach t in array array['edificios','empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos']
   loop
     begin
       execute format('alter publication supabase_realtime add table public.%I', t);
