@@ -903,6 +903,14 @@ create table if not exists public.asamblea_votos (
   primary key (mocion_id, depto)
 );
 
+alter table public.edificios add column if not exists correo_avisos jsonb not null default '{"cobro": true, "recordatorio": 3, "atraso": 5, "comprobante": true}'::jsonb;
+do $$ begin
+  if not exists (select 1 from information_schema.columns where table_schema = 'public' and table_name = 'gastos' and column_name = 'cobro_avisado') then
+    alter table public.gastos add column cobro_avisado timestamptz;
+    update public.gastos set cobro_avisado = now() where publicado;   -- al actualizar no se reenvían los períodos ya publicados
+  end if;
+end $$;
+
 -- Correos salientes: la base de datos los encola y el servidor local los envía por SMTP con la cuenta que configura
 -- la administración. Quedan como constancia del envío de cada notificación formal (fecha, destinatario, estado).
 create table if not exists public.correos (
@@ -921,6 +929,20 @@ create table if not exists public.correos (
   enviado_at  timestamptz,
   mensaje_id  text,
   ts          timestamptz default now()
+);
+-- Certificados de deuda (o de no deuda) de una unidad, con folio correlativo por edificio
+create table if not exists public.certificados (
+  id          uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  folio       int not null,
+  depto       text not null,
+  fecha       date not null default current_date,
+  deuda       numeric(14,2) not null default 0,
+  detalle     jsonb not null default '{}'::jsonb,
+  motivo      text default '',
+  emitido_por uuid references public.usuarios(id),
+  ts          timestamptz default now(),
+  unique (edificio_id, folio)
 );
 create index if not exists correos_pendientes_idx on public.correos (estado, proximo) where estado = 'pendiente';
 
@@ -962,7 +984,7 @@ begin
   end if;
 
   select id into def from public.edificios order by creado, id limit 1;
-  foreach t in array array['empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos']
+  foreach t in array array['empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos','certificados']
   loop
     execute format('alter table public.%I add column if not exists edificio_id uuid references public.edificios(id) on delete cascade', t);
     execute format('select count(*) from public.%I where edificio_id is null', t) into n;
@@ -1075,7 +1097,7 @@ $$;
 do $$
 declare t text;
 begin
-  foreach t in array array['empresas','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos']
+  foreach t in array array['empresas','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos','certificados']
   loop
     execute format('alter table public.%I alter column edificio_id set default public.mi_edificio()', t);
   end loop;
@@ -1512,6 +1534,7 @@ language plpgsql security definer set search_path = public as $$
 begin
   if not public.es_admin() then raise exception 'Solo administración'; end if;
   perform privado.repartir(public.mi_edificio(), p_periodo);
+  perform privado.avisar_cobros(public.mi_edificio());
 end $$;
 
 create or replace function privado.repartir(e uuid, p_periodo text) returns void
@@ -1801,7 +1824,7 @@ declare t text;
 begin
   -- tablas con datos personales o de dinero (no los votos: el voto de un sondeo es secreto)
   foreach t in array array['edificios','usuarios','contactos','unidades','gastos','pagos','convenios','cargos','caja_movimientos','fondos','fondo_movimientos',
-                           'lecturas','multas_catalogo','indicadores','consentimientos','solicitudes_datos','estacionamientos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes'] loop
+                           'lecturas','multas_catalogo','indicadores','consentimientos','solicitudes_datos','estacionamientos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','certificados'] loop
     execute format('drop trigger if exists %I on public.%I', t || '_auditoria', t);
     execute format('create trigger %I after insert or update or delete on public.%I for each row execute function privado.auditar()', t || '_auditoria', t);
   end loop;
@@ -2620,6 +2643,126 @@ begin
   end loop;
   return n;
 end $$;
+create or replace function privado.mes_texto(p text) returns text
+language sql immutable as $$
+  select (array['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'])[split_part(p, '-', 2)::int] || ' ' || split_part(p, '-', 1)
+$$;
+
+-- Deuda de una unidad, con el mismo criterio del estado de cuenta de la app
+create or replace function privado.deuda_unidad(p_e uuid, p_depto text) returns jsonb
+language sql stable security definer set search_path = public as $$
+  with gu as (
+    select g.periodo, p.vence, g.monto,
+           case when g.pagado then 0 else greatest(0, g.monto - g.pagado_monto) end as saldo,
+           greatest(0, coalesce(g.interes, privado.interes_cobro(g.edificio_id, g.depto, g.periodo, public.hoy())) - g.interes_pagado) as interes,
+           c.estado as conv
+    from public.gasto_unidades g join public.gastos p on p.edificio_id = g.edificio_id and p.periodo = g.periodo and p.publicado
+    left join public.convenios c on c.id = g.convenio_id and c.estado in ('propuesto','vigente')
+    where g.edificio_id = p_e and g.depto = p_depto),
+  cv as (
+    select c.id, c.estado, c.monto_total, coalesce(sum(k.pagado_monto), 0) as abonado,
+           coalesce(sum(greatest(0, k.monto - k.pagado_monto)) filter (where k.vence < public.hoy()), 0) as atraso
+    from public.convenios c left join public.convenio_cuotas k on k.convenio_id = c.id
+    where c.edificio_id = p_e and c.depto = p_depto and c.estado in ('propuesto','vigente') group by c.id)
+  select jsonb_build_object(
+    'deuda', coalesce((select sum(saldo) from gu), 0),
+    'interes', coalesce((select sum(interes) from gu), 0),
+    'convenio', coalesce((select sum(saldo) from gu where conv = 'vigente'), 0),
+    'vencido', coalesce((select sum(saldo) from gu where conv is distinct from 'vigente' and vence < public.hoy()), 0) + coalesce((select sum(atraso) from cv where estado = 'vigente'), 0),
+    'total', coalesce((select sum(saldo + interes) from gu), 0),
+    'periodos', coalesce((select jsonb_agg(jsonb_build_object('periodo', periodo, 'vence', vence, 'monto', monto, 'saldo', saldo, 'interes', interes, 'convenio', conv is not null) order by periodo) from gu where saldo > 0 or interes > 0), '[]'::jsonb),
+    'convenios', coalesce((select jsonb_agg(jsonb_build_object('id', id, 'estado', estado, 'monto', monto_total, 'saldo', monto_total - abonado, 'atraso', atraso)) from cv), '[]'::jsonb))
+$$;
+
+-- Certificado de deuda o de no deuda (lo emite la administración; la unidad lo ve e imprime)
+create or replace function public.emitir_certificado(p_depto text, p_motivo text default '') returns uuid
+language plpgsql security definer set search_path = public as $$
+declare e uuid := public.mi_edificio(); d jsonb; f int; id uuid;
+begin
+  if not public.es_admin() then raise exception 'Solo la administración emite certificados'; end if;
+  if not exists (select 1 from public.unidades where edificio_id = e and depto = p_depto) then raise exception 'La unidad no existe'; end if;
+  perform pg_advisory_xact_lock(hashtext('certificados' || e::text));
+  d := privado.deuda_unidad(e, p_depto);
+  select coalesce(max(folio), 0) + 1 into f from public.certificados where edificio_id = e;
+  insert into public.certificados (edificio_id, folio, depto, fecha, deuda, detalle, motivo, emitido_por)
+  values (e, f, p_depto, public.hoy(), (d->>'total')::numeric, d, coalesce(p_motivo, ''), auth.uid()) returning certificados.id into id;
+  return id;
+end $$;
+
+-- Aviso de cobro: al publicar un período, un correo a cada unidad con su monto, el vencimiento y la deuda anterior
+create or replace function privado.avisar_cobros(p_e uuid default null) returns int
+language plpgsql security definer set search_path = public as $$
+declare g record; u record; ed record; n int := 0; d jsonb; ant numeric;
+begin
+  for g in select * from public.gastos where publicado and cobro_avisado is null and (p_e is null or edificio_id = p_e) loop
+    select * into ed from public.edificios where id = g.edificio_id;
+    if coalesce((ed.correo_avisos->>'cobro')::boolean, true) and exists (select 1 from public.gasto_unidades where edificio_id = g.edificio_id and periodo = g.periodo) then
+      for u in select * from public.gasto_unidades where edificio_id = g.edificio_id and periodo = g.periodo and monto > 0 order by depto loop
+        d := privado.deuda_unidad(g.edificio_id, u.depto);
+        ant := (d->>'total')::numeric - case when u.pagado then 0 else greatest(0, u.monto - u.pagado_monto) end;
+        n := n + privado.correo_unidad(g.edificio_id, u.depto, 'Gasto común de ' || privado.mes_texto(g.periodo) || ' · unidad ' || u.depto,
+          'Se publicó el gasto común de ' || privado.mes_texto(g.periodo) || '.' || E'\n\n' ||
+          'Monto de la unidad ' || u.depto || ': ' || privado.clp(u.monto) || coalesce(E'\nVence el ' || to_char(g.vence, 'DD-MM-YYYY'), '') || '.' ||
+          case when ant > 0 then E'\nSaldo anterior pendiente: ' || privado.clp(ant) || E'\nTotal a pagar: ' || privado.clp(ant + greatest(0, u.monto - u.pagado_monto)) || '.' else '' end ||
+          case when coalesce(ed.datos_bancarios, '') <> '' then E'\n\nDatos para transferir:\n' || ed.datos_bancarios else '' end ||
+          E'\n\nEl detalle del gasto, con sus consumos y cargos, está en la app (Gastos comunes).', 'gastos/' || g.periodo);
+      end loop;
+    elsif not exists (select 1 from public.gasto_unidades where edificio_id = g.edificio_id and periodo = g.periodo) then
+      continue;   -- aún no hay prorrateo: se avisa cuando lo haya
+    end if;
+    update public.gastos set cobro_avisado = now() where edificio_id = g.edificio_id and periodo = g.periodo;
+  end loop;
+  return n;
+end $$;
+
+-- Recordatorio antes del vencimiento y aviso de atraso (una vez por período y unidad, sin contar lo que está en convenio)
+create or replace function privado.recordatorios_cobro() returns int
+language plpgsql security definer set search_path = public as $$
+declare x record; n int := 0; r int; a int; h date := public.hoy();
+begin
+  for x in
+    select g.edificio_id, g.periodo, g.vence, gu.depto, greatest(0, gu.monto - gu.pagado_monto) as saldo, e.correo_avisos as cfg
+    from public.gastos g join public.gasto_unidades gu on gu.edificio_id = g.edificio_id and gu.periodo = g.periodo
+    join public.edificios e on e.id = g.edificio_id
+    where g.publicado and g.vence is not null and not gu.pagado and gu.monto - gu.pagado_monto > 0
+      and not exists (select 1 from public.convenios c where c.id = gu.convenio_id and c.estado in ('propuesto','vigente'))
+      and g.vence between h - 40 and h + 31
+  loop
+    r := coalesce((x.cfg->>'recordatorio')::int, 0); a := coalesce((x.cfg->>'atraso')::int, 0);
+    if r > 0 and h >= x.vence - r and h < x.vence
+       and not exists (select 1 from public.correos where edificio_id = x.edificio_id and referencia = 'recordatorio/' || x.periodo || '/' || x.depto) then
+      n := n + privado.correo_unidad(x.edificio_id, x.depto, 'Recordatorio: el gasto común vence el ' || to_char(x.vence, 'DD-MM-YYYY'),
+        'Le recordamos que el gasto común de ' || privado.mes_texto(x.periodo) || ' de la unidad ' || x.depto || ', por ' || privado.clp(x.saldo) || ', vence el ' || to_char(x.vence, 'DD-MM-YYYY') || '.' || E'\n\nSi ya pagó, no considere este mensaje.',
+        'recordatorio/' || x.periodo || '/' || x.depto);
+    elsif a > 0 and h >= x.vence + a and h <= x.vence + a + 30
+       and not exists (select 1 from public.correos where edificio_id = x.edificio_id and referencia = 'atraso/' || x.periodo || '/' || x.depto) then
+      n := n + privado.correo_unidad(x.edificio_id, x.depto, 'Gasto común atrasado · unidad ' || x.depto,
+        'El gasto común de ' || privado.mes_texto(x.periodo) || ' de la unidad ' || x.depto || ' venció el ' || to_char(x.vence, 'DD-MM-YYYY') || ' y registra un saldo de ' || privado.clp(x.saldo) || '.' || E'\n\n' ||
+        'Le pedimos regularizarlo a la brevedad. Si tiene dificultades para pagar, converse con la administración un convenio de pago. Si ya pagó, envíe el comprobante para registrarlo.',
+        'atraso/' || x.periodo || '/' || x.depto);
+    end if;
+  end loop;
+  return n;
+end $$;
+
+-- Comprobante de pago por correo
+create or replace function privado.tg_correo_pago() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if new.anulado or new.medio = 'condonacion' or not coalesce((select (correo_avisos->>'comprobante')::boolean from public.edificios where id = new.edificio_id), true) then return null; end if;
+  perform privado.correo_unidad(new.edificio_id, new.depto, 'Comprobante de pago nº ' || privado.folio_pago(new.id) || ' · unidad ' || new.depto,
+    'Registramos el siguiente pago de la unidad ' || new.depto || ':' || E'\n\n' ||
+    'Monto: ' || privado.clp(new.monto) || E'\nFecha: ' || to_char(new.fecha, 'DD-MM-YYYY') || E'\nMedio: ' || new.medio || coalesce(E'\nReferencia: ' || nullif(new.referencia, ''), '') ||
+    E'\nAplicado a: ' || case when new.convenio_id is not null then 'convenio de pago' when new.concepto = 'interes' then 'interés por mora de ' || privado.mes_texto(new.periodo) else 'gasto común de ' || privado.mes_texto(new.periodo) end ||
+    E'\nComprobante nº ' || privado.folio_pago(new.id) || E'\n\nSaldo pendiente de la unidad después de este pago: ' || privado.clp((privado.deuda_unidad(new.edificio_id, new.depto)->>'total')::numeric) || '.',
+    'pagos/' || new.id);
+  return null;
+end $$;
+create or replace function privado.folio_pago(p_id uuid) returns text
+language sql immutable as $$ select upper(left(replace(p_id::text, '-', ''), 8)) $$;
+drop trigger if exists zz_correo_pago on public.pagos;
+create trigger zz_correo_pago after insert on public.pagos for each row execute function privado.tg_correo_pago();
+
 create or replace function privado.cuenta_correo(p_uid uuid) returns text
 language sql stable security definer set search_path = public as $$ select email from auth.users where id = p_uid $$;
 
@@ -2639,7 +2782,7 @@ begin
     perform privado.correo_unidad(new.edificio_id, new.depto, 'Resolución · caso nº ' || new.folio,
       'Resolución del caso nº ' || new.folio || ' (unidad ' || new.depto || ').' || E'\n\n' || 'Fundamentos: ' || coalesce(new.resolucion_texto, '') || E'\n\n' ||
       case when new.estado = 'absuelto' then 'Se resuelve absolver a la unidad, sin multa.'
-        else 'Se aplica una multa de ' || trim(to_char(new.multa_monto, 'FM999990.##')) || ' ' || new.multa_unidad || ' ($' || new.multa_clp || '), que se cobra con los gastos comunes' ||
+        else 'Se aplica una multa de ' || trim(to_char(new.multa_monto, 'FM999990.##')) || ' ' || new.multa_unidad || ' (' || privado.clp(new.multa_clp) || '), que se cobra con los gastos comunes' ||
              coalesce('; plazo para restituir: ' || to_char(new.restituir_antes, 'DD-MM-YYYY') || ', y mientras no se restituya la multa se repite cada mes', '') || '.' end,
       'infracciones/' || new.id);
   end if;
@@ -2654,7 +2797,7 @@ begin
   if new.estado = old.estado then return null; end if;
   if new.estado = 'avisada' then
     perform privado.correo_unidad(new.edificio_id, new.depto, 'Aviso previo de suspensión del suministro eléctrico · unidad ' || new.depto,
-      'La unidad ' || new.depto || ' registra ' || new.cuotas || ' cuotas de gasto común impagas, por $' || new.deuda || '. Con el acuerdo del comité de administración, y conforme al artículo 20 nº 9 de la Ley 21.442, '
+      'La unidad ' || new.depto || ' registra ' || new.cuotas || ' cuotas de gasto común impagas, por ' || privado.clp(new.deuda) || '. Con el acuerdo del comité de administración, y conforme al artículo 20 nº 9 de la Ley 21.442, '
       || 'a partir del ' || to_char(new.fecha_prevista, 'DD-MM-YYYY') || ' se podrá suspender o solicitar la suspensión del suministro eléctrico de la unidad.' || E'\n\n'
       || 'Para evitarlo, regularice antes de esa fecha con un pago o un convenio de pago. Si en la unidad vive una persona electrodependiente o que usa oxígeno medicinal, avise de inmediato a la administración: en ese caso la ley prohíbe la suspensión. El agua no se suspende.',
       'suspensiones/' || new.id);
@@ -2970,6 +3113,8 @@ language plpgsql security definer set search_path = public as $$
 begin
   begin perform privado.multas_permanentes(); exception when others then raise warning 'multas_permanentes: %', sqlerrm; end;
   begin perform privado.avisos_seguros(); exception when others then raise warning 'avisos_seguros: %', sqlerrm; end;
+  begin perform privado.avisar_cobros(); exception when others then raise warning 'avisar_cobros: %', sqlerrm; end;
+  begin perform privado.recordatorios_cobro(); exception when others then raise warning 'recordatorios_cobro: %', sqlerrm; end;
   perform privado.depurar();
 end $$;
 
@@ -3547,6 +3692,7 @@ alter table public.asamblea_asistencia enable row level security;
 alter table public.asamblea_mociones enable row level security;
 alter table public.asamblea_votos   enable row level security;
 alter table public.correos          enable row level security;
+alter table public.certificados     enable row level security;
 
 -- helper para (re)crear políticas sin errores. Salvo que se indique lo contrario, toda
 -- política queda además limitada a las filas del edificio del usuario.
@@ -3753,6 +3899,7 @@ select public._pol('asamblea_asistencia','aa_sel','select','public.mi_rol() in (
 select public._pol('asamblea_mociones','am_sel','select','public.mi_rol() in (''residente'',''propietario'',''comite'',''admin'')');
 select public._pol('asamblea_votos','av_sel','select','public.mi_rol() in (''residente'',''propietario'',''comite'',''admin'')');
 select public._pol('correos','cor_sel','select','public.es_admin()');
+select public._pol('certificados','cert_sel','select','public.mi_rol() in (''comite'',''admin'') or (public.es_residente() and depto = public.mi_depto())');
 select public._pol('suspension_eventos','se_sel','select','exists (select 1 from public.suspensiones x where x.id = suspension_id)');
 
 -- archivos_por_borrar: la administración los lee y los quita de la cola al borrarlos del bucket
@@ -3828,7 +3975,7 @@ create policy "fotos_delete" on storage.objects for delete to authenticated usin
 do $$
 declare t text;
 begin
-  foreach t in array array['edificios','empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos']
+  foreach t in array array['edificios','empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos','certificados']
   loop
     begin
       execute format('alter publication supabase_realtime add table public.%I', t);

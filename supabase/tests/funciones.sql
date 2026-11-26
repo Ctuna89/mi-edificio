@@ -509,3 +509,32 @@ select t.soy(:'a2');
 select t.ok((select count(*) = 0 from correos), 'un residente no ve la cola de correos');
 select t.falla(format($$select public.reintentar_correo(%L)$$, :'cor'), 'un residente reintenta correos');
 \echo 'OK: correos'
+
+-- ============ cobro por correo, comprobantes y certificados ============
+select t.soy(:'a1');
+insert into gastos (periodo, total, publicado, vence) values ('2035-07', 50000, true, public.hoy() + 2);
+select public.recalcular_prorrateo('2035-07');
+select t.ok((select count(*) > 0 from correos where referencia = 'gastos/2035-07' and texto like '%Monto de la unidad 101: $30.000%'), 'al publicar, cada unidad recibe su aviso de cobro con el monto');
+select count(*) as n_cobro from correos where referencia = 'gastos/2035-07' \gset
+select public.recalcular_prorrateo('2035-07');
+select t.ok((select count(*) = :n_cobro from correos where referencia = 'gastos/2035-07'), 'volver a calcular no reenvía el aviso');
+reset role; select privado.recordatorios_cobro(); select privado.recordatorios_cobro();
+select t.soy(:'a1');
+select t.ok((select count(*) = (select count(distinct para) from correos where referencia = 'gastos/2035-07' and texto like '%unidad 102%') from correos where referencia = 'recordatorio/2035-07/102'), 'recordatorio antes del vencimiento, una sola vez');
+reset role; update gastos set vence = public.hoy() - 6 where periodo = '2035-07'; select privado.recordatorios_cobro();
+select t.soy(:'a1');
+select t.ok((select count(*) > 0 from correos where referencia = 'atraso/2035-07/102'), 'aviso de atraso pasados los días configurados');
+insert into pagos (depto, periodo, monto, fecha, medio) values ('102', '2035-07', 15000, public.hoy(), 'transferencia') returning id as pago \gset
+select t.ok((select count(*) > 0 from correos where referencia = 'pagos/' || :'pago' and asunto like 'Comprobante de pago nº%' and texto like '%Monto: $15.000%'), 'cada pago genera su comprobante por correo');
+update edificios set correo_avisos = correo_avisos || '{"comprobante": false}' where id = public.mi_edificio();
+insert into pagos (depto, periodo, monto, fecha, medio) values ('102', '2035-07', 1000, public.hoy(), 'efectivo') returning id as pago2 \gset
+select t.ok((select count(*) = 0 from correos where referencia = 'pagos/' || :'pago2'), 'los comprobantes se pueden apagar');
+select public.emitir_certificado('102', 'Venta de la unidad') as cert \gset
+select t.ok((select folio = 1 and deuda > 0 and jsonb_array_length(detalle->'periodos') > 0 from certificados where id = :'cert'), 'certificado de deuda con folio y detalle por período');
+select public.emitir_certificado('104') as cert2 \gset
+select t.ok((select folio = 2 from certificados where id = :'cert2'), 'el folio es correlativo');
+select t.falla($$select public.emitir_certificado('999')$$, 'certificado de una unidad que no existe');
+select t.soy(:'a2');
+select t.falla($$select public.emitir_certificado('101')$$, 'un residente emite certificados');
+select t.ok((select count(*) = 0 from certificados where depto = '102'), 'un residente no ve certificados de otras unidades');
+\echo 'OK: cobro por correo, comprobantes y certificados'
