@@ -2,6 +2,8 @@
 
 ## Sin publicar
 
+- **Emergencias**: plan con teléfonos, punto de encuentro, instrucciones y documento; responsables por zona; consulta registrada de quienes necesitan ayuda para evacuar; simulacros; resumen imprimible.
+- **Proveedores y contratos**: contratos, certificaciones, mantenciones y garantías con vencimiento, aviso configurable, renovación y costo mensual comprometido.
 - **Cartola bancaria**: importación desde Excel o CSV, unidad sugerida por RUT, unidad mencionada, nombre, monto o pagador conocido; al confirmar se registran los pagos con un solo comprobante; los cargos pasan al flujo de caja; sin duplicados y con deshacer.
 - **Presupuesto anual** por categoría y mes, comparado con lo gastado.
 - **Rendición de cuentas mensual** imprimible: gastos, caja, fondos, morosidad, presupuesto y conciliación.

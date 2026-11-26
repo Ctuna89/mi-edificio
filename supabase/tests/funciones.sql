@@ -598,3 +598,22 @@ select t.falla($$select public.importar_cartola('[]')$$, 'un residente importa c
 select t.ok((select count(*) = 1 from presupuestos), 'la comunidad ve el presupuesto');
 select t.falla($$insert into presupuestos (anio, categoria) values (2026, 'Gas')$$, 'un residente edita el presupuesto');
 \echo 'OK: cartola bancaria y presupuesto'
+
+-- ============ plan de emergencia y proveedores ============
+select t.soy(:'a1');
+insert into emergencia_responsables (zona, funcion, nombre, depto) values ('Piso 1', 'Líder de piso', 'Rita Rojas', '101');
+insert into emergencia_simulacros (fecha, participantes) values (public.hoy() - 10, 25);
+insert into proveedores (nombre, rubro, telefono) values ('Ascensores del Sur', 'Ascensores', '+56 2 2222 2222') returning id as prov \gset
+insert into contratos (proveedor_id, tipo, titulo, hasta, aviso_dias) values (:'prov', 'certificacion', 'Certificación de ascensores', public.hoy() + 30, 30) returning id as ctr \gset
+select t.falla($$insert into contratos (titulo, desde, hasta) values ('x', '2026-02-01', '2026-01-01')$$, 'contrato que termina antes de empezar');
+reset role; select privado.avisos_contratos() as n1 \gset
+select privado.avisos_contratos() as n2 \gset
+select t.ok(:n1 = 1 and :n2 = 0 and (select avisos = '{30}' from contratos where id = :'ctr'), 'aviso de vencimiento con los días elegidos, una vez');
+update contratos set avisos = '{}', hasta = public.hoy() + 12 where id = :'ctr';
+select t.ok(privado.avisos_contratos() = 1, 'si el plazo de aviso ya pasó (p. ej. un contrato recién cargado), avisa igual');
+select t.soy(:'a2');
+select t.ok((select count(*) = 1 from emergencia_responsables) and (select count(*) = 1 from emergencia_simulacros), 'la comunidad ve los responsables y los simulacros');
+select t.falla($$insert into emergencia_responsables (funcion, nombre) values ('x', 'y')$$, 'un residente edita el plan de emergencia');
+select t.ok((select count(*) = 0 from proveedores) and (select count(*) = 0 from contratos), 'un residente no ve proveedores ni contratos');
+select t.ok(public.puede_ver_archivo(public.mi_edificio() || '/emergencia/2026-01-01/plan.pdf') and not public.puede_ver_archivo(public.mi_edificio() || '/proveedores/2026-01-01/c.pdf'), 'el documento del plan lo ve la comunidad; los contratos, no');
+\echo 'OK: plan de emergencia y proveedores'

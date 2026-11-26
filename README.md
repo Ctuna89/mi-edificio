@@ -188,6 +188,8 @@ Límites: está pensada para un edificio. La base de datos atiende una consulta 
 | Mensajes (canales conserjería / comité / administración) | chat por canal | canal conserjería | canal comité | todos | – |
 | Comunicados | lee | lee | publica | publica | lee |
 | Encuestas y votaciones de asamblea | vota, ve resultados | – | crea, cierra, ve totales | crea, cierra, ve totales | – |
+| Emergencias: plan, teléfonos, responsables y simulacros | ve el plan y declara condiciones | ve, consulta condiciones especiales | edita responsables y simulacros | edita todo | – |
+| Proveedores, contratos y certificaciones | – | ve teléfonos en Emergencias | ve | gestiona | – |
 | Documentos (reglamento, actas, balances) | lee | lee | sube | sube | – |
 | Encomiendas | ve las suyas | registra / entrega | – | registra / entrega | – |
 | Visitas con QR | anuncia y comparte el QR | escanea, registra ingreso/salida | – | escanea, registra | – |
@@ -256,6 +258,20 @@ La Ley 21.442 (art. 20 nº 9) permite suspender o pedir la suspensión del sumin
 **Condiciones especiales.** Los residentes declaran en Mi cuenta, con consentimiento expreso, si en su unidad vive alguien electrodependiente, que usa oxígeno medicinal, con movilidad reducida o un adulto mayor que vive solo; la administración puede registrarlo con un consentimiento en papel. Es un registro reservado: lo ven la administración y la propia unidad. Conserjería lo consulta en una emergencia con el botón "🚨 Unidades con condiciones especiales", indicando el motivo, que queda en la bitácora. Revocar el consentimiento termina la condición.
 
 Adaptado de [CactusOne](https://github.com/Ctuna89/cactusone), con permiso de sus autores.
+
+## Emergencias
+
+- **Plan de emergencia**: teléfonos de emergencia (Bomberos, SAMU, Carabineros, PDI y los que agregue la administración), punto de encuentro, instrucciones breves y el documento completo del plan, a la vista de toda la comunidad. Un resumen se imprime para tenerlo en conserjería.
+- **Responsables** por piso o sector (jefe de emergencia, líderes de piso, primeros auxilios…), con su teléfono solo si lo autorizan.
+- **Personas que necesitan ayuda para evacuar**: la conserjería y la administración consultan las unidades con condiciones especiales (movilidad reducida, oxígeno, electrodependencia, adultos mayores solos), declaradas con consentimiento; cada consulta queda registrada.
+- **Simulacros** con fecha, participantes, tiempo de evacuación y observaciones. El inicio avisa si falta el plan o si pasó más de un año sin simulacro.
+- Los teléfonos de los proveedores (ascensores, gas…) aparecen para el personal.
+
+![Emergencias](docs/capturas/emergencia.png)
+
+## Proveedores y contratos
+
+Ficha de cada proveedor y sus contratos, certificaciones (ascensores, gas…), mantenciones periódicas, garantías y permisos, con documento, monto, periodicidad y vencimiento. La administración y el comité reciben un aviso los días antes que se elijan, a 7 días y el día del vencimiento, y el inicio muestra lo vencido y por vencer. "Renovar" cierra el período y abre el siguiente. Muestra también el costo mensual comprometido.
 
 ## Seguros
 
