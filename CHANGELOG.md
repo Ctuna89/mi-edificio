@@ -2,6 +2,7 @@
 
 ## Sin publicar
 
+- **Asambleas** (adaptado de CactusOne): citación con plazo, poderes simples revocables, representación del arrendatario, asistencia y quórum en vivo ponderado por alícuota, votaciones por moción con la mayoría de cada tipo de sesión (solo unidades hábiles), votos inmodificables, acta con plazo de firma y casos por inasistencia.
 - **Registro de copropietarios, arrendatarios y ocupantes** (Ley 21.442 y Decreto 7; adaptado de CactusOne): RUT validado, correo para notificaciones, permanencia y arriendo; los propietarios informan cambios y confirman cada año; requerimiento anual, panel de faltantes, exportación registrada y declaración de representación en asambleas.
 - **Módulos activables**: cada módulo opcional puede estar activo, solo para el personal o apagado.
 - **Suspensión de luz por morosidad** (adaptado de CactusOne): solo con 3 o más cuotas de gasto común impagas, nunca a unidades con electrodependientes u oxígeno medicinal, con aprobación del comité, aviso previo de 5 días corridos y reposición al día hábil siguiente del pago o convenio; avisos y cartas imprimibles. **Registro reservado de condiciones especiales** con consentimiento expreso, consultable por conserjería en emergencias con motivo registrado.

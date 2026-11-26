@@ -178,6 +178,8 @@ Límites: está pensada para un edificio. La base de datos atiende una consulta 
 | Gastos comunes (desglose, prorrateo por alícuota o consumo, PDF/Excel) | ve su aviso de cobro con sus consumos | – | ve todo y exporta | edita, registra pagos, exporta | – |
 | Lecturas de medidores (agua caliente, calefacción, gas…) | ve las suyas en su desglose | ingresa | ve | configura, ingresa | – |
 | Suspensión de luz por morosidad (con resguardos legales) | ve el aviso previo; declara condiciones especiales | consulta condiciones especiales en emergencias | aprueba cada unidad | propone, avisa, solicita y repone | – |
+| Asambleas: citación, poderes, quórum, votaciones y acta | da poderes, registra su asistencia y vota | – | convoca y conduce la mesa | convoca y conduce la mesa | – |
+| Registro de copropietarios, arrendatarios y ocupantes | el propietario informa cambios y confirma cada año | – | ve todo | mantiene el registro | – |
 | Seguros: pólizas del edificio y documentos de cada unidad | el propietario sube los de su unidad | – | ve todo | gestiona pólizas y revisa documentos | – |
 | Multas con debido proceso (cargos, descargos, resolución) | ve los casos de su unidad y presenta descargos | abre casos | aprueba multas, abre casos | formula cargos, resuelve, configura el catálogo | – |
 | Finanzas: pagos, morosidad, convenios, cargos, fondos y flujo de caja | ve su estado de cuenta y los saldos de los fondos, acepta convenios | – | ve todo | registra pagos, cargos y usos de fondos, propone convenios, anota egresos | – |
@@ -212,6 +214,19 @@ Cada ítem se redondea al peso y la diferencia de redondeo se asigna a las unida
 **Fondos.** En Finanzas → Fondos se crean el **fondo común de reserva** (la Ley de Copropiedad Inmobiliaria exige formarlo; el porcentaje lo fija el reglamento dentro del mínimo legal, confírmalo) y otros, como uno de mantención. Cada fondo tiene un aporte sugerido en % de los gastos del período y su saldo al empezar a usar la app. Al crear un período se agrega el ítem de cada fondo y **"Calcular aportes a fondos"** calcula su monto. Al publicar el período, el aporte se anota solo en el fondo (y se quita si se despublica). Para **usar un fondo** se registra en qué y cuánto, y si se quiere también el egreso en el flujo de caja; no se puede usar más que el saldo. Los ajustes (intereses del banco, diferencias) se anotan aparte. La comunidad ve los saldos.
 
 **Cargos individuales.** Multas, arriendo de espacios comunes y otros cobros a una unidad se registran en Finanzas → Cargos y **se suman al gasto común de esa unidad** en el período indicado (por defecto, el primero sin publicar; no se pueden agregar a uno publicado). El **arriendo** se carga solo al aprobarse la reserva de un espacio con costo, y se anula solo si la reserva se cancela. Desde Estacionamientos → Excedidos se puede **cursar una multa** con los datos del uso. Un cargo no se borra: se **rebaja o se anula (condonación) con un motivo**, y queda el registro de multas condonadas o rebajadas.
+
+## Asambleas
+
+En el módulo **Asambleas**, la administración o el comité crean la asamblea (ordinaria, extraordinaria de mayoría absoluta o reforzada; presencial, telemática o mixta) con su tabla, y la app acompaña cada paso:
+
+- **Citación** entre 5 y 15 días antes (configurable): aviso a copropietarios y residentes, y citación imprimible con tabla, quórum y reglas de representación.
+- **Poderes simples**: el copropietario designa a alguien para esa asamblea (con o sin cuenta en la app), lo imprime y puede revocarlo hasta que empiece.
+- **Representación del arrendatario**: si el copropietario no asiste ni da poder, lo representa el arrendatario u ocupante, salvo que el copropietario lo haya excluido en el Registro. En materias de mayoría reforzada necesita un poder.
+- **Asistencia y quórum en vivo**, ponderado por la alícuota: cada persona registra su asistencia desde la app o la mesa la registra en la sala. Ordinaria: 33 % para constituirse; extraordinaria absoluta: más del 50 %; reforzada: 66 %. Sin quórum no se puede abrir una votación.
+- **Votaciones por moción**: votan las unidades presentes y sin cuotas de gasto común impagas, desde la app o como voto presencial registrado por la mesa. El resultado se calcula con la mayoría de cada tipo (mayoría de los derechos presentes, más del 50 % o el 66 % de todos los derechos) y muestra qué votó cada unidad. Los votos no se pueden cambiar ni borrar.
+- **Acta**: al terminar, plazo de 30 días para firmarla, con aviso en el inicio; una vez firmada no se modifica. Las unidades que no asistieron se pueden llevar a un caso de multa por inasistencia (Multas), con su procedimiento.
+
+Los porcentajes de quórum y mayoría siguen la especificación de CactusOne para la Ley 21.442; confírmalos con tu reglamento. Adaptado de [CactusOne](https://github.com/Ctuna89/cactusone), con permiso de sus autores. Para consultas fuera de asamblea sigue disponible Encuestas.
 
 ## Registro de copropietarios
 

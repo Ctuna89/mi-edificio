@@ -60,6 +60,8 @@ alter table public.edificios add column if not exists suspension jsonb not null 
 alter table public.edificios add column if not exists modulos jsonb not null default '{}'::jsonb;
 -- Registro de copropietarios: días para informar cambios (Decreto 7, art. 5: 60) y año del último requerimiento anual
 alter table public.edificios add column if not exists registro jsonb not null default '{"plazo_dias":60}'::jsonb;
+-- Asambleas: días de anticipación de la citación y plazo para firmar el acta
+alter table public.edificios add column if not exists asambleas jsonb not null default '{"cita_min":5,"cita_max":15,"dias_acta":30}'::jsonb;
 alter table public.edificios add column if not exists mora_tasa numeric(6,3) not null default 0;   -- interés por mora, % mensual (0 = no se cobra)
 alter table public.edificios add column if not exists mora_desde date;                             -- la mora se cuenta desde esta fecha (o desde el vencimiento, si es posterior)
 alter table public.edificios drop column if exists codigo;   -- los códigos de invitación eran de la versión multi-edificio
@@ -820,6 +822,87 @@ create table if not exists public.registro_confirmaciones (
   unique (edificio_id, depto, anio)
 );
 
+-- Asambleas de copropietarios (Ley 21.442; adaptado del módulo F4 de CactusOne). Quórum ponderado por la alícuota
+-- de cada unidad: ordinaria 33 % para constituirse y mayoría de los asistentes para acordar; extraordinaria
+-- absoluta, más del 50 % de los derechos; extraordinaria reforzada, 66 %. Citación con anticipación configurable,
+-- poderes simples revocables hasta el inicio, representación del arrendatario, asistencia y votos en vivo,
+-- y acta con plazo. Los votos no se modifican ni se borran.
+create table if not exists public.asambleas (
+  id          uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  folio       int not null,
+  tipo        text not null check (tipo in ('ordinaria','extraordinaria_absoluta','extraordinaria_reforzada')),
+  modalidad   text not null default 'presencial' check (modalidad in ('presencial','telematica','mixta')),
+  fecha       timestamptz not null,
+  lugar       text default '',
+  enlace      text default '',
+  tabla       text not null,
+  estado      text not null default 'borrador' check (estado in ('borrador','citada','en_curso','cerrada','cancelada')),
+  citada_at   timestamptz,
+  iniciada_at timestamptz,
+  terminada_at timestamptz,
+  acta        text,
+  acta_hasta  date,
+  acta_firmada_at timestamptz,
+  motivo_cancelacion text,
+  creado_por  uuid default auth.uid(),
+  ts          timestamptz default now(),
+  unique (edificio_id, folio)
+);
+create table if not exists public.asamblea_poderes (
+  id          uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  asamblea_id uuid not null references public.asambleas(id) on delete cascade,
+  depto       text not null,
+  otorgado_por uuid not null default auth.uid(),
+  nombre      text not null,
+  rut         text,
+  correo      text default '',
+  apoderado_uid uuid references public.usuarios(id) on delete set null,   -- si el apoderado tiene cuenta en la app
+  revocado_at timestamptz,
+  ts          timestamptz default now()
+);
+create unique index if not exists asamblea_poderes_vigente_idx on public.asamblea_poderes (asamblea_id, depto) where revocado_at is null;
+create table if not exists public.asamblea_asistencia (
+  asamblea_id uuid not null references public.asambleas(id) on delete cascade,
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  depto       text not null,
+  calidad     text not null check (calidad in ('propietario','apoderado','arrendatario')),
+  quien       text not null,
+  via         text not null default 'presencial' check (via in ('presencial','telematica')),
+  peso        numeric(8,4) not null,
+  habil       boolean not null,                 -- sin cuotas de gasto común impagas: puede votar
+  uid         uuid default auth.uid(),
+  ts          timestamptz default now(),
+  primary key (asamblea_id, depto)
+);
+create table if not exists public.asamblea_mociones (
+  id          uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  asamblea_id uuid not null references public.asambleas(id) on delete cascade,
+  orden       int not null,
+  titulo      text not null,
+  descripcion text default '',
+  regla       text not null check (regla in ('asistentes','absoluta','reforzada')),
+  estado      text not null default 'pendiente' check (estado in ('pendiente','abierta','cerrada')),
+  resultado   text check (resultado in ('aprobada','rechazada')),
+  si          numeric(8,4), no numeric(8,4), abstencion numeric(8,4), base numeric(8,4),
+  abierta_at  timestamptz,
+  cerrada_at  timestamptz
+);
+create table if not exists public.asamblea_votos (
+  mocion_id   uuid not null references public.asamblea_mociones(id) on delete cascade,
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  depto       text not null,
+  opcion      text not null check (opcion in ('si','no','abstencion')),
+  peso        numeric(8,4) not null,
+  calidad     text not null,
+  registrado_por_mesa boolean not null default false,
+  uid         uuid default auth.uid(),
+  ts          timestamptz default now(),
+  primary key (mocion_id, depto)
+);
+
 -- Archivos de filas borradas por plazo de conservación, pendientes de eliminar del bucket.
 -- Los elimina la app de la administración (la base de datos no puede borrar archivos de Storage).
 create table if not exists public.archivos_por_borrar (
@@ -858,7 +941,7 @@ begin
   end if;
 
   select id into def from public.edificios order by creado, id limit 1;
-  foreach t in array array['empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones']
+  foreach t in array array['empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos']
   loop
     execute format('alter table public.%I add column if not exists edificio_id uuid references public.edificios(id) on delete cascade', t);
     execute format('select count(*) from public.%I where edificio_id is null', t) into n;
@@ -971,7 +1054,7 @@ $$;
 do $$
 declare t text;
 begin
-  foreach t in array array['empresas','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones']
+  foreach t in array array['empresas','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos']
   loop
     execute format('alter table public.%I alter column edificio_id set default public.mi_edificio()', t);
   end loop;
@@ -1697,7 +1780,7 @@ declare t text;
 begin
   -- tablas con datos personales o de dinero (no los votos: el voto de un sondeo es secreto)
   foreach t in array array['edificios','usuarios','contactos','unidades','gastos','pagos','convenios','cargos','caja_movimientos','fondos','fondo_movimientos',
-                           'lecturas','multas_catalogo','indicadores','consentimientos','solicitudes_datos','estacionamientos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','registro_personas','registro_confirmaciones'] loop
+                           'lecturas','multas_catalogo','indicadores','consentimientos','solicitudes_datos','estacionamientos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes'] loop
     execute format('drop trigger if exists %I on public.%I', t || '_auditoria', t);
     execute format('create trigger %I after insert or update or delete on public.%I for each row execute function privado.auditar()', t || '_auditoria', t);
   end loop;
@@ -2248,6 +2331,235 @@ begin
   perform privado.push(e, u, '📇 Actualiza el registro de tu unidad', 'Revisa los datos de copropietarios, arrendatarios y ocupantes y confírmalos (Ley de Copropiedad).', '#registro');
   return coalesce(cardinality(u), 0);
 end $$;
+
+-- ---------- Asambleas ----------
+create or replace function privado.asamblea_mesa() returns boolean
+language sql stable security definer set search_path = public as $$ select public.mi_rol() in ('comite','admin') $$;
+create or replace function privado.umbrales(p_tipo text) returns numeric[]
+language sql immutable as $$
+  -- {quórum para constituirse %, mayoría para acordar %}
+  select case p_tipo when 'ordinaria' then array[33, 50]::numeric[] when 'extraordinaria_absoluta' then array[50, 50]::numeric[] else array[66, 66]::numeric[] end
+$$;
+create or replace function privado.derechos_totales(p_e uuid) returns numeric
+language sql stable security definer set search_path = public as $$ select coalesce(sum(alicuota), 0) from public.unidades where edificio_id = p_e $$;
+create or replace function public.quorum_asamblea(p_id uuid)
+returns table (presentes numeric, requerido numeric, constituida boolean, unidades int, total numeric)
+language sql stable security definer set search_path = public as $$
+  with a as (select * from public.asambleas where id = p_id and edificio_id = public.mi_edificio()), t as (select privado.derechos_totales(a.edificio_id) as tot from a)
+  select round(coalesce(sum(x.peso), 0) / nullif(t.tot, 0) * 100, 2), (privado.umbrales(a.tipo))[1],
+    case when a.tipo = 'extraordinaria_absoluta' then coalesce(sum(x.peso), 0) / nullif(t.tot, 0) * 100 > 50
+         else coalesce(sum(x.peso), 0) / nullif(t.tot, 0) * 100 >= (privado.umbrales(a.tipo))[1] end,
+    count(x.depto)::int, t.tot
+  from a cross join t left join public.asamblea_asistencia x on x.asamblea_id = a.id
+  where public.mi_rol() is not null
+  group by a.tipo, t.tot
+$$;
+
+create or replace function public.crear_asamblea(p_tipo text, p_modalidad text, p_fecha timestamptz, p_tabla text, p_lugar text default '', p_enlace text default '') returns uuid
+language plpgsql security definer set search_path = public as $$
+declare e uuid := public.mi_edificio(); f int; nid uuid;
+begin
+  if not privado.asamblea_mesa() then raise exception 'Solo administración y comité'; end if;
+  if coalesce(trim(p_tabla), '') = '' then raise exception 'Escribe la tabla (los temas a tratar)'; end if;
+  perform pg_advisory_xact_lock(hashtextextended('asambleas:' || e::text, 0));
+  select coalesce(max(folio), 0) + 1 into f from public.asambleas where edificio_id = e;
+  insert into public.asambleas (edificio_id, folio, tipo, modalidad, fecha, tabla, lugar, enlace) values (e, f, p_tipo, p_modalidad, p_fecha, trim(p_tabla), trim(coalesce(p_lugar, '')), trim(coalesce(p_enlace, ''))) returning id into nid;
+  return nid;
+end $$;
+
+-- Citación: entre cita_min y cita_max días antes (por defecto, 5 y 15). Se avisa a copropietarios y residentes.
+create or replace function public.citar_asamblea(p_id uuid) returns void
+language plpgsql security definer set search_path = public as $$
+declare a public.asambleas; mn int; mx int; d int;
+begin
+  select * into a from public.asambleas where id = p_id and edificio_id = public.mi_edificio() for update;
+  if not found or not privado.asamblea_mesa() then raise exception 'No autorizado'; end if;
+  if a.estado <> 'borrador' then raise exception 'La asamblea ya fue citada'; end if;
+  select coalesce((asambleas->>'cita_min')::int, 5), coalesce((asambleas->>'cita_max')::int, 15) into mn, mx from public.edificios where id = a.edificio_id;
+  d := (a.fecha at time zone 'America/Santiago')::date - public.hoy();
+  if d < mn or d > mx then raise exception 'La citación debe hacerse entre % y % días antes de la asamblea (faltan %)', mn, mx, d; end if;
+  update public.asambleas set estado = 'citada', citada_at = now() where id = p_id;
+  perform privado.push(a.edificio_id, privado.usuarios_de(a.edificio_id, '{propietario,residente}'), '🏛️ Citación a asamblea ' || replace(a.tipo, '_', ' '),
+    to_char(a.fecha at time zone 'America/Santiago', 'DD-MM-YYYY HH24:MI') || '. Si no puedes asistir, puedes dar un poder en la app.', '#asambleas--' || a.id);
+end $$;
+
+create or replace function public.cancelar_asamblea(p_id uuid, p_motivo text) returns void
+language plpgsql security definer set search_path = public as $$
+declare a public.asambleas;
+begin
+  select * into a from public.asambleas where id = p_id and edificio_id = public.mi_edificio() for update;
+  if not found or not privado.asamblea_mesa() or a.estado not in ('borrador','citada') then raise exception 'No autorizado'; end if;
+  if coalesce(trim(p_motivo), '') = '' then raise exception 'Indica el motivo'; end if;
+  update public.asambleas set estado = 'cancelada', motivo_cancelacion = trim(p_motivo) where id = p_id;
+  if a.estado = 'citada' then perform privado.push(a.edificio_id, privado.usuarios_de(a.edificio_id, '{propietario,residente}'), '🏛️ Asamblea cancelada', trim(p_motivo), '#asambleas'); end if;
+end $$;
+
+-- Poder simple: el copropietario designa a otra persona para una asamblea; revocable hasta que empieza
+create or replace function public.otorgar_poder(p_asamblea uuid, p_nombre text, p_rut text default null, p_correo text default '', p_apoderado uuid default null) returns uuid
+language plpgsql security definer set search_path = public as $$
+declare a public.asambleas; d text := public.mi_depto(); nid uuid; r text;
+begin
+  select * into a from public.asambleas where id = p_asamblea and edificio_id = public.mi_edificio();
+  if not found or a.estado not in ('borrador','citada') then raise exception 'Solo se dan poderes antes de que empiece la asamblea'; end if;
+  if public.mi_rol() is distinct from 'propietario' or coalesce(d, '') = '' then raise exception 'Solo los copropietarios dan poderes'; end if;
+  if coalesce(trim(p_nombre), '') = '' and p_apoderado is null then raise exception 'Indica a quién das el poder'; end if;
+  if coalesce(trim(p_rut), '') <> '' then r := public.rut_normalizado(p_rut); if r is null then raise exception 'El RUT del apoderado no es válido'; end if; end if;
+  if p_apoderado is not null and not exists (select 1 from public.usuarios where id = p_apoderado and edificio_id = a.edificio_id and estado = 'activo') then raise exception 'Esa persona no tiene cuenta en el edificio'; end if;
+  update public.asamblea_poderes set revocado_at = now() where asamblea_id = p_asamblea and depto = d and revocado_at is null;
+  insert into public.asamblea_poderes (edificio_id, asamblea_id, depto, nombre, rut, correo, apoderado_uid)
+  values (a.edificio_id, p_asamblea, d, coalesce(nullif(trim(p_nombre), ''), (select nombre from public.usuarios where id = p_apoderado)), r, lower(trim(coalesce(p_correo, ''))), p_apoderado)
+  returning id into nid;
+  perform privado.push(a.edificio_id, array_remove(array[p_apoderado], null) || privado.usuarios_de(a.edificio_id, '{admin}'), '🏛️ Poder para la asamblea nº ' || a.folio,
+    'Depto ' || d || ' designó a ' || coalesce(nullif(trim(p_nombre), ''), 'un apoderado') || '.', '#asambleas--' || a.id);
+  return nid;
+end $$;
+create or replace function public.revocar_poder(p_id uuid) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  update public.asamblea_poderes p set revocado_at = now() from public.asambleas a
+  where p.id = p_id and a.id = p.asamblea_id and p.revocado_at is null and p.otorgado_por = auth.uid() and a.estado in ('borrador','citada');
+  if not found then raise exception 'No se puede revocar (la asamblea ya empezó o el poder no es tuyo)'; end if;
+end $$;
+
+create or replace function public.iniciar_asamblea(p_id uuid) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  update public.asambleas set estado = 'en_curso', iniciada_at = now() where id = p_id and edificio_id = public.mi_edificio() and estado = 'citada' and privado.asamblea_mesa();
+  if not found then raise exception 'Solo se inicia una asamblea citada'; end if;
+end $$;
+
+-- Quién representa a la unidad: el poder vigente manda; si no hay, el copropietario; si no asiste, el arrendatario
+-- u ocupante (salvo que el copropietario lo haya excluido, o sea una materia de mayoría reforzada).
+create or replace function privado.calidad_en_asamblea(a public.asambleas, p_depto text) returns text
+language plpgsql stable security definer set search_path = public as $$
+declare p public.asamblea_poderes; r rol_t := public.mi_rol();
+begin
+  if public.mi_depto() is distinct from p_depto then
+    select * into p from public.asamblea_poderes where asamblea_id = a.id and depto = p_depto and revocado_at is null;
+    if p.apoderado_uid = auth.uid() then return 'apoderado'; end if;
+    return null;
+  end if;
+  select * into p from public.asamblea_poderes where asamblea_id = a.id and depto = p_depto and revocado_at is null;
+  if r = 'propietario' then return case when p.id is null then 'propietario' end; end if;
+  if r = 'residente' and p.id is null and a.tipo <> 'extraordinaria_reforzada'
+     and coalesce((select arrendatario_representa from public.unidades where edificio_id = a.edificio_id and depto = p_depto), true) then return 'arrendatario'; end if;
+  return null;
+end $$;
+
+-- Asistencia: la registra la mesa (presencial) o la propia persona que representa a la unidad (telemática).
+-- Si llega el copropietario o su apoderado después del arrendatario, toma la asistencia de la unidad.
+create or replace function public.registrar_asistencia(p_asamblea uuid, p_depto text, p_calidad text default null, p_quien text default null, p_via text default 'telematica') returns void
+language plpgsql security definer set search_path = public as $$
+declare a public.asambleas; cal text; q text; mesa boolean := privado.asamblea_mesa(); ci record;
+begin
+  select * into a from public.asambleas where id = p_asamblea and edificio_id = public.mi_edificio();
+  if not found or a.estado <> 'en_curso' then raise exception 'La asamblea no está en curso'; end if;
+  if not exists (select 1 from public.unidades where edificio_id = a.edificio_id and depto = p_depto) then raise exception 'La unidad no existe'; end if;
+  if mesa and p_calidad is not null then
+    cal := p_calidad; q := coalesce(nullif(trim(p_quien), ''), case cal when 'apoderado' then (select nombre from public.asamblea_poderes where asamblea_id = a.id and depto = p_depto and revocado_at is null) end, initcap(cal));
+    if cal = 'apoderado' and not exists (select 1 from public.asamblea_poderes where asamblea_id = a.id and depto = p_depto and revocado_at is null) then raise exception 'La unidad no tiene un poder vigente'; end if;
+    if cal = 'arrendatario' and a.tipo = 'extraordinaria_reforzada' then raise exception 'En materias de mayoría reforzada el arrendatario necesita un poder'; end if;
+  else
+    cal := privado.calidad_en_asamblea(a, p_depto);
+    if cal is null then raise exception 'No representas a esa unidad en esta asamblea'; end if;
+    q := (select nombre from public.usuarios where id = auth.uid()) || case cal when 'apoderado' then ' (apoderado)' when 'arrendatario' then ' (arrendatario u ocupante)' else '' end;
+  end if;
+  select * into ci from privado.cuotas_impagas(a.edificio_id, p_depto);
+  insert into public.asamblea_asistencia (asamblea_id, edificio_id, depto, calidad, quien, via, peso, habil)
+  values (a.id, a.edificio_id, p_depto, cal, q, case when p_via = 'presencial' then 'presencial' else 'telematica' end,
+          (select alicuota from public.unidades where edificio_id = a.edificio_id and depto = p_depto), ci.cuotas = 0)
+  on conflict (asamblea_id, depto) do update set calidad = excluded.calidad, quien = excluded.quien, via = excluded.via, uid = auth.uid(), ts = now()
+    where public.asamblea_asistencia.calidad = 'arrendatario' and excluded.calidad in ('propietario','apoderado');
+end $$;
+
+create or replace function public.agregar_mocion(p_asamblea uuid, p_titulo text, p_descripcion text default '', p_regla text default null) returns uuid
+language plpgsql security definer set search_path = public as $$
+declare a public.asambleas; nid uuid;
+begin
+  select * into a from public.asambleas where id = p_asamblea and edificio_id = public.mi_edificio();
+  if not found or not privado.asamblea_mesa() or a.estado in ('cerrada','cancelada') then raise exception 'No autorizado'; end if;
+  if coalesce(trim(p_titulo), '') = '' then raise exception 'Indica qué se vota'; end if;
+  insert into public.asamblea_mociones (edificio_id, asamblea_id, orden, titulo, descripcion, regla)
+  values (a.edificio_id, a.id, coalesce((select max(orden) from public.asamblea_mociones where asamblea_id = a.id), 0) + 1, trim(p_titulo), trim(coalesce(p_descripcion, '')),
+          coalesce(p_regla, case a.tipo when 'ordinaria' then 'asistentes' when 'extraordinaria_absoluta' then 'absoluta' else 'reforzada' end))
+  returning id into nid;
+  return nid;
+end $$;
+
+create or replace function public.abrir_mocion(p_id uuid) returns void
+language plpgsql security definer set search_path = public as $$
+declare m public.asamblea_mociones; a public.asambleas;
+begin
+  select * into m from public.asamblea_mociones where id = p_id for update;
+  select * into a from public.asambleas where id = m.asamblea_id and edificio_id = public.mi_edificio();
+  if a.id is null or not privado.asamblea_mesa() or m.estado <> 'pendiente' then raise exception 'No autorizado'; end if;
+  if a.estado <> 'en_curso' then raise exception 'La votación se abre con la asamblea en curso'; end if;
+  if not (select constituida from public.quorum_asamblea(a.id)) then raise exception 'No hay quórum para constituirse'; end if;
+  update public.asamblea_mociones set estado = 'abierta', abierta_at = now() where id = p_id;
+end $$;
+
+-- Voto de una unidad presente y hábil: quien la representa en la app, o la mesa registrando un voto presencial
+create or replace function public.votar_mocion(p_mocion uuid, p_depto text, p_opcion text) returns void
+language plpgsql security definer set search_path = public as $$
+declare m public.asamblea_mociones; a public.asambleas; x public.asamblea_asistencia; mesa boolean := privado.asamblea_mesa(); cal text;
+begin
+  select * into m from public.asamblea_mociones where id = p_mocion;
+  select * into a from public.asambleas where id = m.asamblea_id and edificio_id = public.mi_edificio();
+  if a.id is null or m.estado <> 'abierta' then raise exception 'La votación no está abierta'; end if;
+  if p_opcion not in ('si','no','abstencion') then raise exception 'Voto no válido'; end if;
+  select * into x from public.asamblea_asistencia where asamblea_id = a.id and depto = p_depto;
+  if not found then raise exception 'Primero se registra la asistencia de la unidad'; end if;
+  if not x.habil then raise exception 'La unidad tiene cuotas de gasto común impagas: no vota'; end if;
+  if x.calidad = 'arrendatario' and m.regla = 'reforzada' then raise exception 'En materias de mayoría reforzada el arrendatario necesita un poder'; end if;
+  if not mesa then
+    cal := privado.calidad_en_asamblea(a, p_depto);
+    if cal is null or cal <> x.calidad then raise exception 'No representas a esa unidad'; end if;
+  end if;
+  insert into public.asamblea_votos (mocion_id, edificio_id, depto, opcion, peso, calidad, registrado_por_mesa)
+  values (p_mocion, a.edificio_id, p_depto, p_opcion, x.peso, x.calidad, mesa and cal is null);
+end $$;
+
+-- Resultado según la regla: mayoría de los derechos presentes, más del 50 % de todos los derechos, o 66 %
+create or replace function public.cerrar_mocion(p_id uuid) returns text
+language plpgsql security definer set search_path = public as $$
+declare m public.asamblea_mociones; a public.asambleas; vs numeric; vn numeric; va numeric; b numeric; res text;
+begin
+  select * into m from public.asamblea_mociones where id = p_id for update;
+  select * into a from public.asambleas where id = m.asamblea_id and edificio_id = public.mi_edificio();
+  if a.id is null or not privado.asamblea_mesa() or m.estado <> 'abierta' then raise exception 'No autorizado'; end if;
+  select coalesce(sum(peso) filter (where opcion = 'si'), 0), coalesce(sum(peso) filter (where opcion = 'no'), 0), coalesce(sum(peso) filter (where opcion = 'abstencion'), 0)
+    into vs, vn, va from public.asamblea_votos where mocion_id = p_id;
+  b := case m.regla when 'asistentes' then (select coalesce(sum(peso), 0) from public.asamblea_asistencia where asamblea_id = a.id) else privado.derechos_totales(a.edificio_id) end;
+  res := case when b = 0 then 'rechazada' when m.regla = 'reforzada' and vs / b * 100 >= 66 then 'aprobada' when m.regla <> 'reforzada' and vs / b * 100 > 50 then 'aprobada' else 'rechazada' end;
+  update public.asamblea_mociones set estado = 'cerrada', cerrada_at = now(), resultado = res, si = vs, no = vn, abstencion = va, base = b where id = p_id;
+  return res;
+end $$;
+
+create or replace function public.terminar_asamblea(p_id uuid) returns void
+language plpgsql security definer set search_path = public as $$
+declare a public.asambleas;
+begin
+  select * into a from public.asambleas where id = p_id and edificio_id = public.mi_edificio() for update;
+  if not found or not privado.asamblea_mesa() or a.estado <> 'en_curso' then raise exception 'No autorizado'; end if;
+  if exists (select 1 from public.asamblea_mociones where asamblea_id = p_id and estado = 'abierta') then raise exception 'Cierra primero las votaciones abiertas'; end if;
+  update public.asambleas set estado = 'cerrada', terminada_at = now(),
+    acta_hasta = public.hoy() + coalesce((select (asambleas->>'dias_acta')::int from public.edificios where id = a.edificio_id), 30) where id = p_id;
+end $$;
+
+create or replace function public.guardar_acta(p_id uuid, p_acta text, p_firmada boolean default false) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  update public.asambleas set acta = trim(p_acta), acta_firmada_at = case when p_firmada then coalesce(acta_firmada_at, now()) else acta_firmada_at end
+  where id = p_id and edificio_id = public.mi_edificio() and estado = 'cerrada' and privado.asamblea_mesa() and acta_firmada_at is null;
+  if not found then raise exception 'No se puede modificar el acta (ya está firmada o la asamblea no terminó)'; end if;
+  if p_firmada and coalesce(trim(p_acta), '') = '' then raise exception 'El acta está vacía'; end if;
+end $$;
+
+-- Los votos se conservan: no se modifican ni se borran
+create or replace function privado.votos_fijos() returns trigger
+language plpgsql as $$ begin raise exception 'Los votos de una asamblea no se modifican ni se borran'; end $$;
+drop trigger if exists asamblea_votos_fijos on public.asamblea_votos;
+create trigger asamblea_votos_fijos before update or delete on public.asamblea_votos for each row execute function privado.votos_fijos();
 
 -- ---------- Multas con debido proceso ----------
 -- Fecha que resulta de sumar p_n días hábiles (sin sábados, domingos ni feriados del edificio)
@@ -3081,6 +3393,11 @@ alter table public.suspension_votos enable row level security;
 alter table public.suspension_eventos enable row level security;
 alter table public.registro_personas enable row level security;
 alter table public.registro_confirmaciones enable row level security;
+alter table public.asambleas        enable row level security;
+alter table public.asamblea_poderes enable row level security;
+alter table public.asamblea_asistencia enable row level security;
+alter table public.asamblea_mociones enable row level security;
+alter table public.asamblea_votos   enable row level security;
 
 -- helper para (re)crear políticas sin errores. Salvo que se indique lo contrario, toda
 -- política queda además limitada a las filas del edificio del usuario.
@@ -3279,6 +3596,13 @@ select public._pol('registro_personas','rp_sel','select','public.mi_rol() in (''
 select public._pol('registro_personas','rp_ins','insert','public.es_admin() or (public.mi_rol() = ''propietario'' and depto = public.mi_depto())');
 select public._pol('registro_personas','rp_upd','update','public.es_admin() or uid = auth.uid() or (public.mi_rol() = ''propietario'' and depto = public.mi_depto())');
 select public._pol('registro_confirmaciones','rc_sel','select','public.mi_rol() in (''comite'',''admin'') or (public.es_residente() and depto = public.mi_depto())');
+-- asambleas: la comunidad ve las citadas, su asistencia, mociones y votos (el voto de asamblea es nominal);
+-- los poderes, la mesa, quien lo dio y el apoderado
+select public._pol('asambleas','as_sel','select','public.mi_rol() in (''comite'',''admin'') or (public.mi_rol() in (''residente'',''propietario'') and estado <> ''borrador'')');
+select public._pol('asamblea_poderes','ap_sel','select','public.mi_rol() in (''comite'',''admin'') or otorgado_por = auth.uid() or apoderado_uid = auth.uid()');
+select public._pol('asamblea_asistencia','aa_sel','select','public.mi_rol() in (''residente'',''propietario'',''comite'',''admin'')');
+select public._pol('asamblea_mociones','am_sel','select','public.mi_rol() in (''residente'',''propietario'',''comite'',''admin'')');
+select public._pol('asamblea_votos','av_sel','select','public.mi_rol() in (''residente'',''propietario'',''comite'',''admin'')');
 select public._pol('suspension_eventos','se_sel','select','exists (select 1 from public.suspensiones x where x.id = suspension_id)');
 
 -- archivos_por_borrar: la administración los lee y los quita de la cola al borrarlos del bucket
@@ -3354,7 +3678,7 @@ create policy "fotos_delete" on storage.objects for delete to authenticated usin
 do $$
 declare t text;
 begin
-  foreach t in array array['edificios','empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones']
+  foreach t in array array['edificios','empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos']
   loop
     begin
       execute format('alter publication supabase_realtime add table public.%I', t);

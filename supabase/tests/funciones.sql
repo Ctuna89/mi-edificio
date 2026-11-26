@@ -439,3 +439,57 @@ select t.soy(:'a5'); select t.ok((select count(*) >= 2 from registro_personas), 
 select t.soy(:'a4'); select t.ok((select count(*) = 0 from registro_personas), 'conserjería no ve el registro');
 \echo 'OK: registro de copropietarios'
 
+-- ---------- asambleas ----------
+\set a9 '00000000-0000-0000-0000-0000000000a9'
+reset role; insert into auth.users (id) values (:'a9');
+select t.soy(:'a9'); insert into usuarios (id, edificio_id, nombre, depto) values (:'a9', :'ea', 'Ana Arrendataria', '103');
+select t.soy(:'a1'); update usuarios set estado = 'activo', rol = 'residente' where id = :'a9';
+select public.crear_asamblea('ordinaria', 'mixta', now() + interval '3 days', 'Cuenta anual') as asm_pronto \gset
+select t.falla(format($$select public.citar_asamblea(%L)$$, :'asm_pronto'), 'citar con menos de 5 días de anticipación');
+select public.crear_asamblea('ordinaria', 'mixta', now() + interval '7 days', '1. Cuenta anual\n2. Presupuesto') as asm \gset
+select t.soy(:'a2'); select t.ok((select count(*) = 0 from asambleas where id = :'asm'), 'una asamblea en borrador no la ven los residentes');
+select t.soy(:'a1'); select public.citar_asamblea(:'asm');
+select t.soy(:'a2'); select t.ok((select count(*) = 1 from asambleas where id = :'asm'), 'citada, la ven los residentes');
+-- poder del 102 a un miembro del comité
+select t.soy(:'a3');
+select t.falla(format($$select public.otorgar_poder(%L, 'Cora', '12345678-9')$$, :'asm'), 'poder con RUT inválido');
+select public.otorgar_poder(:'asm', 'Cora Comité', '11.111.111-1', '', :'a5') as poder \gset
+select t.soy(:'a2'); select t.falla(format($$select public.revocar_poder(%L)$$, :'poder'), 'revocar el poder de otra unidad');
+select t.falla(format($$select public.registrar_asistencia(%L, '101')$$, :'asm'), 'registrar asistencia antes de que empiece');
+select t.soy(:'a1'); select public.iniciar_asamblea(:'asm');
+select t.soy(:'a3'); select t.falla(format($$select public.revocar_poder(%L)$$, :'poder'), 'revocar el poder con la asamblea en curso');
+select t.falla(format($$select public.registrar_asistencia(%L, '102')$$, :'asm'), 'el copropietario que dio poder no se registra');
+select t.soy(:'a2'); select public.registrar_asistencia(:'asm', '101');
+select t.ok((select presentes = 60 and constituida from public.quorum_asamblea(:'asm')), 'con el 60 % de los derechos presentes se constituye (ordinaria: 33 %)');
+select t.falla(format($$select public.registrar_asistencia(%L, '102')$$, :'asm'), 'registrarse por otra unidad');
+select t.soy(:'a5'); select public.registrar_asistencia(:'asm', '102');
+select t.ok((select calidad = 'apoderado' from asamblea_asistencia where asamblea_id = :'asm' and depto = '102'), 'el apoderado registra la asistencia de la unidad');
+select t.soy(:'a9'); select public.registrar_asistencia(:'asm', '103');
+select t.ok((select calidad = 'arrendatario' from asamblea_asistencia where asamblea_id = :'asm' and depto = '103'), 'el arrendatario representa a la unidad si el dueño no asiste ni da poder');
+select t.soy(:'a1');
+select public.agregar_mocion(:'asm', 'Aprobar el presupuesto 2027') as moc \gset
+select public.abrir_mocion(:'moc');
+select t.soy(:'a2'); select t.falla(format($$select public.votar_mocion(%L, '101', 'si')$$, :'moc'), 'una unidad con cuotas impagas no vota');
+reset role; update asamblea_asistencia set habil = true where asamblea_id = :'asm';
+select t.soy(:'a2'); select public.votar_mocion(:'moc', '101', 'si');
+select t.falla(format($$select public.votar_mocion(%L, '102', 'si')$$, :'moc'), 'votar por otra unidad');
+select t.soy(:'a5'); select public.votar_mocion(:'moc', '102', 'no');
+select t.ok((select calidad = 'apoderado' from asamblea_votos where mocion_id = :'moc' and depto = '102'), 'el voto queda con quién representó a la unidad');
+select t.soy(:'a2'); select t.ok((select count(*) = 2 from asamblea_votos where mocion_id = :'moc'), 'el voto de asamblea es nominal: la comunidad ve qué votó cada unidad');
+select t.falla(format($$update asamblea_votos set opcion = 'no' where mocion_id = %L$$, :'moc'), 'cambiar un voto');
+select t.soy(:'a1');
+select t.ok(public.cerrar_mocion(:'moc') = 'aprobada', 'ordinaria: 60 % de sí sobre el 100 % presente, aprobada');
+select t.ok((select si = 60 and no = 40 and base = 100 from asamblea_mociones where id = :'moc'), 'quedan los derechos a favor y en contra');
+select public.terminar_asamblea(:'asm');
+select t.ok((select acta_hasta = public.hoy() + 30 from asambleas where id = :'asm'), 'al terminar, el acta tiene 30 días para firmarse');
+select public.guardar_acta(:'asm', 'Acta de la asamblea ordinaria…', true);
+select t.falla(format($$select public.guardar_acta(%L, 'otra', false)$$, :'asm'), 'modificar un acta firmada');
+-- extraordinaria reforzada: el arrendatario necesita poder; acuerdo con 66 % de todos los derechos
+select public.crear_asamblea('extraordinaria_reforzada', 'presencial', now() + interval '6 days', 'Cambio del reglamento') as ref \gset
+select public.citar_asamblea(:'ref'); select public.iniciar_asamblea(:'ref');
+select t.soy(:'a9'); select t.falla(format($$select public.registrar_asistencia(%L, '103')$$, :'ref'), 'en reforzada el arrendatario sin poder no representa');
+select t.soy(:'a1'); select public.registrar_asistencia(:'ref', '101', 'propietario', 'Rita Rojas', 'presencial');
+select t.ok((select not constituida from public.quorum_asamblea(:'ref')), 'con 60 % no se constituye una reforzada (66 %)');
+select t.falla(format($$select public.abrir_mocion(%L)$$, (select public.agregar_mocion(:'ref', 'Modificar el reglamento'))), 'votar sin quórum');
+\echo 'OK: asambleas'
+
