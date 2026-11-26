@@ -661,3 +661,24 @@ select t.ok((select confirmado and depto = '101' from comunicado_lecturas where 
 select t.soy(:'a3'); select t.ok((select count(*) = 0 from comunicado_lecturas), 'un residente no ve lo que leyeron otros');
 select t.soy(:'a5'); select t.ok((select count(*) = 2 from comunicado_lecturas), 'el comité ve quién leyó');
 \echo 'OK: comunicados por correo y lecturas'
+
+-- ============ varias unidades por persona ============
+select t.soy(:'a2');
+select t.ok(public.mis_deptos() = array['101'], 'la unidad propia está en la lista');
+select t.ok((select count(*) = 0 from gasto_unidades where depto = '104'), 'antes de asignarle otra unidad, no la ve');
+select t.falla($$insert into usuario_unidades (uid, depto, rol) values (auth.uid(), '104', 'propietario')$$, 'asignarse una unidad');
+select t.falla($$select public.cambiar_unidad('104')$$, 'cambiar a una unidad ajena');
+select t.soy(:'a1'); insert into usuario_unidades (edificio_id, uid, depto, rol) values (public.mi_edificio(), :'a2', '104', 'residente');
+select t.soy(:'a2');
+select t.ok(public.mis_deptos() = array['101','104'] and (select count(*) > 0 from gasto_unidades where depto = '104') and (select count(*) > 0 from gasto_unidades where depto = '101'), 've sus dos unidades a la vez');
+select t.ok((select count(*) = 0 from gasto_unidades where depto = '102'), 'pero no las ajenas');
+select public.cambiar_unidad('104');
+select t.ok((select depto = '104' and rol = 'residente' from usuarios where id = :'a2'), 'elige la unidad activa y toma su rol en ella');
+update usuarios set depto = '102' where id = auth.uid();
+select t.ok((select depto = '104' from usuarios where id = :'a2'), 'su unidad no cambia por otra vía');
+select public.cambiar_unidad('101');
+reset role; select t.ok(:'a2' = any(privado.usuarios_de((select edificio_id from usuarios where id = :'a2'), '{residente,propietario}', '104')), 'recibe los avisos de todas sus unidades');
+select t.soy(:'a1'); update usuarios set depto = '103' where id = :'a2';
+select t.ok((select array_agg(depto order by depto) = array['103','104'] from usuario_unidades where uid = :'a2'), 'si la administración le cambia el depto, se reemplaza el anterior');
+update usuarios set depto = '101' where id = :'a2'; delete from usuario_unidades where uid = :'a2' and depto = '104';
+\echo 'OK: varias unidades por persona'

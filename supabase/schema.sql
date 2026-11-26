@@ -235,6 +235,18 @@ create table if not exists public.comunicados (
   editado timestamptz
 );
 
+-- Una persona puede tener varias unidades (por ejemplo, depto, estacionamiento y bodega, o dos deptos). usuarios.depto
+-- es la unidad activa (la que se elige en la app); aquí están todas, con el rol en cada una. Las unidades de una
+-- persona se ven todas (public.es_mi_depto); lo que se hace en nombre de una unidad usa la activa.
+create table if not exists public.usuario_unidades (
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  uid         uuid not null references public.usuarios(id) on delete cascade,
+  depto       text not null,
+  rol         rol_t not null default 'residente' check (rol in ('residente','propietario')),
+  ts          timestamptz default now(),
+  primary key (uid, depto)
+);
+
 -- Comunicados: por correo (opcional) y con lectura registrada. "importante" pide confirmar la lectura.
 alter table public.comunicados add column if not exists por_correo boolean not null default false;
 alter table public.comunicados add column if not exists importante boolean not null default false;
@@ -1163,7 +1175,7 @@ begin
   end if;
 
   select id into def from public.edificios order by creado, id limit 1;
-  foreach t in array array['empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos','certificados','banco_movimientos','banco_pagadores','presupuestos','emergencia_responsables','emergencia_simulacros','proveedores','contratos','turnos','novedades','unidad_vehiculos','unidad_mascotas','unidad_espacios','comunicado_lecturas']
+  foreach t in array array['empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos','certificados','banco_movimientos','banco_pagadores','presupuestos','emergencia_responsables','emergencia_simulacros','proveedores','contratos','turnos','novedades','unidad_vehiculos','unidad_mascotas','unidad_espacios','comunicado_lecturas','usuario_unidades']
   loop
     execute format('alter table public.%I add column if not exists edificio_id uuid references public.edificios(id) on delete cascade', t);
     execute format('select count(*) from public.%I where edificio_id is null', t) into n;
@@ -1276,7 +1288,7 @@ $$;
 do $$
 declare t text;
 begin
-  foreach t in array array['empresas','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos','certificados','banco_movimientos','banco_pagadores','presupuestos','emergencia_responsables','emergencia_simulacros','proveedores','contratos','turnos','novedades','unidad_vehiculos','unidad_mascotas','unidad_espacios','comunicado_lecturas']
+  foreach t in array array['empresas','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos','certificados','banco_movimientos','banco_pagadores','presupuestos','emergencia_responsables','emergencia_simulacros','proveedores','contratos','turnos','novedades','unidad_vehiculos','unidad_mascotas','unidad_espacios','comunicado_lecturas','usuario_unidades']
   loop
     execute format('alter table public.%I alter column edificio_id set default public.mi_edificio()', t);
   end loop;
@@ -1315,6 +1327,19 @@ begin
 end $$;
 
 -- Quien crea un edificio queda como administrador activo. Los demás quedan pendientes.
+create or replace function public.es_mi_depto(p text) returns boolean
+language sql stable security definer set search_path = public as $$
+  select p is not null and (p = public.mi_depto() or exists (
+    select 1 from public.usuario_unidades x join public.usuarios u on u.id = x.uid
+    where x.uid = auth.uid() and x.depto = p and u.estado = 'activo' and x.edificio_id = u.edificio_id))
+$$;
+create or replace function public.mis_deptos() returns text[]
+language sql stable security definer set search_path = public as $$
+  select coalesce(array_agg(distinct d order by d), '{}') from (
+    select depto as d from public.usuarios where id = auth.uid() and estado = 'activo' and depto is not null
+    union select x.depto from public.usuario_unidades x join public.usuarios u on u.id = x.uid and u.estado = 'activo' where x.uid = auth.uid()) t
+$$;
+
 create or replace function public.usuarios_antes_insert() returns trigger
 language plpgsql security definer set search_path = public as $$
 declare e public.edificios;
@@ -1344,6 +1369,7 @@ language plpgsql security definer set search_path = public as $$
 begin
   if auth.uid() is null then return new; end if;   -- SQL Editor / service role
   if current_setting('mi_edificio.baja', true) = '1' then return new; end if;   -- eliminar_mi_cuenta()
+  if current_setting('mi_edificio.cambio_unidad', true) = '1' and old.id = auth.uid() then return new; end if;   -- cambiar_unidad()
   new.edificio_id := old.edificio_id; new.privacidad_at := old.privacidad_at;
   if not (public.es_admin() and old.edificio_id = public.mi_edificio()) then
     if old.id <> auth.uid() then raise exception 'Sin permiso'; end if;
@@ -1351,9 +1377,40 @@ begin
   end if;
   return new;
 end $$;
+create schema if not exists privado;
+create or replace function privado.sync_usuario_unidades() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if current_setting('mi_edificio.cambio_unidad', true) = '1' then return null; end if;
+  if tg_op = 'UPDATE' and old.depto is distinct from new.depto and old.depto is not null then
+    delete from public.usuario_unidades where uid = new.id and depto = old.depto;
+  end if;
+  if coalesce(new.depto, '') <> '' and new.rol in ('residente','propietario') then
+    insert into public.usuario_unidades (edificio_id, uid, depto, rol) values (new.edificio_id, new.id, new.depto, new.rol)
+    on conflict (uid, depto) do update set rol = excluded.rol;
+  end if;
+  return null;
+end $$;
 drop trigger if exists usuarios_antes_update on public.usuarios;
 create trigger usuarios_antes_update before update on public.usuarios
 for each row execute function public.usuarios_antes_update();
+drop trigger if exists usuarios_unidades on public.usuarios;
+create trigger usuarios_unidades after insert or update of depto, rol on public.usuarios for each row execute function privado.sync_usuario_unidades();
+insert into public.usuario_unidades (edificio_id, uid, depto, rol)
+select edificio_id, id, depto, rol from public.usuarios where coalesce(depto, '') <> '' and rol in ('residente','propietario')
+on conflict do nothing;
+
+-- Elegir la unidad activa (entre las propias)
+create or replace function public.cambiar_unidad(p_depto text) returns void
+language plpgsql security definer set search_path = public as $$
+declare x public.usuario_unidades;
+begin
+  select * into x from public.usuario_unidades where uid = auth.uid() and depto = p_depto;
+  if not found then raise exception 'Esa unidad no es tuya'; end if;
+  perform set_config('mi_edificio.cambio_unidad', '1', true);
+  update public.usuarios set depto = x.depto, rol = case when rol in ('residente','propietario') then x.rol else rol end where id = auth.uid();
+  perform set_config('mi_edificio.cambio_unidad', '', true);
+end $$;
 
 -- Derecho de supresión: borra los datos personales del perfil y bloquea la cuenta.
 -- Lo que la persona escribió (mensajes, incidencias) queda sin su nombre. El correo sigue
@@ -2003,7 +2060,7 @@ declare t text;
 begin
   -- tablas con datos personales o de dinero (no los votos: el voto de un sondeo es secreto)
   foreach t in array array['edificios','usuarios','contactos','unidades','gastos','pagos','convenios','cargos','caja_movimientos','fondos','fondo_movimientos',
-                           'lecturas','multas_catalogo','indicadores','consentimientos','solicitudes_datos','estacionamientos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','certificados','banco_movimientos','presupuestos','emergencia_responsables','proveedores','contratos','turnos','unidad_vehiculos','unidad_mascotas','unidad_espacios'] loop
+                           'lecturas','multas_catalogo','indicadores','consentimientos','solicitudes_datos','estacionamientos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','certificados','banco_movimientos','presupuestos','emergencia_responsables','proveedores','contratos','turnos','unidad_vehiculos','unidad_mascotas','unidad_espacios','usuario_unidades'] loop
     execute format('drop trigger if exists %I on public.%I', t || '_auditoria', t);
     execute format('create trigger %I after insert or update or delete on public.%I for each row execute function privado.auditar()', t || '_auditoria', t);
   end loop;
@@ -2808,8 +2865,9 @@ language sql stable security definer set search_path = public as $$
       and (not p_solo_propietarios or r.relacion = 'copropietario')
     union all
     select a.email, u.nombre from public.usuarios u join auth.users a on a.id = u.id
-    where u.edificio_id = p_e and u.depto = coalesce(p_depto, u.depto) and u.estado = 'activo'
-      and u.rol in ('propietario','residente') and (not p_solo_propietarios or u.rol = 'propietario')) x
+    where u.edificio_id = p_e and u.estado = 'activo' and u.rol in ('propietario','residente')
+      and (p_depto is null or exists (select 1 from public.usuario_unidades x where x.uid = u.id and x.depto = p_depto and (not p_solo_propietarios or x.rol = 'propietario')) or (u.depto = p_depto and (not p_solo_propietarios or u.rol = 'propietario')))
+      and (p_depto is not null or not p_solo_propietarios or u.rol = 'propietario')) x
   order by lower(x.correo)
 $$;
 create or replace function privado.correo_unidad(p_e uuid, p_depto text, p_asunto text, p_texto text, p_ref text, p_solo_propietarios boolean default false) returns int
@@ -3824,7 +3882,7 @@ create or replace function privado.usuarios_de(p_edificio uuid, p_roles rol_t[],
 language sql stable security definer set search_path = public as $$
   select coalesce(array_agg(id), '{}') from public.usuarios
   where edificio_id = p_edificio and estado = 'activo' and rol = any(p_roles)
-    and (p_depto is null or depto = p_depto)
+    and (p_depto is null or depto = p_depto or exists (select 1 from public.usuario_unidades x where x.uid = usuarios.id and x.depto = p_depto))
     and (p_empresa is null or empresa_id = p_empresa)
     and (p_excepto is null or id <> p_excepto)
 $$;
@@ -4230,6 +4288,7 @@ alter table public.unidad_vehiculos enable row level security;
 alter table public.unidad_mascotas  enable row level security;
 alter table public.unidad_espacios  enable row level security;
 alter table public.comunicado_lecturas enable row level security;
+alter table public.usuario_unidades enable row level security;
 
 -- helper para (re)crear políticas sin errores. Salvo que se indique lo contrario, toda
 -- política queda además limitada a las filas del edificio del usuario.
@@ -4278,25 +4337,25 @@ select public._pol('gastos','gas_sel','select','(publicado and public.mi_rol() i
 select public._pol('gastos','gas_ins','insert','public.es_admin()');
 select public._pol('gastos','gas_upd','update','public.es_admin()');
 select public._pol('gastos','gas_del','delete','public.es_admin()');
-select public._pol('gasto_unidades','gu_sel','select','depto = public.mi_depto() or public.mi_rol() in (''comite'',''admin'')');
+select public._pol('gasto_unidades','gu_sel','select','public.es_mi_depto(depto) or public.mi_rol() in (''comite'',''admin'')');
 select public._pol('gasto_unidades','gu_ins','insert','public.es_admin()');
 select public._pol('gasto_unidades','gu_upd','update','public.es_admin()');
 select public._pol('gasto_unidades','gu_del','delete','public.es_admin()');
 
 -- reservas: todos activos ven la agenda; residentes crean para su depto; cancelan las suyas; comité/admin gestionan
 select public._pol('reservas','res_sel','select','public.mi_rol() is not null and public.mi_rol() <> ''mantencion''');
-select public._pol('reservas','res_ins','insert','uid = auth.uid() and depto = public.mi_depto() and public.es_residente()');
+select public._pol('reservas','res_ins','insert','uid = auth.uid() and public.es_mi_depto(depto) and public.es_residente()');
 select public._pol('reservas','res_upd','update','uid = auth.uid() or public.mi_rol() in (''comite'',''admin'')');
 
 -- incidencias: residente ve su depto; staff todo; mantención las ligadas a sus OT
-select public._pol('incidencias','inc_sel','select','depto = public.mi_depto() or public.es_staff() or (public.mi_rol() = ''mantencion'' and exists (select 1 from public.ot o where o.incidencia_id = incidencias.id and o.empresa_id = public.mi_empresa()))');
-select public._pol('incidencias','inc_ins','insert','uid = auth.uid() and (public.es_staff() or depto = public.mi_depto())');
+select public._pol('incidencias','inc_sel','select','public.es_mi_depto(depto) or public.es_staff() or (public.mi_rol() = ''mantencion'' and exists (select 1 from public.ot o where o.incidencia_id = incidencias.id and o.empresa_id = public.mi_empresa()))');
+select public._pol('incidencias','inc_ins','insert','uid = auth.uid() and (public.es_staff() or public.es_mi_depto(depto))');
 select public._pol('incidencias','inc_upd','update','uid = auth.uid() or public.es_staff()');
 
 -- conversaciones / mensajes
-select public._pol('conversaciones','conv_sel','select','(depto = public.mi_depto() and public.es_residente()) or public.es_admin() or canal = public.canal_de_rol(public.mi_rol())');
-select public._pol('conversaciones','conv_ins','insert','(depto = public.mi_depto() and public.es_residente()) or public.es_admin() or canal = public.canal_de_rol(public.mi_rol())');
-select public._pol('conversaciones','conv_upd','update','(depto = public.mi_depto() and public.es_residente()) or public.es_admin() or canal = public.canal_de_rol(public.mi_rol())');
+select public._pol('conversaciones','conv_sel','select','(public.es_mi_depto(depto) and public.es_residente()) or public.es_admin() or canal = public.canal_de_rol(public.mi_rol())');
+select public._pol('conversaciones','conv_ins','insert','(public.es_mi_depto(depto) and public.es_residente()) or public.es_admin() or canal = public.canal_de_rol(public.mi_rol())');
+select public._pol('conversaciones','conv_upd','update','(public.es_mi_depto(depto) and public.es_residente()) or public.es_admin() or canal = public.canal_de_rol(public.mi_rol())');
 select public._pol('mensajes','msg_sel','select','exists (select 1 from public.conversaciones c where c.edificio_id = mensajes.edificio_id and c.id = mensajes.conv_id)');
 select public._pol('mensajes','msg_ins','insert','uid = auth.uid() and exists (select 1 from public.conversaciones c where c.edificio_id = mensajes.edificio_id and c.id = mensajes.conv_id)');
 
@@ -4310,13 +4369,13 @@ select public._pol('documentos','doc_ins','insert','public.mi_rol() in (''comite
 select public._pol('documentos','doc_del','delete','public.mi_rol() in (''comite'',''admin'')');
 
 -- encomiendas: residente ve su depto; conserje/admin gestionan
-select public._pol('encomiendas','enc_sel','select','depto = public.mi_depto() or public.mi_rol() in (''conserje'',''admin'')');
+select public._pol('encomiendas','enc_sel','select','public.es_mi_depto(depto) or public.mi_rol() in (''conserje'',''admin'')');
 select public._pol('encomiendas','enc_ins','insert','public.mi_rol() in (''conserje'',''admin'')');
 select public._pol('encomiendas','enc_upd','update','public.mi_rol() in (''conserje'',''admin'')');
 
 -- visitas: residente anuncia para su depto y cancela las anunciadas; conserje/admin registran
-select public._pol('visitas','vis_sel','select','depto = public.mi_depto() or public.mi_rol() in (''conserje'',''admin'')');
-select public._pol('visitas','vis_ins','insert','(public.es_residente() and depto = public.mi_depto() and uid = auth.uid() and estado = ''anunciada'' and ingreso_at is null) or public.mi_rol() in (''conserje'',''admin'')');
+select public._pol('visitas','vis_sel','select','public.es_mi_depto(depto) or public.mi_rol() in (''conserje'',''admin'')');
+select public._pol('visitas','vis_ins','insert','(public.es_residente() and public.es_mi_depto(depto) and uid = auth.uid() and estado = ''anunciada'' and ingreso_at is null) or public.mi_rol() in (''conserje'',''admin'')');
 select public._pol('visitas','vis_upd','update','public.mi_rol() in (''conserje'',''admin'')');
 select public._pol('visitas','vis_del','delete','(uid = auth.uid() and estado = ''anunciada'') or public.mi_rol() in (''conserje'',''admin'')');
 
@@ -4341,9 +4400,9 @@ select public._pol('encuestas','enc_ins','insert','public.mi_rol() in (''comite'
 select public._pol('encuestas','enc_upd','update','public.mi_rol() in (''comite'',''admin'')');
 select public._pol('encuestas','enc_del','delete','public.mi_rol() in (''comite'',''admin'')');
 -- votos: cada unidad ve y emite solo el suyo; los totales salen de resultados_encuestas()
-select public._pol('votos','vot_sel','select','depto = public.mi_depto()');
-select public._pol('votos','vot_ins','insert','uid = auth.uid() and length(depto) > 0 and depto = public.mi_depto() and public.puede_votar(encuesta_id, opcion)');
-select public._pol('votos','vot_upd','update','depto = public.mi_depto()','uid = auth.uid() and length(depto) > 0 and depto = public.mi_depto() and public.puede_votar(encuesta_id, opcion)');
+select public._pol('votos','vot_sel','select','public.es_mi_depto(depto)');
+select public._pol('votos','vot_ins','insert','uid = auth.uid() and length(depto) > 0 and public.es_mi_depto(depto) and public.puede_votar(encuesta_id, opcion)');
+select public._pol('votos','vot_upd','update','public.es_mi_depto(depto)','uid = auth.uid() and length(depto) > 0 and public.es_mi_depto(depto) and public.puede_votar(encuesta_id, opcion)');
 
 -- push_subs: cada usuario ve y borra las suyas; se guardan con guardar_push()
 select public._pol('push_subs','push_sel','select','uid = auth.uid()');
@@ -4355,24 +4414,24 @@ select public._pol('estacionamientos','est_sel','select','public.es_staff()');
 select public._pol('estacionamientos','est_ins','insert','public.es_admin()');
 select public._pol('estacionamientos','est_upd','update','public.es_admin()');
 select public._pol('estacionamientos','est_del','delete','public.es_admin()');
-select public._pol('estacionamiento_usos','eu_sel','select','public.es_staff() or (public.es_residente() and depto = public.mi_depto())');
+select public._pol('estacionamiento_usos','eu_sel','select','public.es_staff() or (public.es_residente() and public.es_mi_depto(depto))');
 select public._pol('estacionamiento_usos','eu_ins','insert','public.mi_rol() in (''conserje'',''admin'')');
 select public._pol('estacionamiento_usos','eu_upd','update','public.mi_rol() in (''conserje'',''admin'')');
 
 -- pagos, convenios y cuotas: comité y administración ven todo; cada unidad, lo suyo.
 -- Los pagos los registra y anula la administración; los convenios se crean y cambian con sus funciones.
-select public._pol('pagos','pag_sel','select','public.mi_rol() in (''comite'',''admin'') or (public.es_residente() and depto = public.mi_depto())');
+select public._pol('pagos','pag_sel','select','public.mi_rol() in (''comite'',''admin'') or (public.es_residente() and public.es_mi_depto(depto))');
 select public._pol('pagos','pag_ins','insert','public.es_admin()');
 select public._pol('pagos','pag_upd','update','public.es_admin()');
-select public._pol('convenios','cv_sel','select','public.mi_rol() in (''comite'',''admin'') or (public.es_residente() and depto = public.mi_depto())');
-select public._pol('convenio_cuotas','cc_sel','select','public.mi_rol() in (''comite'',''admin'') or (public.es_residente() and depto = public.mi_depto())');
+select public._pol('convenios','cv_sel','select','public.mi_rol() in (''comite'',''admin'') or (public.es_residente() and public.es_mi_depto(depto))');
+select public._pol('convenio_cuotas','cc_sel','select','public.mi_rol() in (''comite'',''admin'') or (public.es_residente() and public.es_mi_depto(depto))');
 -- caja: comité y administración leen; la administración registra
 select public._pol('caja_movimientos','cj_sel','select','public.mi_rol() in (''comite'',''admin'')');
 select public._pol('caja_movimientos','cj_ins','insert','public.es_admin()');
 select public._pol('caja_movimientos','cj_upd','update','public.es_admin()');
 select public._pol('caja_movimientos','cj_del','delete','public.es_admin()');
 -- lecturas: conserjería y administración las ingresan; comité las ve; cada unidad ve las suyas
-select public._pol('lecturas','lec_sel','select','public.mi_rol() in (''conserje'',''comite'',''admin'') or (public.es_residente() and depto = public.mi_depto())');
+select public._pol('lecturas','lec_sel','select','public.mi_rol() in (''conserje'',''comite'',''admin'') or (public.es_residente() and public.es_mi_depto(depto))');
 select public._pol('lecturas','lec_ins','insert','public.mi_rol() in (''conserje'',''admin'')');
 select public._pol('lecturas','lec_upd','update','public.mi_rol() in (''conserje'',''admin'')');
 select public._pol('lecturas','lec_del','delete','public.mi_rol() in (''conserje'',''admin'')');
@@ -4384,7 +4443,7 @@ select public._pol('fondo_movimientos','fm_sel','select','public.mi_rol() in (''
 select public._pol('fondo_movimientos','fm_ins','insert','public.es_admin()');
 select public._pol('fondo_movimientos','fm_del','delete','public.es_admin()');
 -- cargos: la administración los registra; el comité los ve; cada unidad ve los suyos
-select public._pol('cargos','car_sel','select','public.mi_rol() in (''comite'',''admin'') or (public.es_residente() and depto = public.mi_depto())');
+select public._pol('cargos','car_sel','select','public.mi_rol() in (''comite'',''admin'') or (public.es_residente() and public.es_mi_depto(depto))');
 select public._pol('cargos','car_ins','insert','public.es_admin()');
 select public._pol('cargos','car_upd','update','public.es_admin()');
 -- multas: catálogo e indicadores visibles para la comunidad; los casos, para administración y comité, para quien
@@ -4396,7 +4455,7 @@ select public._pol('indicadores','ind_del','delete','public.es_admin()');
 select public._pol('multas_catalogo','mc_sel','select','public.mi_rol() is not null and public.mi_rol() <> ''mantencion''');
 select public._pol('multas_catalogo','mc_ins','insert','public.es_admin()');
 select public._pol('multas_catalogo','mc_upd','update','public.es_admin()');
-select public._pol('infracciones','inf_sel','select','public.mi_rol() in (''comite'',''admin'') or creado_por = auth.uid() or (public.es_residente() and depto = public.mi_depto() and estado not in (''abierto'',''archivado''))');
+select public._pol('infracciones','inf_sel','select','public.mi_rol() in (''comite'',''admin'') or creado_por = auth.uid() or (public.es_residente() and public.es_mi_depto(depto) and estado not in (''abierto'',''archivado''))');
 select public._pol('infraccion_eventos','ie_sel','select','exists (select 1 from public.infracciones i where i.id = infraccion_id)');
 select public._pol('infraccion_votos','iv_sel','select','public.mi_rol() in (''comite'',''admin'')');
 -- datos personales: el teléfono, la propia persona y la administración; la bitácora, solo la administración
@@ -4415,19 +4474,19 @@ select public._pol('polizas','pol_upd','update','public.es_admin()');
 select public._pol('siniestros','sin_sel','select','public.mi_rol() in (''comite'',''admin'')');
 select public._pol('siniestros','sin_ins','insert','public.es_admin()');
 select public._pol('siniestros','sin_upd','update','public.es_admin()');
-select public._pol('unidad_documentos','ud_sel','select','public.mi_rol() in (''comite'',''admin'') or (public.mi_rol() = ''propietario'' and depto = public.mi_depto())');
-select public._pol('unidad_documentos','ud_ins','insert','public.es_admin() or (public.mi_rol() = ''propietario'' and depto = public.mi_depto())');
+select public._pol('unidad_documentos','ud_sel','select','public.mi_rol() in (''comite'',''admin'') or (public.mi_rol() = ''propietario'' and public.es_mi_depto(depto))');
+select public._pol('unidad_documentos','ud_ins','insert','public.es_admin() or (public.mi_rol() = ''propietario'' and public.es_mi_depto(depto))');
 select public._pol('unidad_documentos','ud_upd','update','public.es_admin()');
 -- registro reservado: la administración y la propia unidad (conserjería y comité, solo por ver_condiciones con motivo)
-select public._pol('condiciones_especiales','ce_sel','select','public.es_admin() or (public.es_residente() and depto = public.mi_depto())');
+select public._pol('condiciones_especiales','ce_sel','select','public.es_admin() or (public.es_residente() and public.es_mi_depto(depto))');
 -- suspensiones: administración y comité; la unidad, desde el aviso previo
-select public._pol('suspensiones','su_sel','select','public.mi_rol() in (''comite'',''admin'') or (public.es_residente() and depto = public.mi_depto() and estado in (''avisada'',''solicitada'',''suspendida'',''por_reponer'',''repuesta''))');
+select public._pol('suspensiones','su_sel','select','public.mi_rol() in (''comite'',''admin'') or (public.es_residente() and public.es_mi_depto(depto) and estado in (''avisada'',''solicitada'',''suspendida'',''por_reponer'',''repuesta''))');
 select public._pol('suspension_votos','sv_sel','select','public.mi_rol() in (''comite'',''admin'')');
 -- registro de copropietarios: reservado (administración y comité); cada unidad ve lo suyo
-select public._pol('registro_personas','rp_sel','select','public.mi_rol() in (''comite'',''admin'') or (public.es_residente() and depto = public.mi_depto())');
-select public._pol('registro_personas','rp_ins','insert','public.es_admin() or (public.mi_rol() = ''propietario'' and depto = public.mi_depto())');
-select public._pol('registro_personas','rp_upd','update','public.es_admin() or uid = auth.uid() or (public.mi_rol() = ''propietario'' and depto = public.mi_depto())');
-select public._pol('registro_confirmaciones','rc_sel','select','public.mi_rol() in (''comite'',''admin'') or (public.es_residente() and depto = public.mi_depto())');
+select public._pol('registro_personas','rp_sel','select','public.mi_rol() in (''comite'',''admin'') or (public.es_residente() and public.es_mi_depto(depto))');
+select public._pol('registro_personas','rp_ins','insert','public.es_admin() or (public.mi_rol() = ''propietario'' and public.es_mi_depto(depto))');
+select public._pol('registro_personas','rp_upd','update','public.es_admin() or uid = auth.uid() or (public.mi_rol() = ''propietario'' and public.es_mi_depto(depto))');
+select public._pol('registro_confirmaciones','rc_sel','select','public.mi_rol() in (''comite'',''admin'') or (public.es_residente() and public.es_mi_depto(depto))');
 -- asambleas: la comunidad ve las citadas, su asistencia, mociones y votos (el voto de asamblea es nominal);
 -- los poderes, la mesa, quien lo dio y el apoderado
 select public._pol('asambleas','as_sel','select','public.mi_rol() in (''comite'',''admin'') or (public.mi_rol() in (''residente'',''propietario'') and estado <> ''borrador'')');
@@ -4455,19 +4514,23 @@ select public._pol('contratos','ctr_sel','select','public.mi_rol() in (''comite'
 select public._pol('contratos','ctr_ins','insert','public.es_admin()');
 select public._pol('contratos','ctr_upd','update','public.es_admin()');
 select public._pol('contratos','ctr_del','delete','public.es_admin()');
+select public._pol('usuario_unidades','uu_sel','select','uid = auth.uid() or public.mi_rol() in (''conserje'',''comite'',''admin'')');
+select public._pol('usuario_unidades','uu_ins','insert','public.es_admin()');
+select public._pol('usuario_unidades','uu_upd','update','public.es_admin()');
+select public._pol('usuario_unidades','uu_del','delete','public.es_admin()');
 select public._pol('comunicado_lecturas','cl_sel','select','uid = auth.uid() or public.mi_rol() in (''comite'',''admin'')');
 select public._pol('turnos','tur_sel','select','public.mi_rol() in (''conserje'',''comite'',''admin'')');
 select public._pol('novedades','nov_sel','select','public.mi_rol() in (''conserje'',''comite'',''admin'')');
 select public._pol('novedades','nov_ins','insert','public.mi_rol() in (''conserje'',''comite'',''admin'')');
-select public._pol('unidad_vehiculos','uv_sel','select','public.mi_rol() in (''conserje'',''comite'',''admin'') or (public.es_residente() and depto = public.mi_depto())');
-select public._pol('unidad_vehiculos','uv_ins','insert','public.es_admin() or (public.es_residente() and depto = public.mi_depto())');
-select public._pol('unidad_vehiculos','uv_upd','update','public.es_admin() or (public.es_residente() and depto = public.mi_depto())');
-select public._pol('unidad_vehiculos','uv_del','delete','public.es_admin() or (public.es_residente() and depto = public.mi_depto())');
-select public._pol('unidad_mascotas','um_sel','select','public.mi_rol() in (''conserje'',''comite'',''admin'') or (public.es_residente() and depto = public.mi_depto())');
-select public._pol('unidad_mascotas','um_ins','insert','public.es_admin() or (public.es_residente() and depto = public.mi_depto())');
-select public._pol('unidad_mascotas','um_upd','update','public.es_admin() or (public.es_residente() and depto = public.mi_depto())');
-select public._pol('unidad_mascotas','um_del','delete','public.es_admin() or (public.es_residente() and depto = public.mi_depto())');
-select public._pol('unidad_espacios','ue_sel','select','public.mi_rol() in (''conserje'',''comite'',''admin'') or (public.es_residente() and depto = public.mi_depto())');
+select public._pol('unidad_vehiculos','uv_sel','select','public.mi_rol() in (''conserje'',''comite'',''admin'') or (public.es_residente() and public.es_mi_depto(depto))');
+select public._pol('unidad_vehiculos','uv_ins','insert','public.es_admin() or (public.es_residente() and public.es_mi_depto(depto))');
+select public._pol('unidad_vehiculos','uv_upd','update','public.es_admin() or (public.es_residente() and public.es_mi_depto(depto))');
+select public._pol('unidad_vehiculos','uv_del','delete','public.es_admin() or (public.es_residente() and public.es_mi_depto(depto))');
+select public._pol('unidad_mascotas','um_sel','select','public.mi_rol() in (''conserje'',''comite'',''admin'') or (public.es_residente() and public.es_mi_depto(depto))');
+select public._pol('unidad_mascotas','um_ins','insert','public.es_admin() or (public.es_residente() and public.es_mi_depto(depto))');
+select public._pol('unidad_mascotas','um_upd','update','public.es_admin() or (public.es_residente() and public.es_mi_depto(depto))');
+select public._pol('unidad_mascotas','um_del','delete','public.es_admin() or (public.es_residente() and public.es_mi_depto(depto))');
+select public._pol('unidad_espacios','ue_sel','select','public.mi_rol() in (''conserje'',''comite'',''admin'') or (public.es_residente() and public.es_mi_depto(depto))');
 select public._pol('unidad_espacios','ue_ins','insert','public.es_admin()');
 select public._pol('unidad_espacios','ue_upd','update','public.es_admin()');
 select public._pol('unidad_espacios','ue_del','delete','public.es_admin()');
@@ -4475,7 +4538,7 @@ select public._pol('presupuestos','pre_sel','select','public.mi_rol() in (''resi
 select public._pol('presupuestos','pre_ins','insert','public.es_admin()');
 select public._pol('presupuestos','pre_upd','update','public.es_admin()');
 select public._pol('presupuestos','pre_del','delete','public.es_admin()');
-select public._pol('certificados','cert_sel','select','public.mi_rol() in (''comite'',''admin'') or (public.es_residente() and depto = public.mi_depto())');
+select public._pol('certificados','cert_sel','select','public.mi_rol() in (''comite'',''admin'') or (public.es_residente() and public.es_mi_depto(depto))');
 select public._pol('suspension_eventos','se_sel','select','exists (select 1 from public.suspensiones x where x.id = suspension_id)');
 
 -- archivos_por_borrar: la administración los lee y los quita de la cola al borrarlos del bucket
@@ -4555,7 +4618,7 @@ create policy "fotos_delete" on storage.objects for delete to authenticated usin
 do $$
 declare t text;
 begin
-  foreach t in array array['edificios','empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos','certificados','banco_movimientos','banco_pagadores','presupuestos','emergencia_responsables','emergencia_simulacros','proveedores','contratos','turnos','novedades','unidad_vehiculos','unidad_mascotas','unidad_espacios','comunicado_lecturas']
+  foreach t in array array['edificios','empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos','certificados','banco_movimientos','banco_pagadores','presupuestos','emergencia_responsables','emergencia_simulacros','proveedores','contratos','turnos','novedades','unidad_vehiculos','unidad_mascotas','unidad_espacios','comunicado_lecturas','usuario_unidades']
   loop
     begin
       execute format('alter publication supabase_realtime add table public.%I', t);

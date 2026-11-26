@@ -267,6 +267,10 @@ La conserjería anota cada novedad (seguridad, mantención, aseo, visitas, recla
 
 ![Libro de novedades](docs/capturas/novedades.png)
 
+## Varias unidades por persona
+
+Una cuenta puede tener varias unidades: un segundo depto, o un estacionamiento o una bodega que tengan su propia alícuota. La administración las agrega en Administración → Usuarios ("+ unidad"), con el rol de la persona en cada una (propietario o residente). La persona ve en su inicio el saldo de todas sus unidades y elige con un selector cuál está usando: el gasto común, el estado de cuenta, las reservas, los votos y lo demás se muestran y se hacen para esa unidad. Los avisos y correos de cualquiera de sus unidades le llegan siempre.
+
 ## Fichas de las unidades
 
 Cada unidad registra en Mi cuenta sus **vehículos** (la patente se guarda en un solo formato) y **mascotas** (con foto y microchip); la administración asigna **bodegas y estacionamientos** (un número no se puede asignar a dos unidades). En el módulo Unidades, la conserjería, el comité y la administración buscan por unidad, propietario, patente, nombre de mascota o número de bodega, por ejemplo para ubicar un auto mal estacionado o una mascota perdida. Las otras unidades no ven estos datos.

@@ -2,6 +2,7 @@
 
 ## Sin publicar
 
+- **Varias unidades por persona**: la administración agrega a una cuenta otras unidades (un segundo depto, un estacionamiento o una bodega con alícuota propia), con el rol en cada una. La persona ve el saldo de todas en su inicio, elige cuál está usando con un selector y recibe los avisos y correos de todas.
 - **Comunicados por correo y con lectura registrada**: al publicar se puede enviar también por correo a toda la comunidad (cuentas y Registro de copropietarios, una vez por persona); la app registra qué unidades lo abrieron, y en los importantes cada unidad confirma con "Lo leí" y el inicio se lo recuerda. La administración y el comité ven qué unidades faltan.
 
 ## 0.3.0 — 2026-11-26
