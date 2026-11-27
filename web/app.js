@@ -240,6 +240,20 @@ function viewAuth(mode='login', msg=''){
     else { await q(sb.auth.resetPasswordForEmail(d.email.trim(),{redirectTo:location.origin+location.pathname+'#perfil'})); viewAuth('login','Si el correo existe, recibirás un enlace para cambiar la contraseña.'); return; }
   }catch(err){ $('#authErr').innerHTML=`<div class="err">${esc(traducirAuth(errMsg(err)))}</div>`; busy(b,false); } });
 }
+// Confirmar la identidad antes de un cambio delicado (lo pide el servidor local). Devuelve true si se confirmó.
+window.miEdificioReconfirmar = conCodigo => new Promise(res => {
+  // ventana propia: no cierra la que estaba abierta (por ejemplo, el asistente de configuración)
+  const m=document.createElement('div'); m.className='modal'; m.style.zIndex='1000'; document.body.appendChild(m);
+  m.innerHTML=`<div class="box"><h3>Confirma tu identidad</h3><p class="small muted">Por seguridad, este cambio pide tu contraseña${conCodigo?' y el código de tu app de autenticación':''}, aunque ya hayas iniciado sesión.</p><div id="rcErr"></div>
+    <form id="fRc"><label class="f"><span>Tu contraseña actual</span><input type="password" name="clave" required autocomplete="current-password"></label>${conCodigo?'<label class="f"><span>Código de 6 dígitos</span><input type="text" name="codigo" inputmode="numeric" autocomplete="one-time-code" maxlength="7" required></label>':''}
+    <div class="row wrap"><button type="button" class="btn sec" id="rcNo">Cancelar</button><button class="btn grow">Confirmar</button></div></form></div>`;
+  $('[name=clave]',m).focus();
+  let listo=false; const fin=v=>{ if(listo) return; listo=true; m.remove(); res(v); };
+  $('#rcNo',m).addEventListener('click',()=>fin(false));
+  m.addEventListener('click',e=>{ if(e.target===m) fin(false); });
+  $('#fRc',m).addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); const b=$('button.grow',m); busy(b,true);
+    try{ await q(sb.local.confirmar(d.clave, d.codigo||'')); fin(true); }catch(err){ $('#rcErr',m).innerHTML=`<div class="err">${esc(errMsg(err))}</div>`; busy(b,false); } }); });
+
 // Segundo paso: código de la app de autenticación (o un código de respaldo)
 function pedirCodigo(verificar, cancelar){
   render(`<div class="auth"><div class="center" style="margin-bottom:16px"><div class="logo-prev" style="margin:0 auto 10px">🔐</div><h1 style="margin:0">Verificación en dos pasos</h1></div>
@@ -388,8 +402,8 @@ async function tarjetaDosPasos(){ const el=$('#p2fa'); if(!el) return;
         <form id="f2On"><label class="f"><span>Código de 6 dígitos</span><input type="text" name="c" inputmode="numeric" autocomplete="one-time-code" maxlength="7" required style="font-size:22px;letter-spacing:4px;text-align:center"></label><button class="btn full">Activar</button></form>`);
       $('#f2On',m).addEventListener('submit', async ev=>{ ev.preventDefault(); const b=$('button',ev.target); busy(b,true); try{ const x=await q(sb.local.dosPasos.activar(formData(ev.target).c.trim())); closeModal(); toast('Verificación en dos pasos activada'); mostrarCodigos(x.codigos); tarjetaDosPasos(); }catch(err){ toast(errMsg(err)); busy(b,false); } }); });
     $('#d2Cod',el)?.addEventListener('click', async()=>{ const c=await askText('Para generar códigos nuevos, escribe el código de 6 dígitos de tu app (los anteriores dejan de servir)'); if(!c) return; try{ const x=await q(sb.local.dosPasos.codigos(c.trim())); mostrarCodigos(x.codigos); tarjetaDosPasos(); }catch(err){ toast(errMsg(err)); } });
-    $('#d2Off',el)?.addEventListener('click', async()=>{ const m=modal(`<h3>Desactivar la verificación en dos pasos</h3><p class="small muted">Tu cuenta quedará protegida solo por la contraseña.</p><form id="f2Off"><label class="f"><span>Tu contraseña</span><input type="password" name="c" required autocomplete="current-password"></label><button class="btn dan full">Desactivar</button></form>`);
-      $('#f2Off',m).addEventListener('submit', async ev=>{ ev.preventDefault(); try{ await q(sb.local.dosPasos.desactivar(formData(ev.target).c)); closeModal(); toast('Verificación en dos pasos desactivada'); tarjetaDosPasos(); }catch(err){ toast(errMsg(err)); } }); });
+    $('#d2Off',el)?.addEventListener('click', async()=>{ if(!await confirmBox('¿Desactivar la verificación en dos pasos? Tu cuenta quedará protegida solo por la contraseña.')) return;
+      try{ await q(sb.local.dosPasos.desactivar()); toast('Verificación en dos pasos desactivada'); tarjetaDosPasos(); }catch(err){ toast(errMsg(err)); } });
     return; }
   // Supabase
   if(!sb.auth.mfa){ el.innerHTML='<p class="small muted">No disponible en esta instalación.</p>'; return; }
