@@ -383,6 +383,13 @@ create table if not exists public.ot (
 -- Fecha en que la administración planifica la orden (calendario de mantenciones). La visita confirmada por la
 -- empresa va en fecha_agendada; mientras no la confirme, el calendario muestra esta.
 alter table public.ot add column if not exists fecha_programada date;
+-- Aviso a la comunidad (p. ej. mantención de ascensores): al confirmarse la visita se publica un comunicado
+-- (y, si se elige, por correo), y la tarde anterior un recordatorio. aviso_fecha es la fecha ya avisada.
+alter table public.ot add column if not exists aviso_residentes boolean not null default false;
+alter table public.ot add column if not exists aviso_texto      text not null default '';
+alter table public.ot add column if not exists aviso_correo     boolean not null default false;
+alter table public.ot add column if not exists aviso_fecha      date;
+alter table public.ot add column if not exists aviso_recordado  date;
 
 -- Encuestas del comité: un voto por unidad (depto), modificable mientras esté abierta
 create table if not exists public.encuestas (
@@ -1132,6 +1139,8 @@ create table if not exists public.proveedor_ingresos (
   ts          timestamptz default now()
 );
 create index if not exists proveedor_ingresos_idx on public.proveedor_ingresos (edificio_id, estado, programado);
+-- Visita técnica de una orden de trabajo: conserjería la espera en Ingresos el día confirmado
+alter table public.proveedor_ingresos add column if not exists ot_id uuid references public.ot(id) on delete set null;
 
 
 -- Libro de novedades de conserjería: lo anotado no se edita ni se borra (se corrige con otra anotación).
@@ -1653,11 +1662,69 @@ begin
   new.incidencia_id := old.incidencia_id; new.activo_id := old.activo_id; new.preventiva := old.preventiva;
   new.prioridad := old.prioridad; new.limite := old.limite; new.aprobado_at := old.aprobado_at;
   new.fecha_programada := old.fecha_programada;
+  new.aviso_residentes := old.aviso_residentes; new.aviso_texto := old.aviso_texto; new.aviso_correo := old.aviso_correo;
+  new.aviso_fecha := old.aviso_fecha; new.aviso_recordado := old.aviso_recordado;
   return new;
 end $$;
 drop trigger if exists ot_antes_update on public.ot;
 create trigger ot_antes_update before update on public.ot
 for each row execute function public.ot_antes_update();
+
+create schema if not exists privado;
+create or replace function privado.fecha_larga(d date) returns text
+language sql immutable as $$
+  select (array['domingo','lunes','martes','miércoles','jueves','viernes','sábado'])[extract(dow from d)::int + 1] || ' ' || extract(day from d)::int || ' de '
+    || (array['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'])[extract(month from d)::int]
+$$;
+create or replace function privado.aviso_ot_titulo(o public.ot) returns text
+language sql stable security definer set search_path = public as $$
+  select 'Mantención' || coalesce(': ' || (select nullif(trim(a.nombre), '') from public.activos a where a.id = o.activo_id), '')
+$$;
+
+-- Aviso a la comunidad: se ejecuta después de ot_antes_update (orden alfabético), con los datos ya validados.
+-- Se avisa la visita confirmada (fecha_agendada): al confirmarse, si cambia de fecha, y si se suspende.
+create or replace function privado.ot_aviso_residentes() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare tit text; cuerpo text; vigente boolean;
+begin
+  vigente := new.estado not in ('rechazada','aprobada','cierre_tecnico') and new.fecha_agendada is not null and new.fecha_agendada >= public.hoy();
+  if new.aviso_residentes and vigente and new.fecha_agendada is distinct from new.aviso_fecha then
+    tit := case when new.aviso_fecha is null then '🔧 ' else '🔧 Cambio de fecha · ' end || privado.aviso_ot_titulo(new) || ' · ' || privado.fecha_larga(new.fecha_agendada);
+    cuerpo := coalesce(nullif(trim(new.aviso_texto), ''), 'Se realizará una mantención en el edificio.') || E'\n\n'
+      || 'Fecha: ' || privado.fecha_larga(new.fecha_agendada) || coalesce(', desde las ' || nullif(trim(new.hora_agendada), ''), '') || '.'
+      || case when new.aviso_fecha is not null and new.aviso_fecha >= public.hoy() then E'\nReemplaza al aviso anterior, que la anunciaba para el ' || privado.fecha_larga(new.aviso_fecha) || '.' else '' end;
+    insert into public.comunicados (edificio_id, titulo, cuerpo, rol, por_correo) values (new.edificio_id, tit, cuerpo, 'admin', new.aviso_correo);
+    perform privado.push(new.edificio_id, privado.usuarios_de(new.edificio_id, '{residente,propietario,conserje,comite}'), tit, coalesce(', desde las ' || nullif(trim(new.hora_agendada), ''), 'Toca para ver el aviso'), '#comunicados');
+    new.aviso_fecha := new.fecha_agendada; new.aviso_recordado := null;
+  elsif new.aviso_fecha is not null and new.aviso_fecha >= public.hoy() and not vigente and new.estado <> 'aprobada' and new.estado <> 'cierre_tecnico' then
+    -- estaba avisada y quedó sin fecha confirmada (se reprogramó o la empresa la rechazó)
+    tit := '🔧 Postergada · ' || privado.aviso_ot_titulo(new);
+    insert into public.comunicados (edificio_id, titulo, cuerpo, rol, por_correo) values (new.edificio_id, tit,
+      'La mantención anunciada para el ' || privado.fecha_larga(new.aviso_fecha) || ' se postergó. Avisaremos la nueva fecha.', 'admin', new.aviso_correo);
+    perform privado.push(new.edificio_id, privado.usuarios_de(new.edificio_id, '{residente,propietario,conserje,comite}'), tit, 'Ya no es el ' || privado.fecha_larga(new.aviso_fecha), '#comunicados');
+    new.aviso_fecha := null; new.aviso_recordado := null;
+  end if;
+  return new;
+end $$;
+drop trigger if exists ot_aviso_residentes on public.ot;
+create trigger ot_aviso_residentes before insert or update on public.ot for each row execute function privado.ot_aviso_residentes();
+
+-- Recordatorio la tarde anterior (desde las 19 h), una sola vez por fecha
+create or replace function privado.recordar_mantenciones(p_ahora timestamptz default now()) returns int
+language plpgsql security definer set search_path = public as $$
+declare o public.ot; n int := 0; tit text;
+begin
+  if extract(hour from p_ahora at time zone 'America/Santiago') < 19 then return 0; end if;
+  for o in select * from public.ot where aviso_residentes and aviso_fecha = fecha_agendada and fecha_agendada = (p_ahora at time zone 'America/Santiago')::date + 1
+      and aviso_recordado is distinct from fecha_agendada and estado in ('aceptada','agendada') loop
+    tit := '🔧 Mañana · ' || privado.aviso_ot_titulo(o);
+    perform privado.push(o.edificio_id, privado.usuarios_de(o.edificio_id, '{residente,propietario,conserje,comite}'), tit,
+      coalesce('Desde las ' || nullif(trim(o.hora_agendada), '') || '. ', '') || left(coalesce(nullif(trim(o.aviso_texto), ''), 'Mantención en el edificio.'), 140), '#comunicados');
+    update public.ot set aviso_recordado = o.fecha_agendada where id = o.id;
+    n := n + 1;
+  end loop;
+  return n;
+end $$;
 
 -- ---------------------------------------------------------------------
 -- Pagos y convenios
@@ -4172,6 +4239,35 @@ begin
   return null;
 end $$;
 
+-- La visita confirmada de una orden se programa en Ingresos (si el edificio usa ese módulo), y se mantiene al día
+-- si cambia de fecha o se cancela. Solo se tocan las que siguen "programado" (nunca un ingreso ya registrado).
+create or replace function privado.tg_ot_porteria() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare ed public.edificios; emp text; dest text; v_nota text; vigente boolean; prog uuid;
+begin
+  select * into ed from public.edificios where id = new.edificio_id;
+  if coalesce(ed.modulos ->> 'ingresos', 'on') = 'off' then return null; end if;
+  vigente := new.estado in ('agendada','aceptada','en_terreno') and new.fecha_agendada is not null and new.fecha_agendada >= public.hoy();
+  select id into prog from public.proveedor_ingresos where ot_id = new.id and estado = 'programado' limit 1;
+  if not vigente then
+    if prog is not null and new.estado <> 'en_terreno' then delete from public.proveedor_ingresos where id = prog; end if;
+    return null;
+  end if;
+  select nombre into emp from public.empresas where id = new.empresa_id;
+  select nullif(concat_ws(' · ', nullif(trim(a.nombre), ''), nullif(trim(a.ubicacion), '')), '') into dest from public.activos a where a.id = new.activo_id;
+  v_nota := coalesce('Visita a las ' || nullif(trim(new.hora_agendada), ''), '') ;
+  if prog is not null then
+    update public.proveedor_ingresos set programado = new.fecha_agendada, empresa = coalesce(nullif(trim(emp), ''), empresa), motivo = 'OT: ' || new.titulo,
+      destino = coalesce(dest, destino), nota = v_nota where id = prog;
+  elsif not exists (select 1 from public.proveedor_ingresos where ot_id = new.id and coalesce(ingreso_at, programado::timestamptz)::date >= new.fecha_agendada) then
+    insert into public.proveedor_ingresos (edificio_id, empresa, motivo, destino, programado, estado, nota, ot_id)
+    values (new.edificio_id, coalesce(nullif(trim(emp), ''), 'Empresa de mantención'), 'OT: ' || new.titulo, coalesce(dest, ''), new.fecha_agendada, 'programado', v_nota, new.id);
+  end if;
+  return null;
+end $$;
+drop trigger if exists ot_porteria on public.ot;
+create trigger ot_porteria after insert or update of estado, fecha_agendada, hora_agendada, empresa_id, titulo on public.ot for each row execute function privado.tg_ot_porteria();
+
 create or replace function privado.tg_push_ot() returns trigger
 language plpgsql security definer set search_path = public as $$
 begin
@@ -4278,6 +4374,7 @@ end $$;
 do $$ begin
   create extension if not exists pg_cron;
   perform cron.schedule('mi-edificio-estacionamientos', '*/5 * * * *', 'select privado.revisar_estacionamientos()');
+  perform cron.schedule('mi-edificio-mantenciones', '7 * * * *', 'select privado.recordar_mantenciones()');
 exception when others then
   raise notice 'pg_cron no disponible: los avisos de estacionamiento solo se revisan mientras conserjería tiene la app abierta';
 end $$;

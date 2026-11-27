@@ -781,3 +781,33 @@ select t.ok((select estado = 'aceptada' and fecha_programada = public.hoy() + 10
 select t.soy(:'a5'); select t.ok((select count(*) = 1 from ot where id = :'otm'), 'el comité ve el calendario');
 select t.soy(:'a2'); select t.ok((select count(*) = 0 from ot), 'los residentes no ven las órdenes');
 \echo 'OK: calendario de mantenciones'
+
+-- ============ aviso a los residentes y visita en portería ============
+select t.soy(:'a1');
+update ot set aviso_residentes = true, aviso_texto = 'Los ascensores no funcionarán durante la mañana.', aviso_correo = true where id = :'otm';
+select t.ok(not exists (select 1 from comunicados where titulo like '🔧%'), 'sin visita confirmada todavía no se avisa');
+select t.soy(:'m1');
+update ot set aviso_residentes = false where id = :'otm';
+update ot set estado = 'agendada', fecha_agendada = public.hoy() + 9, hora_agendada = '09:00' where id = :'otm';
+select t.ok((select aviso_residentes and aviso_fecha = public.hoy() + 9 from ot where id = :'otm'), 'la empresa no quita el aviso, y al confirmar la visita se avisa');
+select t.soy(:'a2');
+select id as com_ot from comunicados where titulo like '🔧 Mantención%' \gset
+select t.ok((select count(*) = 1 from comunicados where titulo like '🔧 Mantención%' and cuerpo like 'Los ascensores no funcionarán%' and cuerpo like '%desde las 09:00.%'), 'los residentes reciben un comunicado con la fecha y la hora');
+reset role; select set_config('request.jwt.claim.sub', '', false);
+select t.ok((select count(*) > 0 from correos where referencia = 'comunicados/' || :'com_ot'), 'y, si se eligió, por correo');
+select t.soy(:'a4');
+select t.ok((select count(*) = 1 from proveedor_ingresos where ot_id = :'otm' and estado = 'programado' and programado = public.hoy() + 9 and empresa = 'Bombas Ltda' and nota = 'Visita a las 09:00'), 'conserjería espera la visita en Ingresos');
+select t.soy(:'m1'); update ot set fecha_agendada = public.hoy() + 11 where id = :'otm';
+select t.soy(:'a2'); select t.ok((select count(*) = 1 from comunicados where titulo like '🔧 Cambio de fecha%' and cuerpo like '%Reemplaza al aviso anterior%'), 'un cambio de fecha se vuelve a avisar');
+select t.soy(:'a4'); select t.ok((select count(*) = 1 and min(programado) = public.hoy() + 11 from proveedor_ingresos where ot_id = :'otm'), 'y la portería se actualiza, sin duplicar');
+select t.soy(:'a1'); update ot set fecha_agendada = null, hora_agendada = null, estado = 'aceptada', fecha_programada = public.hoy() + 14 where id = :'otm';
+select t.soy(:'a2'); select t.ok(exists (select 1 from comunicados where titulo like '🔧 Postergada%'), 'si se reprograma sin fecha confirmada, se avisa que se postergó');
+select t.soy(:'a4'); select t.ok(not exists (select 1 from proveedor_ingresos where ot_id = :'otm'), 'y sale de los programados de portería');
+select t.soy(:'a1'); update ot set estado = 'agendada', fecha_agendada = public.hoy() + 1, hora_agendada = '' where id = :'otm';
+select t.ok((select aviso_fecha = public.hoy() + 1 from ot where id = :'otm'), 'la administración puede confirmar la visita ella misma');
+reset role; select set_config('request.jwt.claim.sub', '', false);
+select t.ok(privado.recordar_mantenciones((public.hoy() + time '12:00') at time zone 'America/Santiago') = 0, 'el recordatorio no sale antes de la tarde');
+select t.ok(privado.recordar_mantenciones((public.hoy() + time '20:00') at time zone 'America/Santiago') = 1, 'la tarde anterior se recuerda');
+select t.ok(privado.recordar_mantenciones((public.hoy() + time '21:00') at time zone 'America/Santiago') = 0, 'una sola vez');
+select t.soy(:'a2'); select t.ok((select count(*) = 0 from ot) and (select count(*) = 0 from proveedor_ingresos), 'los residentes no ven las órdenes ni la portería');
+\echo 'OK: aviso a los residentes y visita en portería'

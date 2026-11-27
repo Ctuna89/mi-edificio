@@ -3,6 +3,9 @@
 ## Sin publicar
 
 - **Calendario de mantenciones** (Mantención → Calendario), al estilo de un planificador: vista de mes o de semana con las órdenes de trabajo, el plan preventivo proyectado de cada activo y los vencimientos de contratos, con un color por empresa y filtros. La administración arrastra una orden (o una mantención del plan) a un día para programarla; las órdenes sin fecha esperan en un panel lateral. La empresa recibe el aviso y confirma la visita con su hora; si la administración la cambia después, la empresa debe confirmarla de nuevo. Las atrasadas se marcan. En el teléfono se programa desde el detalle de la orden. Se exporta a Outlook, Google Calendar o el teléfono (.ics).
+- **Aviso a los residentes de una mantención** (p. ej. ascensores): cada orden de trabajo puede avisar a la comunidad, con un mensaje propio. Se sugiere marcado cuando el activo afecta a todos (ascensor, agua, luz, gas, portón…). Al confirmarse la visita se publica un comunicado con la fecha y la hora (y, si se elige, por correo) con notificación al teléfono; si cambia la fecha o se posterga se avisa de nuevo, y la tarde anterior llega un recordatorio. La empresa no puede quitar el aviso.
+- **La conserjería espera a los técnicos**: la visita confirmada de una orden aparece sola en Ingresos como programada para ese día (con la hora y el lugar), y en el inicio de conserjería entre "Proveedores que vienen hoy"; se actualiza si cambia de fecha y desaparece si se cancela.
+- La administración puede **confirmar ella misma la visita** con fecha y hora, para empresas que no usan la app.
 - Servidor local: al guardar varias filas de una vez se guardaban solo las columnas de la primera (ahora todas, como en Supabase).
 
 ## 0.3.2 — 2026-11-27

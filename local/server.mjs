@@ -784,6 +784,7 @@ const diaLocal = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2,
 async function tareas() {
   try {
     const r = await db.query(`select privado.revisar_estacionamientos() as n`); if (r.rows[0].n > 0) difundir();
+    await db.query(`select privado.recordar_mantenciones()`);
     await db.query(`delete from auth.sesiones where expira < now()`);
     const hoy = new Date(); const dia = diaLocal(hoy);
     if (dia !== CFG.diarioHecho && hoy.getHours() >= horaDiaria()) {
