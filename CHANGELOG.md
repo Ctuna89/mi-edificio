@@ -1,5 +1,9 @@
 # Cambios
 
+## Sin publicar
+
+- **Verificación en dos pasos** (voluntaria): en Mi cuenta se activa con el código QR de una app de autenticación (Google Authenticator, Microsoft Authenticator u otra); se entregan 10 códigos de respaldo de un solo uso. En la instalación local un código no sirve dos veces, el desafío se anula tras 5 intentos y la administración puede quitarla a quien perdió el teléfono (queda en la bitácora y cierra sus sesiones). En Supabase usa los factores TOTP de Supabase Auth.
+
 ## 0.3.1 — 2026-11-26
 
 - **Facturas de proveedores** (Finanzas → Facturas): se sube el XML de la factura electrónica del SII (uno o varios documentos, cualquier codificación) y la app lee emisor, folio, fecha, vencimiento, neto, IVA, total y detalle; también se registran a mano. Se ligan al proveedor por su RUT (o lo crean), no se duplican, quedan por pagar y al pagarlas pasan al flujo de caja; en la cartola, un cargo con el mismo total se marca como el pago de la factura, con un solo egreso. Aviso de facturas vencidas.

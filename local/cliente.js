@@ -33,7 +33,10 @@ function createClient(){
   let sesion, oyentes=[];
   const cargar=()=>fetch('/api/auth/sesion',{credentials:'same-origin'}).then(r=>r.json()).then(j=>j.data||null).catch(()=>null);
   const avisar=ev=>oyentes.forEach(f=>{ try{ f(ev,sesion); }catch(e){ console.error(e); } });
-  const entrar=async(ruta,cred)=>{ const r=await api(ruta,{email:cred.email, clave:cred.password}); if(r.error) return r; sesion=r.data; avisar('SIGNED_IN'); return {data:{session:sesion, user:sesion.user}, error:null}; };
+  const entrar=async(ruta,cred)=>{ const r=await api(ruta,{email:cred.email, clave:cred.password}); if(r.error) return r;
+    if(r.data&&r.data.mfa) return {data:{session:null, user:null, mfa:r.data}, error:null};   // falta el segundo paso
+    sesion=r.data; avisar('SIGNED_IN'); return {data:{session:sesion, user:sesion.user}, error:null}; };
+  const verificar=async(desafio,codigo)=>{ const r=await api('/api/auth/verificar',{desafio, codigo}); if(r.error) return r; const aviso=r.data.aviso; delete r.data.aviso; sesion=r.data; avisar('SIGNED_IN'); return {data:{session:sesion, aviso}, error:null}; };
 
   // Cambios en vivo: el servidor avisa "algo cambió" y cada vista vuelve a consultar lo suyo
   let es=null; const canales=new Set();
@@ -62,6 +65,9 @@ function createClient(){
     }) },
     // Solo modo local: lo que no existe en Supabase
     local:{ restablecer:(uid,clave)=>api('/api/auth/restablecer',{uid, clave}),
+      // verificación en dos pasos (TOTP) de la instalación local
+      dosPasos:{ verificar, estado:()=>api('/api/2fa/estado'), iniciar:()=>api('/api/2fa/iniciar'), activar:codigo=>api('/api/2fa/activar',{codigo}), codigos:codigo=>api('/api/2fa/codigos',{codigo}),
+        desactivar:clave=>api('/api/2fa/desactivar',{clave}), quitar:uid=>api('/api/2fa/quitar',{uid}), lista:()=>api('/api/2fa/lista') },
       // respaldo cifrado en una carpeta sincronizada con la nube (OneDrive, Google Drive…)
       // versión instalada, versiones nuevas y actualización con un clic
       sistema:{ estado:()=>api('/api/sistema/estado'), buscar:()=>api('/api/sistema/buscar'), actualizar:()=>api('/api/sistema/actualizar') },

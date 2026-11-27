@@ -11,6 +11,13 @@ create table if not exists auth.users (
   clave  text not null,                  -- scrypt: sal:hash
   creado timestamptz default now()
 );
+-- Verificación en dos pasos (voluntaria): secreto TOTP cifrado, códigos de respaldo (sha256) y el último
+-- intervalo usado, para que un código no sirva dos veces
+alter table auth.users add column if not exists totp_secreto text;
+alter table auth.users add column if not exists totp_pendiente text;
+alter table auth.users add column if not exists totp_activo boolean not null default false;
+alter table auth.users add column if not exists totp_respaldo text[] not null default '{}';
+alter table auth.users add column if not exists totp_paso bigint not null default 0;
 create table if not exists auth.sesiones (
   token_hash text primary key,           -- sha256 del token de la cookie
   user_id    uuid not null references auth.users(id) on delete cascade,

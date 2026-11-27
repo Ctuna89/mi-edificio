@@ -208,6 +208,41 @@ async function abrirSesion(req, res, user) {
   ponerGalleta(req, res, tk, SESION_DIAS * 86400);
   return { user: { id: user.id, email: user.email } };
 }
+// ---------- Verificación en dos pasos (TOTP, RFC 6238: 30 s, 6 dígitos, SHA-1, compatible con cualquier app) ----------
+const B32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+const aBase32 = buf => { let bits = '', out = ''; for (const b of buf) bits += b.toString(2).padStart(8, '0'); for (let i = 0; i + 5 <= bits.length; i += 5) out += B32[parseInt(bits.slice(i, i + 5), 2)]; return out; };
+const deBase32 = s => { const bits = String(s).toUpperCase().replace(/[^A-Z2-7]/g, '').split('').map(c => B32.indexOf(c).toString(2).padStart(5, '0')).join(''); const out = []; for (let i = 0; i + 8 <= bits.length; i += 8) out.push(parseInt(bits.slice(i, i + 8), 2)); return Buffer.from(out); };
+function totp(secreto, paso) {
+  const m = Buffer.alloc(8); m.writeBigUInt64BE(BigInt(paso));
+  const h = crypto.createHmac('sha1', secreto).update(m).digest(), o = h[h.length - 1] & 15;
+  return String(((h.readUInt32BE(o) & 0x7fffffff) % 1000000)).padStart(6, '0');
+}
+// El secreto se guarda cifrado con una llave derivada del secreto de la instalación (que viaja en el respaldo cifrado)
+const llaveTotp = () => crypto.createHash('sha256').update('mi-edificio-totp|' + CFG.secreto).digest();
+const cifrarT = buf => { const iv = crypto.randomBytes(12), c = crypto.createCipheriv('aes-256-gcm', llaveTotp(), iv); const x = Buffer.concat([c.update(buf), c.final()]); return Buffer.concat([iv, x, c.getAuthTag()]).toString('base64'); };
+const descifrarT = s => { const b = Buffer.from(s, 'base64'), d = crypto.createDecipheriv('aes-256-gcm', llaveTotp(), b.subarray(0, 12)); d.setAuthTag(b.subarray(b.length - 16)); return Buffer.concat([d.update(b.subarray(12, b.length - 16)), d.final()]); };
+// Devuelve el intervalo que calza (±30 s), o 0
+function pasoValido(secreto, codigo, ultimo) {
+  const c = String(codigo || '').replace(/\D/g, ''); if (c.length !== 6) return 0;
+  const ahora = Math.floor(Date.now() / 30000);
+  for (const p of [ahora, ahora - 1, ahora + 1]) if (p > ultimo && crypto.timingSafeEqual(Buffer.from(totp(secreto, p)), Buffer.from(c))) return p;
+  return 0;
+}
+const nuevosCodigos = () => Array.from({ length: 10 }, () => { const x = crypto.randomBytes(5).toString('hex').toUpperCase(); return x.slice(0, 5) + '-' + x.slice(5); });
+const normCodigo = c => String(c || '').toUpperCase().replace(/[^0-9A-F]/g, '');
+// Segundo paso pendiente: tras la contraseña correcta queda un desafío de 5 minutos y 5 intentos
+const desafios = new Map();
+setInterval(() => { const a = Date.now(); for (const [k, v] of desafios) if (v.expira < a) desafios.delete(k); }, 60000).unref();
+async function verificarSegundo(uid, codigo) {
+  const r = (await db.query(`select totp_secreto, totp_respaldo, totp_paso from auth.users where id = $1 and totp_activo`, [uid])).rows[0];
+  if (!r) return false;
+  const p = pasoValido(descifrarT(r.totp_secreto), codigo, Number(r.totp_paso));
+  if (p) { await db.query(`update auth.users set totp_paso = $2 where id = $1`, [uid, p]); return true; }
+  const h = sha(normCodigo(codigo));
+  if (normCodigo(codigo).length === 10 && r.totp_respaldo.includes(h)) { await db.query(`update auth.users set totp_respaldo = array_remove(totp_respaldo, $2) where id = $1`, [uid, h]); return 'respaldo'; }
+  return false;
+}
+
 // Freno a los intentos de adivinar contraseñas: 8 fallos seguidos → 5 minutos de espera
 const intentos = new Map();
 const ipDe = req => (req.headers['cf-connecting-ip'] || (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || '');
@@ -227,10 +262,26 @@ const AUTH = {
   },
   async entrar(req, res, { email, clave }) {
     email = String(email || '').trim().toLowerCase(); const k = email + '|' + ipDe(req); frenar(k);
-    const r = await db.query(`select id, email, clave from auth.users where email = $1`, [email]);
+    const r = await db.query(`select id, email, clave, totp_activo from auth.users where email = $1`, [email]);
     const ok = !!r.rows[0] && coincide(String(clave || ''), r.rows[0].clave); anotar(k, ok);
     if (!ok) throw new Fallo('Invalid login credentials');
+    if (r.rows[0].totp_activo) {   // falta el segundo paso: todavía no hay sesión
+      const desafio = crypto.randomBytes(24).toString('base64url');
+      desafios.set(desafio, { uid: r.rows[0].id, email: r.rows[0].email, expira: Date.now() + 5 * 60000, n: 0 });
+      return { mfa: true, desafio };
+    }
     return abrirSesion(req, res, r.rows[0]);
+  },
+  async verificar(req, res, { desafio, codigo }) {
+    const k = 'm|' + ipDe(req); frenar(k);
+    const d = desafios.get(String(desafio || ''));
+    if (!d || d.expira < Date.now()) { desafios.delete(desafio); throw new Fallo('El inicio de sesión expiró. Vuelve a escribir tu contraseña.', 401); }
+    const ok = await verificarSegundo(d.uid, codigo); anotar(k, !!ok);
+    if (!ok) { if (++d.n >= 5) desafios.delete(desafio); throw new Fallo('Código incorrecto'); }
+    desafios.delete(desafio);
+    const ses = await abrirSesion(req, res, { id: d.uid, email: d.email });
+    if (ok === 'respaldo') ses.aviso = 'Usaste un código de respaldo: cada uno sirve una sola vez.';
+    return ses;
   },
   async salir(req, res) { const tk = galleta(req); if (tk) await db.query(`delete from auth.sesiones where token_hash = $1`, [sha(tk)]); ponerGalleta(req, res, '', 0); return null; },
   async clave(req, res, { clave }, ses) {
@@ -249,6 +300,62 @@ const AUTH = {
     return null;
   },
 };
+
+async function dosPasos(req, accion, d, ses) {
+  const uid = ses.user.id;
+  const yo = async () => (await db.query(`select email, clave, totp_activo, totp_pendiente, cardinality(totp_respaldo) as quedan from auth.users where id = $1`, [uid])).rows[0];
+  const u = await yo();
+  if (accion === 'estado') return { activo: u.totp_activo, quedan: u.totp_activo ? Number(u.quedan) : 0 };
+  if (accion === 'iniciar') {
+    if (u.totp_activo) throw new Fallo('Ya está activada');
+    const s = crypto.randomBytes(20);
+    await db.query(`update auth.users set totp_pendiente = $2 where id = $1`, [uid, cifrarT(s)]);
+    const emisor = 'Mi Edificio', b = aBase32(s);
+    return { secreto: b, uri: `otpauth://totp/${encodeURIComponent(emisor + ':' + u.email)}?secret=${b}&issuer=${encodeURIComponent(emisor)}&period=30&digits=6&algorithm=SHA1` };
+  }
+  if (accion === 'activar') {
+    frenar('a|' + uid);
+    if (u.totp_activo || !u.totp_pendiente) throw new Fallo('Primero genera el código QR');
+    const p = pasoValido(descifrarT(u.totp_pendiente), d.codigo, 0); anotar('a|' + uid, !!p);
+    if (!p) throw new Fallo('El código no coincide. Revisa que la hora del teléfono esté bien y prueba con el código nuevo.');
+    const cods = nuevosCodigos();
+    await db.query(`update auth.users set totp_secreto = totp_pendiente, totp_pendiente = null, totp_activo = true, totp_paso = $2, totp_respaldo = $3 where id = $1`, [uid, p, cods.map(c => sha(normCodigo(c)))]);
+    await db.query(`delete from auth.sesiones where user_id = $1 and token_hash <> $2`, [uid, sha(galleta(req))]);   // las demás sesiones vuelven a entrar con el segundo paso
+    return { activo: true, codigos: cods };
+  }
+  if (accion === 'codigos') {
+    frenar('a|' + uid);
+    const ok = u.totp_activo && await verificarSegundo(uid, d.codigo) === true; anotar('a|' + uid, ok);
+    if (!ok) throw new Fallo('Código incorrecto');
+    const cods = nuevosCodigos();
+    await db.query(`update auth.users set totp_respaldo = $2 where id = $1`, [uid, cods.map(c => sha(normCodigo(c)))]);
+    return { activo: true, codigos: cods };
+  }
+  if (accion === 'desactivar') {
+    frenar('a|' + uid);
+    const ok = coincide(String(d.clave || ''), u.clave); anotar('a|' + uid, ok);
+    if (!ok) throw new Fallo('La contraseña no es correcta');
+    await db.query(`update auth.users set totp_activo = false, totp_secreto = null, totp_pendiente = null, totp_respaldo = '{}', totp_paso = 0 where id = $1`, [uid]);
+    return { activo: false };
+  }
+  if (accion === 'quitar') {   // la administración, a quien perdió el teléfono y sus códigos
+    const ok = await como(uid, tx => tx.query(`select public.es_admin() and exists (select 1 from public.usuarios where id = $1 and edificio_id = public.mi_edificio()) as ok`, [d.uid]));
+    if (!ok.rows[0]?.ok) throw new Fallo('Solo la administración puede quitar la verificación en dos pasos', 403);
+    if (d.uid === uid) throw new Fallo('Para tu propia cuenta, desactívala en Mi cuenta');
+    await db.query(`update auth.users set totp_activo = false, totp_secreto = null, totp_pendiente = null, totp_respaldo = '{}', totp_paso = 0 where id = $1`, [d.uid]);
+    await db.query(`delete from auth.sesiones where user_id = $1`, [d.uid]);
+    await db.query(`insert into public.auditoria (edificio_id, uid, accion, tabla, registro, motivo) select edificio_id, $2, 'cambiar', 'usuarios', $1::text, 'Se quitó la verificación en dos pasos' from public.usuarios where id = $1`, [d.uid, uid]).catch(e => log('auditoría 2FA:', e.message));
+    return { activo: false };
+  }
+  if (accion === 'lista') {   // qué cuentas del edificio la tienen activa (solo administración)
+    const ok = await como(uid, tx => tx.query(`select public.es_admin() as ok`));
+    if (!ok.rows[0]?.ok) throw new Fallo('Solo administración', 403);
+    const r = await como(uid, tx => tx.query(`select id from public.usuarios where edificio_id = public.mi_edificio()`));
+    const ids = r.rows.map(x => x.id);
+    return (await db.query(`select id from auth.users where totp_activo and id = any($1::uuid[])`, [ids])).rows.map(x => x.id);
+  }
+  throw new Fallo('No encontrado', 404);
+}
 
 // ---------------------------------------------------------------------
 // Consultas de la app → SQL. Los valores viajan como JSON y Postgres los convierte al tipo
@@ -717,6 +824,7 @@ async function api(req, res, url) {
     else if (ruta !== '/api/respaldo/estado') throw new Fallo('No encontrado', 404);
     return responder(res, 200, { data: estadoRespaldo() });
   }
+  if (ruta.startsWith('/api/2fa/')) return responder(res, 200, { data: await dosPasos(req, ruta.slice('/api/2fa/'.length), cuerpo, ses) });
   if (ruta.startsWith('/api/correo/')) {   // solo administración
     const adm = await como(uid, tx => tx.query(`select public.es_admin() as ok`)); if (!adm.rows[0]?.ok) throw new Fallo('Solo la administración puede configurar el correo', 403);
     let enviado = null;

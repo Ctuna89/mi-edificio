@@ -194,6 +194,37 @@ test('correo: la administración configura el SMTP y la app envía las notificac
   } finally { smtp.close(); await ana.pedir('/api/correo/configurar', { borrar: true, proveedor: 'otro', host: 'x', remitente: 'a@b.cl' }); }
 });
 
+test('verificación en dos pasos: activar, entrar con código o código de respaldo, y quitarla', async () => {
+  const crypto = await import('node:crypto');
+  const deB32 = t => { const A = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'; const bits = t.split('').map(c => A.indexOf(c).toString(2).padStart(5, '0')).join(''); const o = []; for (let i = 0; i + 8 <= bits.length; i += 8) o.push(parseInt(bits.slice(i, i + 8), 2)); return Buffer.from(o); };
+  const codigo = (sec, desfase = 0) => { const m = Buffer.alloc(8); m.writeBigUInt64BE(BigInt(Math.floor(Date.now() / 30000) + desfase)); const h = crypto.createHmac('sha1', deB32(sec)).update(m).digest(), o = h[h.length - 1] & 15; return String((h.readUInt32BE(o) & 0x7fffffff) % 1000000).padStart(6, '0'); };
+  const rita2 = persona(); assert.equal((await rita2.entrar('rita@test.cl')).estado, 200);
+  assert.equal((await rita2.pedir('/api/2fa/estado')).data.activo, false);
+  const ini = (await rita2.pedir('/api/2fa/iniciar')).data; assert.match(ini.uri, /^otpauth:\/\/totp\/Mi%20Edificio%3Arita%40test\.cl\?secret=[A-Z2-7]{32}/);
+  assert.equal((await rita2.pedir('/api/2fa/activar', { codigo: '000000' })).estado, 400, 'un código equivocado no la activa');
+  const act = await rita2.pedir('/api/2fa/activar', { codigo: codigo(ini.secreto) }); assert.equal(act.estado, 200, act.error);
+  assert.equal(act.data.codigos.length, 10); assert.equal((await rita2.pedir('/api/2fa/estado')).data.quedan, 10);
+  const otro = persona(); const e1 = await otro.entrar('rita@test.cl'); assert.equal(e1.data.mfa, true, 'con la contraseña correcta todavía no hay sesión');
+  assert.equal((await otro.db({ t: 'usuarios', op: 'select' })).estado, 401);
+  assert.equal((await otro.pedir('/api/auth/verificar', { desafio: e1.data.desafio, codigo: '123456' })).error, 'Código incorrecto');
+  assert.equal((await otro.pedir('/api/auth/verificar', { desafio: e1.data.desafio, codigo: codigo(ini.secreto) })).estado, 400, 'el mismo código no sirve dos veces');
+  await new Promise(r => setTimeout(r, 30000 - Date.now() % 30000 + 200));   // espera el código siguiente
+  const v = await otro.pedir('/api/auth/verificar', { desafio: e1.data.desafio, codigo: codigo(ini.secreto) }); assert.equal(v.estado, 200, v.error);
+  assert.equal((await otro.db({ t: 'usuarios', op: 'select' })).estado, 200, 'con el segundo paso entra');
+  const tercero = persona(); const e2 = await tercero.entrar('rita@test.cl');
+  const r = await tercero.pedir('/api/auth/verificar', { desafio: e2.data.desafio, codigo: act.data.codigos[0].toLowerCase() }); assert.equal(r.estado, 200, r.error); assert.match(r.data.aviso, /código de respaldo/);
+  const cuarto = persona(); const e3 = await cuarto.entrar('rita@test.cl');
+  assert.equal((await cuarto.pedir('/api/auth/verificar', { desafio: e3.data.desafio, codigo: act.data.codigos[0] })).estado, 400, 'un código de respaldo sirve una sola vez');
+  for (let i = 0; i < 4; i++) await cuarto.pedir('/api/auth/verificar', { desafio: e3.data.desafio, codigo: '111111' });
+  assert.equal((await cuarto.pedir('/api/auth/verificar', { desafio: e3.data.desafio, codigo: act.data.codigos[1] })).estado, 401, 'tras 5 intentos el desafío se anula');
+  assert.equal((await rita2.pedir('/api/2fa/desactivar', { clave: 'otra' })).estado, 400, 'desactivar pide la contraseña');
+  assert.equal((await rita2.pedir('/api/2fa/quitar', { uid: ritaId })).estado, 403, 'solo la administración la quita a otros');
+  assert.deepEqual((await ana.pedir('/api/2fa/lista')).data, [ritaId]);
+  assert.equal((await ana.pedir('/api/2fa/quitar', { uid: ritaId })).estado, 200);
+  assert.equal((await otro.db({ t: 'usuarios', op: 'select' })).estado, 401, 'quitarla cierra sus sesiones');
+  assert.equal((await rita.entrar('rita@test.cl')).data.user.id, ritaId, 'y vuelve a entrar solo con la contraseña');
+});
+
 test('respaldo cifrado en una carpeta, con aviso si no es de nube, y restauración en un equipo nuevo', async () => {
   const nube = fs.mkdtempSync(path.join(os.tmpdir(), 'me-nube-')), simple = path.join(nube, 'Documentos', 'Respaldo'), deNube = path.join(nube, 'OneDrive', 'Respaldo Mi Edificio');
   assert.equal((await rita.pedir('/api/respaldo/estado')).estado, 403, 'solo administración');
