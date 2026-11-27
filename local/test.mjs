@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 const AQUI = path.dirname(fileURLToPath(import.meta.url));
 const DATOS = fs.mkdtempSync(path.join(os.tmpdir(), 'mi-edificio-'));
 const PUERTO = 8900 + Math.floor(Math.random() * 90), B = `http://localhost:${PUERTO}`;
+const LLAVE = path.join(os.tmpdir(), `me-llave-${PUERTO}-${Date.now()}.bin`);   // fuera de la carpeta de datos, como en una instalación real
 // Un "cloudflared" de mentira, que escribe lo mismo que el real: así se prueba cómo lo maneja el servidor
 const FALSO = path.join(DATOS, 'cloudflared-de-prueba');
 fs.writeFileSync(FALSO, `#!/usr/bin/env node
@@ -27,12 +28,12 @@ let proc;
 const PUERTO_GH = PUERTO + 200; let ultimaPublicada = { tag_name: 'v0.0.1', html_url: 'https://example.test/v0.0.1', body: 'Notas', assets: [] };
 const gh = (await import('node:http')).createServer((req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(ultimaPublicada)); }).listen(PUERTO_GH);
 const levantar = (extra = {}) => new Promise((ok, mal) => {
-  proc = spawn(process.execPath, [path.join(AQUI, 'server.mjs')], { env: { ...process.env, MI_EDIFICIO_DATOS: DATOS, PUERTO: String(PUERTO), MI_EDIFICIO_CLOUDFLARED: FALSO, MI_EDIFICIO_ACTUALIZACIONES_URL: `http://localhost:${PUERTO_GH}/latest`, ...extra }, stdio: ['ignore', 'pipe', 'pipe'] });
+  proc = spawn(process.execPath, [path.join(AQUI, 'server.mjs')], { env: { ...process.env, MI_EDIFICIO_DATOS: DATOS, MI_EDIFICIO_LLAVE: LLAVE, PUERTO: String(PUERTO), MI_EDIFICIO_CLOUDFLARED: FALSO, MI_EDIFICIO_ACTUALIZACIONES_URL: `http://localhost:${PUERTO_GH}/latest`, ...extra }, stdio: ['ignore', 'pipe', 'pipe'] });
   let salida = ''; const ver = d => { salida += d; if (salida.includes('está funcionando')) ok(); };
   proc.stdout.on('data', ver); proc.stderr.on('data', ver); proc.on('exit', c => mal(new Error('el servidor terminó (' + c + '): ' + salida.slice(-500))));
 });
 const bajar = () => new Promise(ok => { proc.removeAllListeners('exit'); proc.on('exit', ok); proc.kill('SIGTERM'); });
-before(() => levantar()); after(async () => { await bajar(); gh.close(); fs.rmSync(DATOS, { recursive: true, force: true }); });
+before(() => levantar()); after(async () => { await bajar(); gh.close(); fs.rmSync(DATOS, { recursive: true, force: true }); fs.rmSync(LLAVE, { force: true }); });
 
 // Un "navegador": guarda su cookie de sesión
 function persona() {
@@ -190,7 +191,12 @@ test('correo: la administración configura el SMTP y la app envía las notificac
     assert.equal(e.configurado, true); assert.equal(e.remitente, 'edificio@test.cl'); assert.equal(e.tieneClave, true); assert.ok(!JSON.stringify(e).includes('secreta'), 'la contraseña no vuelve al navegador');
     e = (await ana.pedir('/api/correo/configurar', { proveedor: 'gmail', remitente: 'x@gmail.com', clave: 'abcd efgh ijkl mnop' })).data;
     assert.equal(e.host, 'smtp.gmail.com'); assert.equal(e.puerto, 465); assert.equal(e.seguridad, 'tls');
-    assert.equal(JSON.parse(fs.readFileSync(path.join(DATOS, 'config.json'), 'utf8')).correo.clave, 'abcdefghijklmnop', 'Gmail: sin los espacios con que se muestra');
+    const cfg = fs.readFileSync(path.join(DATOS, 'config.json'), 'utf8'), guardada = JSON.parse(cfg).correo.clave;
+    assert.ok(guardada.startsWith('enc:v1:') && !cfg.includes('abcdefghijklmnop') && !cfg.includes('secreta'), 'la contraseña del correo queda cifrada en config.json');
+    assert.ok(!JSON.parse(cfg).secreto.match(/^[0-9a-f]{64}$/), 'y también el secreto de la instalación');
+    const crypto = await import('node:crypto'), llave = Buffer.from(fs.readFileSync(LLAVE, 'utf8').replace('archivo:', ''), 'base64'), b = Buffer.from(guardada.slice(7), 'base64');
+    const d = crypto.createDecipheriv('aes-256-gcm', llave, b.subarray(0, 12)); d.setAuthTag(b.subarray(b.length - 16));
+    assert.equal(Buffer.concat([d.update(b.subarray(12, b.length - 16)), d.final()]).toString(), 'abcdefghijklmnop', 'con la llave, que está fuera de la carpeta de datos, se recupera (Gmail: sin los espacios)');
     await ana.pedir('/api/correo/configurar', { proveedor: 'otro', host: 'localhost', puerto, seguridad: 'ninguna', usuario: '', remitente: 'edificio@test.cl' });
     const p = await ana.pedir('/api/correo/probar', {}); assert.equal(p.estado, 200, p.error); assert.equal(p.data.enviado, 'ana@test.cl');
     assert.ok(await hasta(() => recibidos.length >= 1)); assert.deepEqual(recibidos[0].para, ['ana@test.cl']); assert.match(recibidos[0].cuerpo, /Subject: Prueba de correo/);

@@ -17,7 +17,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { PGlite } from '@electric-sql/pglite';
 import { pgcrypto } from '@electric-sql/pglite/contrib/pgcrypto';
@@ -151,16 +151,74 @@ function modoMantencion(m) {
   return new Promise(() => {});
 }
 
-// Secreto para firmar enlaces a archivos y claves VAPID de las notificaciones: se crean una vez
+// ---------------------------------------------------------------------
+// Llave de la configuración: los secretos de config.json (contraseña del correo, token del túnel, llave del
+// respaldo, clave privada de las notificaciones y el secreto de la instalación) se guardan cifrados con una
+// llave que vive FUERA de la carpeta de datos. En Windows, además, la protege DPAPI con la cuenta de Windows:
+// copiar la carpeta de datos, o el archivo de la llave, a otro equipo no permite leerlos.
+// ---------------------------------------------------------------------
+const RUTA_LLAVE = process.env.MI_EDIFICIO_LLAVE || (process.platform === 'win32'
+  ? path.join(process.env.APPDATA || os.homedir(), 'MiEdificio', `llave-${crypto.createHash('sha256').update(DATOS.toLowerCase()).digest('hex').slice(0, 10)}.bin`)
+  : path.join(os.homedir(), '.config', 'mi-edificio', `llave-${crypto.createHash('sha256').update(DATOS).digest('hex').slice(0, 10)}.bin`));
+function dpapi(accion, b64) {   // ProtectedData de .NET por PowerShell (sin dependencias nativas)
+  const r = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command',
+    `Add-Type -AssemblyName System.Security; $b=[Convert]::FromBase64String($env:ME_DATO); [Convert]::ToBase64String([Security.Cryptography.ProtectedData]::${accion}($b,$null,'CurrentUser'))`],
+    { env: { ...process.env, ME_DATO: b64 }, encoding: 'utf8', windowsHide: true, timeout: 30000 });
+  if (r.status !== 0 || !r.stdout.trim()) throw new Error((r.stderr || r.error?.message || 'DPAPI no respondió').trim().slice(0, 200));
+  return r.stdout.trim();
+}
+const LLAVE = { buf: null, modo: '', error: '' };
+function cargarLlave() {
+  try {
+    if (fs.existsSync(RUTA_LLAVE)) {
+      const t = fs.readFileSync(RUTA_LLAVE, 'utf8').trim();
+      if (t.startsWith('dpapi:')) { LLAVE.buf = Buffer.from(dpapi('Unprotect', t.slice(6)), 'base64'); LLAVE.modo = 'dpapi'; }
+      else { LLAVE.buf = Buffer.from(t.replace(/^archivo:/, ''), 'base64'); LLAVE.modo = 'archivo'; }
+      if (LLAVE.buf.length !== 32) throw new Error('Llave dañada');
+      return;
+    }
+    const nueva = crypto.randomBytes(32); let texto = 'archivo:' + nueva.toString('base64'); LLAVE.modo = 'archivo';
+    if (process.platform === 'win32') {
+      try { const p = dpapi('Protect', nueva.toString('base64')); if (Buffer.from(dpapi('Unprotect', p), 'base64').equals(nueva)) { texto = 'dpapi:' + p; LLAVE.modo = 'dpapi'; } }
+      catch (e) { log('DPAPI no disponible; la llave queda en un archivo aparte:', e.message); }
+    }
+    fs.mkdirSync(path.dirname(RUTA_LLAVE), { recursive: true });
+    fs.writeFileSync(RUTA_LLAVE, texto, { mode: 0o600 });
+    LLAVE.buf = nueva;
+  } catch (e) {
+    LLAVE.buf = null; LLAVE.error = e.message;
+    log(`NO SE PUDO LEER LA LLAVE DE LA CONFIGURACIÓN (${RUTA_LLAVE}): ${e.message}. Los secretos cifrados no se pueden usar; vuelve a configurar el correo, el túnel y el respaldo, o restaura la llave.`);
+  }
+}
+cargarLlave();
+const SECRETOS = [['secreto'], ['vapid', 'privateKey'], ['correo', 'clave'], ['tunel', 'token'], ['respaldo', 'llave']];
+const sellarCfg = v => { const iv = crypto.randomBytes(12), c = crypto.createCipheriv('aes-256-gcm', LLAVE.buf, iv); const x = Buffer.concat([c.update(String(v), 'utf8'), c.final()]); return 'enc:v1:' + Buffer.concat([iv, x, c.getAuthTag()]).toString('base64'); };
+const abrirCfg = v => { const b = Buffer.from(v.slice(7), 'base64'), d = crypto.createDecipheriv('aes-256-gcm', LLAVE.buf, b.subarray(0, 12)); d.setAuthTag(b.subarray(b.length - 16)); return Buffer.concat([d.update(b.subarray(12, b.length - 16)), d.final()]).toString('utf8'); };
+const enRuta = (o, r) => r.slice(0, -1).reduce((x, k) => (x && typeof x === 'object' ? x[k] : undefined), o);
+const SIN_LLAVE = new Set();   // secretos que quedaron cifrados y no se pudieron abrir (no se pisan al guardar)
+function leerCfg(texto) {
+  const c = JSON.parse(texto);
+  for (const r of SECRETOS) { const o = enRuta(c, r), k = r.at(-1); if (!o || typeof o[k] !== 'string' || !o[k].startsWith('enc:v1:')) continue;
+    if (!LLAVE.buf) { SIN_LLAVE.add(r.join('.')); continue; }
+    try { o[k] = abrirCfg(o[k]); } catch { SIN_LLAVE.add(r.join('.')); log(`No se pudo descifrar ${r.join('.')} de la configuración (¿llave de otro equipo?).`); } }
+  return c;
+}
 const rutaCfg = path.join(DATOS, 'config.json');
-let CFG = fs.existsSync(rutaCfg) ? JSON.parse(fs.readFileSync(rutaCfg, 'utf8')) : {};
+let CFG = fs.existsSync(rutaCfg) ? leerCfg(fs.readFileSync(rutaCfg, 'utf8')) : {};
+// Un secreto que no se pudo abrir no se puede usar: se descarta para que se vuelva a configurar (salvo el de la instalación)
+for (const r of SIN_LLAVE) { const p = r.split('.'), o = enRuta(CFG, p); if (r !== 'secreto' && o) delete o[p.at(-1)]; }
+if (SIN_LLAVE.has('secreto')) { log('El secreto de la instalación no se pudo abrir: se crea otro. Quien tenga la verificación en dos pasos deberá entrar con un código de respaldo y volver a activarla.'); delete CFG.secreto; }
 let webpush = null;
 try { webpush = (await import('web-push')).default; } catch { log('web-push no está instalado: sin notificaciones push'); }
 let nodemailer = null;
 try { nodemailer = (await import('nodemailer')).default; } catch { log('nodemailer no está instalado: sin envío de correos'); }
 if (!CFG.secreto) CFG.secreto = crypto.randomBytes(32).toString('hex');
 if (!CFG.vapid && webpush) CFG.vapid = webpush.generateVAPIDKeys();
-const guardarCfg = () => fs.writeFileSync(rutaCfg, JSON.stringify(CFG, null, 2), { mode: 0o600 });
+const guardarCfg = () => {
+  const c = structuredClone(CFG);
+  if (LLAVE.buf) for (const r of SECRETOS) { const o = enRuta(c, r), k = r.at(-1); if (o && typeof o[k] === 'string' && o[k] && !o[k].startsWith('enc:v1:')) o[k] = sellarCfg(o[k]); }
+  fs.writeFileSync(rutaCfg, JSON.stringify(c, null, 2), { mode: 0o600 });
+};
 guardarCfg();
 if (webpush && CFG.vapid) webpush.setVapidDetails(process.env.MI_EDIFICIO_CONTACTO || 'mailto:admin@example.com', CFG.vapid.publicKey, CFG.vapid.privateKey);
 
@@ -356,6 +414,21 @@ async function dosPasos(req, accion, d, ses) {
     return (await db.query(`select id from auth.users where totp_activo and id = any($1::uuid[])`, [ids])).rows.map(x => x.id);
   }
   throw new Fallo('No encontrado', 404);
+}
+
+// Cifrado del disco donde están los datos (BitLocker o cifrado de dispositivo). Se consulta sin permisos de
+// administrador con la propiedad que muestra el Explorador; si no se puede saber, se dice.
+let discoCache = null;
+async function cifradoDisco() {
+  if (discoCache && discoCache.t > Date.now() - 600000) return discoCache.v;
+  let v = 'desconocido';
+  if (process.platform === 'win32') {
+    const unidad = path.parse(DATOS).root.replace(/\\$/, '');
+    const r = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `(New-Object -ComObject Shell.Application).NameSpace('${unidad}\\').Self.ExtendedProperty('System.Volume.BitLockerProtection')`], { encoding: 'utf8', windowsHide: true, timeout: 20000 });
+    const n = parseInt((r.stdout || '').trim(), 10);
+    v = n === 1 || n === 3 || n === 5 ? 'cifrado' : n === 2 ? 'sin cifrar' : 'desconocido';
+  }
+  discoCache = { t: Date.now(), v }; return v;
 }
 
 // ---------------------------------------------------------------------
@@ -828,6 +901,17 @@ async function api(req, res, url) {
     return responder(res, 200, { data: estadoRespaldo() });
   }
   if (ruta.startsWith('/api/2fa/')) return responder(res, 200, { data: await dosPasos(req, ruta.slice('/api/2fa/'.length), cuerpo, ses) });
+  if (ruta === '/api/seguridad/estado') {   // solo administración
+    const adm = await como(uid, tx => tx.query(`select public.es_admin() as ok`)); if (!adm.rows[0]?.ok) throw new Fallo('Solo administración', 403);
+    const r = await como(uid, tx => tx.query(`select id, rol from public.usuarios where edificio_id = public.mi_edificio() and estado = 'activo' and rol in ('admin','comite')`));
+    const con2 = new Set((await db.query(`select id from auth.users where totp_activo and id = any($1::uuid[])`, [r.rows.map(x => x.id)])).rows.map(x => x.id));
+    const t = estadoTunel(), rs = estadoRespaldo();
+    return responder(res, 200, { data: {
+      https: t.estado === 'conectado', tunel: t.modo, respaldo: rs.configurado, respaldoOk: !!rs.ultimo?.ok,
+      admins: r.rows.filter(x => x.rol === 'admin').length, admins2: r.rows.filter(x => x.rol === 'admin' && con2.has(x.id)).length,
+      comite: r.rows.filter(x => x.rol === 'comite').length, comite2: r.rows.filter(x => x.rol === 'comite' && con2.has(x.id)).length,
+      llave: LLAVE.buf ? LLAVE.modo : 'error', llaveError: LLAVE.error, disco: await cifradoDisco(), sistema: process.platform } });
+  }
   if (ruta.startsWith('/api/correo/')) {   // solo administración
     const adm = await como(uid, tx => tx.query(`select public.es_admin() as ok`)); if (!adm.rows[0]?.ok) throw new Fallo('Solo la administración puede configurar el correo', 403);
     let enviado = null;

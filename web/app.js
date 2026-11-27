@@ -2475,6 +2475,23 @@ VIEWS.admin = function(param){
   REFRESH.admin=()=>{ if(!['edificio','plantillas'].includes(tab)) draw(); };
 };
 const ADMIN={};
+// ---------- Seguridad de la instalación local ----------
+async function tarjetaSeguridad(){ const el=$('#segBody'); if(!el) return; let s; try{ s=await q(sb.local.seguridad()); }catch(err){ el.innerHTML=`<div class="err">${esc(errMsg(err))}</div>`; return; } if(!$('#segBody')) return;
+  const fila=(ok,t,d)=>`<div class="item static"><div class="hd"><b>${ok===true?'✅':ok===false?'⚠️':'❔'} ${t}</b></div><div class="meta">${d}</div></div>`;
+  el.innerHTML=`<div class="list">
+    ${fila(s.https,'Acceso seguro (HTTPS)', s.https?'Desde otros equipos se entra solo por la dirección segura. La red local sin cifrar está bloqueada.':'Sin él, la app solo se puede usar en este computador. Actívalo en "Acceso desde internet", más abajo.')}
+    ${fila(s.admins2===s.admins&&s.admins>0,'Verificación en dos pasos de la administración',`${s.admins2} de ${s.admins} ${s.admins===1?'cuenta':'cuentas'} de administración${s.comite?` y ${s.comite2} de ${s.comite} del comité`:''} la tienen activa. Cada persona la activa en Mi cuenta.`)}
+    ${fila(s.respaldo&&s.respaldoOk,'Respaldo cifrado en la nube', s.respaldo?(s.respaldoOk?'Configurado y funcionando.':'Configurado, pero el último respaldo no terminó bien. Revísalo más abajo.'):'Sin respaldo, si este computador falla o lo roban se pierde todo. Configúralo más abajo.')}
+    ${fila(s.llave==='dpapi'?true:s.llave==='archivo'?(s.sistema==='win32'?null:true):false,'Claves de la configuración cifradas', s.llave==='dpapi'?'La contraseña del correo, el token del túnel y las demás claves están cifradas con una llave protegida por tu cuenta de Windows.':s.llave==='archivo'?'Las claves están cifradas con una llave guardada fuera de la carpeta de datos'+(s.sistema==='win32'?', pero Windows no permitió protegerla con la cuenta de usuario (DPAPI).':'.'):'No se pudo leer la llave: '+esc(s.llaveError||'')+'. Vuelve a configurar el correo, el túnel y el respaldo.')}
+    ${fila(s.disco==='cifrado'?true:s.disco==='sin cifrar'?false:null,'Disco cifrado', s.disco==='cifrado'?'El disco donde están los datos está cifrado (BitLocker): si se llevan el computador o el disco, no pueden leerlos.':`${s.disco==='sin cifrar'?'El disco donde están los datos no está cifrado.':'No se pudo comprobar si el disco está cifrado.'} Si se llevan el computador o sacan el disco, podrían leer la base de datos, las fotos y los documentos.`)}
+  </div>
+  <details style="margin-top:10px"><summary><b>Cómo proteger este computador</b></summary><ol class="small" style="padding-left:18px;line-height:1.5">
+    <li><b>Cifra el disco.</b> Windows 10/11 Pro: Configuración → Privacidad y seguridad → Cifrado de dispositivo, o busca "Administrar BitLocker" → Activar BitLocker en la unidad C:. Windows Home: Configuración → Privacidad y seguridad → <i>Cifrado de dispositivo</i> (si aparece). Guarda la clave de recuperación fuera del computador.</li>
+    <li><b>Usa una cuenta de Windows solo para Mi Edificio</b>, con contraseña, y no la uses para navegar ni instalar programas. Si conserjería usa el mismo computador, que tenga su propia cuenta de Windows sin permisos de administrador.</li>
+    <li><b>Bloqueo de pantalla</b> automático a los pocos minutos (Windows + L al alejarse).</li>
+    <li><b>Mantén Windows actualizado</b> y el antivirus (Microsoft Defender) activo.</li>
+    <li><b>No compartas</b> la carpeta de datos ni la copies a pendrives; para eso está el respaldo cifrado.</li></ol></details>`; }
+
 // ---------- Correo saliente ----------
 const EST_COR={pendiente:['Pendiente','wa'], enviado:['Enviado','ok'], error:['Con error','er'], descartado:['Descartado','mu']};
 const SMTP_AYUDA={
@@ -2538,6 +2555,7 @@ ADMIN.edificio = function(el){
   <button class="btn">Guardar cambios</button></form></div>
   <div class="card"><h3>Módulos</h3><p class="small muted">Apaga los que tu edificio no usa para que el menú quede más simple, o déjalos "solo personal" mientras los prueban conserjería, comité y administración. Apagar un módulo no borra sus datos. Inicio, Gastos comunes, Finanzas, Administración y Mi cuenta siempre están.</p>
     <form id="fMod"><div style="overflow:auto"><table><tbody>${MODULES.filter(m=>!MOD_BASICOS.includes(m.id)).map(m=>`<tr><td>${m.ic} <b>${esc(m.t)}</b><br><span class="small muted">${esc(m.d||'')}</span></td><td style="width:200px"><select name="${m.id}">${[['on','Activo'],['personal','Solo personal (piloto)'],['off','Apagado']].map(([k,v])=>`<option value="${k}" ${modEstado(m.id)===k?'selected':''}>${v}</option>`).join('')}</select></td></tr>`).join('')}</tbody></table></div><button class="btn sec sm" style="margin-top:8px">Guardar módulos</button></form></div>
+  ${CFG.LOCAL?'<div class="card"><h3>Seguridad</h3><div id="segBody" class="small muted">Revisando…</div></div>':''}
   ${CFG.LOCAL?'<div class="card"><h3>Versión y actualizaciones</h3><div id="verBody" class="small muted">Consultando…</div></div>':''}
   ${CFG.LOCAL?'<div class="card"><h3>Acceso desde internet</h3><div id="tunBody" class="small muted">Consultando…</div></div>':''}
   <div class="card"><h3>Correo</h3><div id="corBody" class="small muted">Cargando…</div></div>
@@ -2551,6 +2569,7 @@ ADMIN.edificio = function(el){
   $('#bDep',el).addEventListener('click', async e=>{ if(!await confirmBox('Se borrarán en forma definitiva los datos que superen los plazos guardados. ¿Continuar?')) return; try{ const r=await q(sb.rpc('depurar_ahora'))||{}; const n=Object.values(r).reduce((a,b)=>a+Number(b),0); toast(n?(n===1?'Se borró 1 registro':`Se borraron ${n} registros`):'No había datos fuera de plazo'); limpiarArchivos(); }catch(err){ toast('Error: '+errMsg(err)); } });
   $('#bWiz',el).addEventListener('click',()=>asistente());
   tarjetaCorreo();
+  if(CFG.LOCAL) tarjetaSeguridad();
   if(CFG.LOCAL){ tarjetaVersion(); tarjetaRespaldo(); tunelUI($('#tunBody',el), ()=>{ const i=$('#invUrl',el); if(i) i.value=S.dirPublica||location.origin+location.pathname; }); }
   let newLogo=null;
   $('#bLogo',el).addEventListener('click',()=>$('#logoIn',el).click());
