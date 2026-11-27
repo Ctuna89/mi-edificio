@@ -111,7 +111,15 @@ if (versionDb && cmpVersion(versionDb, VERSION_APP) > 0 && !process.env.MI_EDIFI
       await tx.exec(fs.readFileSync(process.env.MI_EDIFICIO_ESQUEMA || path.join(RAIZ, 'supabase', 'schema.sql'), 'utf8'));
       await tx.exec(`update public.plataforma set push_url = 'local' where coalesce(push_url, '') = '';
         create schema if not exists sistema;
-        create table if not exists sistema.instalacion (id int primary key default 1 check (id = 1), version text not null, actualizado timestamptz default now(), historial jsonb not null default '[]'::jsonb);`);
+        create table if not exists sistema.instalacion (id int primary key default 1 check (id = 1), version text not null, actualizado timestamptz default now(), historial jsonb not null default '[]'::jsonb);
+        create or replace function auth.cerrar_si_baja() returns trigger language plpgsql security definer as $f$
+        begin
+          if tg_op = 'DELETE' then delete from auth.sesiones where user_id = old.id; return old; end if;
+          if new.estado is distinct from 'activo' and old.estado = 'activo' then delete from auth.sesiones where user_id = new.id; end if;
+          return new;
+        end $f$;
+        drop trigger if exists cerrar_sesiones_baja on public.usuarios;
+        create trigger cerrar_sesiones_baja after update of estado or delete on public.usuarios for each row execute function auth.cerrar_si_baja();`);
       if (versionDb !== VERSION_APP) await tx.query(`insert into sistema.instalacion (id, version, historial) values (1, $1, jsonb_build_array(jsonb_build_object('de', $2::text, 'a', $1::text, 'fecha', now())))
         on conflict (id) do update set version = excluded.version, actualizado = now(), historial = sistema.instalacion.historial || excluded.historial`, [VERSION_APP, versionDb]);
     });
@@ -252,14 +260,15 @@ const como = (uid, fn) => db.transaction(async tx => {
 const sha = s => crypto.createHash('sha256').update(s).digest('hex');
 const cifrar = clave => { const sal = crypto.randomBytes(16); return sal.toString('hex') + ':' + crypto.scryptSync(clave, sal, 64).toString('hex'); };
 const coincide = (clave, guardada) => { const [sal, h] = String(guardada).split(':'); if (!sal || !h) return false; const x = crypto.scryptSync(clave, Buffer.from(sal, 'hex'), 64); const y = Buffer.from(h, 'hex'); return x.length === y.length && crypto.timingSafeEqual(x, y); };
-const validarClave = c => { if (typeof c !== 'string' || c.length < 8 || c.length > 200) throw new Fallo('Password should be at least 8 characters'); };
+const MIN_CLAVE = 12;
+const validarClave = c => { if (typeof c !== 'string' || c.length < MIN_CLAVE || c.length > 200) throw new Fallo(`La contraseña debe tener al menos ${MIN_CLAVE} caracteres`); };
 const galleta = req => (req.headers.cookie || '').split(';').map(x => x.trim().split('=')).find(x => x[0] === 'me_sesion')?.[1] || '';
 const esHttps = req => (req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https';
 const ponerGalleta = (req, res, token, seg) => res.setHeader('Set-Cookie', `me_sesion=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${seg}${esHttps(req) ? '; Secure' : ''}`);
 async function sesionDe(req) {
   const tk = galleta(req); if (!tk) return null;
-  const r = await db.query(`select u.id, u.email from auth.sesiones s join auth.users u on u.id = s.user_id where s.token_hash = $1 and s.expira > now()`, [sha(tk)]);
-  return r.rows[0] ? { user: { id: r.rows[0].id, email: r.rows[0].email } } : null;
+  const r = await db.query(`select u.id, u.email, u.clave_corta from auth.sesiones s join auth.users u on u.id = s.user_id where s.token_hash = $1 and s.expira > now()`, [sha(tk)]);
+  return r.rows[0] ? { user: { id: r.rows[0].id, email: r.rows[0].email, clave_corta: r.rows[0].clave_corta } } : null;
 }
 async function abrirSesion(req, res, user) {
   const tk = crypto.randomBytes(32).toString('base64url');
@@ -324,6 +333,7 @@ const AUTH = {
     const r = await db.query(`select id, email, clave, totp_activo from auth.users where email = $1`, [email]);
     const ok = !!r.rows[0] && coincide(String(clave || ''), r.rows[0].clave); anotar(k, ok);
     if (!ok) throw new Fallo('Invalid login credentials');
+    await db.query(`update auth.users set clave_corta = $2 where id = $1`, [r.rows[0].id, String(clave).length < MIN_CLAVE]);
     if (r.rows[0].totp_activo) {   // falta el segundo paso: todavía no hay sesión
       const desafio = crypto.randomBytes(24).toString('base64url');
       desafios.set(desafio, { uid: r.rows[0].id, email: r.rows[0].email, expira: Date.now() + 5 * 60000, n: 0 });
@@ -345,16 +355,30 @@ const AUTH = {
   async salir(req, res) { const tk = galleta(req); if (tk) await db.query(`delete from auth.sesiones where token_hash = $1`, [sha(tk)]); ponerGalleta(req, res, '', 0); return null; },
   async clave(req, res, { clave }, ses) {
     if (!ses) throw new Fallo('Debes iniciar sesión', 401); validarClave(clave);
-    await db.query(`update auth.users set clave = $1 where id = $2`, [cifrar(clave), ses.user.id]);
+    await db.query(`update auth.users set clave = $1, clave_corta = false where id = $2`, [cifrar(clave), ses.user.id]);
     await db.query(`delete from auth.sesiones where user_id = $1 and token_hash <> $2`, [ses.user.id, sha(galleta(req))]);
     return null;
+  },
+  // Cerrar la sesión en todos los demás dispositivos
+  async cerrar_otras(req, res, b, ses) {
+    if (!ses) throw new Fallo('Debes iniciar sesión', 401);
+    const r = await db.query(`delete from auth.sesiones where user_id = $1 and token_hash <> $2`, [ses.user.id, sha(galleta(req))]);
+    return { cerradas: r.affectedRows ?? 0 };
+  },
+  // La administración cierra todas las sesiones de una cuenta (teléfono perdido, cambio de conserje…)
+  async cerrar_de(req, res, { uid }, ses) {
+    if (!ses) throw new Fallo('Debes iniciar sesión', 401);
+    const ok = await como(ses.user.id, tx => tx.query(`select public.es_admin() and exists (select 1 from public.usuarios where id = $1 and edificio_id = public.mi_edificio()) as ok`, [uid]));
+    if (!ok.rows[0]?.ok) throw new Fallo('Solo la administración puede cerrar sesiones de otros', 403);
+    const r = await db.query(`delete from auth.sesiones where user_id = $1`, [uid]);
+    return { cerradas: r.affectedRows ?? 0 };
   },
   // Sin correo no hay enlace de recuperación: la administración fija una contraseña nueva
   async restablecer(req, res, { uid, clave }, ses) {
     if (!ses) throw new Fallo('Debes iniciar sesión', 401); validarClave(clave);
     const ok = await como(ses.user.id, tx => tx.query(`select public.es_admin() and exists (select 1 from public.usuarios where id = $1 and edificio_id = public.mi_edificio()) as ok`, [uid]));
     if (!ok.rows[0]?.ok) throw new Fallo('Solo la administración puede restablecer contraseñas', 403);
-    await db.query(`update auth.users set clave = $1 where id = $2`, [cifrar(clave), uid]);
+    await db.query(`update auth.users set clave = $1, clave_corta = false where id = $2`, [cifrar(clave), uid]);
     await db.query(`delete from auth.sesiones where user_id = $1`, [uid]);
     return null;
   },

@@ -65,6 +65,7 @@ function createClient(){
     }) },
     // Solo modo local: lo que no existe en Supabase
     local:{ restablecer:(uid,clave)=>api('/api/auth/restablecer',{uid, clave}),
+      cerrarOtras:()=>api('/api/auth/cerrar_otras'), cerrarDe:uid=>api('/api/auth/cerrar_de',{uid}),
       // verificación en dos pasos (TOTP) de la instalación local
       dosPasos:{ verificar, estado:()=>api('/api/2fa/estado'), iniciar:()=>api('/api/2fa/iniciar'), activar:codigo=>api('/api/2fa/activar',{codigo}), codigos:codigo=>api('/api/2fa/codigos',{codigo}),
         desactivar:clave=>api('/api/2fa/desactivar',{clave}), quitar:uid=>api('/api/2fa/quitar',{uid}), lista:()=>api('/api/2fa/lista') },

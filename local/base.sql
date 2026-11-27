@@ -18,6 +18,8 @@ alter table auth.users add column if not exists totp_pendiente text;
 alter table auth.users add column if not exists totp_activo boolean not null default false;
 alter table auth.users add column if not exists totp_respaldo text[] not null default '{}';
 alter table auth.users add column if not exists totp_paso bigint not null default 0;
+-- Contraseña de menos de 12 caracteres (de antes del mínimo actual): la app pide cambiarla
+alter table auth.users add column if not exists clave_corta boolean not null default false;
 create table if not exists auth.sesiones (
   token_hash text primary key,           -- sha256 del token de la cookie
   user_id    uuid not null references auth.users(id) on delete cascade,

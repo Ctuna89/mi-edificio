@@ -210,6 +210,25 @@ test('correo: la administración configura el SMTP y la app envía las notificac
   } finally { smtp.close(); await ana.pedir('/api/correo/configurar', { borrar: true, proveedor: 'otro', host: 'x', remitente: 'a@b.cl' }); }
 });
 
+test('contraseñas de 12 caracteres o más y cierre de sesiones', async () => {
+  assert.match((await persona().registro('corto@test.cl', 'once-letras')).error, /al menos 12 caracteres/, 'una cuenta nueva necesita 12 caracteres');
+  assert.equal((await rita.pedir('/api/auth/clave', { clave: 'corta-11-ch' })).estado, 400, 'cambiar a una de 11 no se puede');
+  assert.equal((await fetch(B + '/api/auth/sesion', { headers: { cookie: rita.cookie } }).then(r => r.json())).data.user.clave_corta, false);
+  const otra = persona(); await otra.entrar('rita@test.cl'); assert.equal((await otra.db({ t: 'usuarios', op: 'select' })).estado, 200);
+  const c = await rita.pedir('/api/auth/cerrar_otras'); assert.equal(c.data.cerradas >= 1, true);
+  assert.equal((await otra.db({ t: 'usuarios', op: 'select' })).estado, 401, 'cerrar las demás sesiones saca a los otros dispositivos');
+  assert.equal((await rita.db({ t: 'usuarios', op: 'select' })).estado, 200, 'y deja la propia');
+  assert.equal((await rita.pedir('/api/auth/cerrar_de', { uid: ritaId })).estado, 403, 'solo la administración cierra sesiones de otros');
+  const otra2 = persona(); await otra2.entrar('rita@test.cl');
+  assert.equal((await ana.pedir('/api/auth/cerrar_de', { uid: ritaId })).estado, 200);
+  assert.equal((await otra2.db({ t: 'usuarios', op: 'select' })).estado, 401);
+  await rita.entrar('rita@test.cl');
+  assert.equal((await ana.db({ t: 'usuarios', op: 'update', p: { estado: 'bloqueado' }, f: [['id', 'eq', ritaId]] })).estado, 200);
+  assert.equal((await rita.db({ t: 'usuarios', op: 'select' })).estado, 401, 'bloquear una cuenta cierra al instante sus sesiones');
+  assert.equal((await ana.db({ t: 'usuarios', op: 'update', p: { estado: 'activo' }, f: [['id', 'eq', ritaId]] })).estado, 200);
+  await rita.entrar('rita@test.cl');
+});
+
 test('verificación en dos pasos: activar, entrar con código o código de respaldo, y quitarla', async () => {
   const crypto = await import('node:crypto');
   const deB32 = t => { const A = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'; const bits = t.split('').map(c => A.indexOf(c).toString(2).padStart(5, '0')).join(''); const o = []; for (let i = 0; i + 8 <= bits.length; i += 8) o.push(parseInt(bits.slice(i, i + 8), 2)); return Buffer.from(o); };

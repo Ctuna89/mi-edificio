@@ -417,7 +417,12 @@ El escaneo de rondas usa **Web NFC**, disponible solo en Chrome para Android. Gr
 
 ## Seguridad
 
-El modelo de seguridad y sus limitaciones están en [`SECURITY.md`](SECURITY.md). Lo esencial: el computador que ejecuta el servidor guarda los datos de toda la comunidad, así que mantenlo actualizado, con contraseña y con acceso restringido, y respalda `local/datos`.
+El modelo de seguridad y sus limitaciones están en [`SECURITY.md`](SECURITY.md). Lo esencial:
+
+- **Nada viaja sin cifrar por la red**: fuera del propio computador del edificio, la app se usa solo por la dirección HTTPS del acceso desde internet.
+- **Verificación en dos pasos** voluntaria (Mi cuenta), muy recomendada para la administración y el comité; contraseñas de 12 caracteres o más; cerrar sesiones en otros dispositivos.
+- **Las claves de la instalación se guardan cifradas**, con una llave fuera de la carpeta de datos.
+- **El computador del edificio guarda los datos de toda la comunidad**: cifra su disco (BitLocker), úsalo con una cuenta de Windows propia y con contraseña, mantenlo actualizado y configura el respaldo en la nube. Administración → Edificio → **Seguridad** revisa todo esto y explica cómo resolver lo que falte.
 
 ## Datos personales (Chile)
 

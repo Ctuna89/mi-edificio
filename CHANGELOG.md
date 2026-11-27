@@ -2,6 +2,7 @@
 
 ## Sin publicar
 
+- **Contraseñas de 12 caracteres o más** para cuentas nuevas y cambios; a quien tenga una más corta el inicio le pide cambiarla. **Cerrar sesiones**: cada persona puede cerrar su sesión en los demás dispositivos (Mi cuenta) y la administración todas las de una cuenta (Usuarios); bloquear una cuenta cierra sus sesiones al instante.
 - **Claves de la configuración cifradas**: la contraseña del correo, el token del túnel, la llave del respaldo, la clave privada de las notificaciones y el secreto de la instalación se guardan cifrados (AES-256-GCM) con una llave que vive fuera de la carpeta de datos; en Windows la protege además DPAPI con la cuenta de Windows. Las instalaciones existentes se cifran solas al actualizar.
 - **Tarjeta de Seguridad** (Administración → Edificio): revisa HTTPS, verificación en dos pasos de la administración y el comité, respaldo, claves cifradas y cifrado del disco (BitLocker), con una guía para proteger el computador.
 - **Ninguna comunicación sin cifrar**: el servidor local atiende la app solo en el mismo computador; desde cualquier otro equipo, también dentro del edificio, se entra únicamente por la dirección segura (HTTPS). Por la red local sin cifrar solo se muestra cómo entrar, sin la app ni la API. El correo se envía siempre cifrado (TLS 1.2 o más), salvo hacia un servidor en el mismo computador. **Si hoy usas la app por la red del edificio (http://192.168…), activa antes el acceso desde internet.**
