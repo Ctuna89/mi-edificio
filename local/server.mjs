@@ -857,7 +857,7 @@ const SEG = { 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referr
 // index.html para modo local: cliente propio en vez de supabase-js por CDN, y conexiones solo al propio servidor
 const indice = () => fs.readFileSync(path.join(WEB, 'index.html'), 'utf8')
   .replace(/<script src="https:\/\/cdn\.jsdelivr\.net\/npm\/@supabase[^>]*><\/script>/, '<script src="local-cliente.js"></script>')
-  .replace("script-src 'self' https://cdn.jsdelivr.net", "script-src 'self'")
+  .replace("script-src 'self' https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.119.2/dist/umd/supabase.js", "script-src 'self'")
   .replace("connect-src 'self' https://*.supabase.co wss://*.supabase.co", "connect-src 'self'");
 const configJs = () => `// Generado por el servidor local\nwindow.APP_CONFIG = ${JSON.stringify({ LOCAL: true, VAPID_PUBLIC_KEY: (webpush && CFG.vapid?.publicKey) || '' })};\n`;
 

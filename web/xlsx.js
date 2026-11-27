@@ -75,6 +75,7 @@ function build(sheets){
 // actuales y Node 18+). No lee .xls antiguos: esos se guardan como .xlsx o CSV, o se copian y pegan.
 const dec = new TextDecoder();
 const desXml = s => s.replace(/&(lt|gt|quot|apos|amp|#(\d+)|#x([0-9a-f]+));/gi, (m, k, d, h) => d ? String.fromCodePoint(+d) : h ? String.fromCodePoint(parseInt(h, 16)) : ({lt:'<', gt:'>', quot:'"', apos:"'", amp:'&'})[k.toLowerCase()]);
+const MAX_XML = 60 * 1024 * 1024;   // ningún XML de una cartola real se acerca a esto: corta las "bombas" zip
 async function unzip(buf){
   const b = new Uint8Array(buf), dv = new DataView(b.buffer, b.byteOffset, b.byteLength), out = {};
   let e = b.length - 22; while (e >= 0 && dv.getUint32(e, true) !== 0x06054b50) e--;
@@ -87,18 +88,21 @@ async function unzip(buf){
     out[nombre] = async () => { const ini = off + 30 + dv.getUint16(off + 26, true) + dv.getUint16(off + 28, true), d = b.subarray(ini, ini + tam);
       if (met === 0) return dec.decode(d);
       if (met !== 8) throw new Error('Compresión no soportada');
-      return dec.decode(await new Response(new Blob([d]).stream().pipeThrough(new DecompressionStream('deflate-raw'))).arrayBuffer()); };
+      const lector = new Blob([d]).stream().pipeThrough(new DecompressionStream('deflate-raw')).getReader(); const partes = []; let total = 0;
+      for (;;) { const { done, value } = await lector.read(); if (done) break; total += value.length; if (total > MAX_XML) { lector.cancel(); throw new Error('El archivo es demasiado grande'); } partes.push(value); }
+      const out = new Uint8Array(total); let o = 0; for (const p of partes) { out.set(p, o); o += p.length; } return dec.decode(out); };
   }
   return out;
 }
-const colNum = r => { let n = 0; for (const ch of r.replace(/\d+$/, '')) n = n * 26 + ch.charCodeAt(0) - 64; return n - 1; };
+const colNum = r => { const l = r.replace(/\d+$/, ''); if (l.length > 3) throw new Error('Columna fuera de rango'); let n = 0; for (const ch of l) n = n * 26 + ch.charCodeAt(0) - 64; if (n > 16384) throw new Error('Columna fuera de rango'); return n - 1; };
 async function read(buf){
   const z = await unzip(buf);
   const ss = z['xl/sharedStrings.xml'] ? [...(await z['xl/sharedStrings.xml']()).matchAll(/<si>([\s\S]*?)<\/si>/g)].map(m => desXml([...m[1].matchAll(/<t[^>]*>([\s\S]*?)<\/t>/g)].map(t => t[1]).join(''))) : [];
   let hoja = 'xl/worksheets/sheet1.xml';
   if (z['xl/workbook.xml'] && z['xl/_rels/workbook.xml.rels']) {   // la primera hoja del libro, no necesariamente sheet1.xml
     const rid = ((await z['xl/workbook.xml']()).match(/<sheet\b[^>]*\br:id="([^"]+)"/) || [])[1];
-    const t = rid && ((await z['xl/_rels/workbook.xml.rels']()).match(new RegExp('<Relationship\\b[^>]*Id="' + rid + '"[^>]*Target="([^"]+)"')) || (await z['xl/_rels/workbook.xml.rels']()).match(new RegExp('<Relationship\\b[^>]*Target="([^"]+)"[^>]*Id="' + rid + '"')) || [])[1];
+    const rels = rid ? [...(await z['xl/_rels/workbook.xml.rels']()).matchAll(/<Relationship\b[^>]*>/g)].map(m => m[0]) : [];
+    const rel = rels.find(x => (x.match(/\bId="([^"]*)"/) || [])[1] === rid), t = rel && (rel.match(/\bTarget="([^"]*)"/) || [])[1];
     if (t) hoja = t.startsWith('/') ? t.slice(1) : 'xl/' + t.replace(/^\.\//, '');
   }
   if (!z[hoja]) hoja = Object.keys(z).find(k => /^xl\/worksheets\/[^/]+\.xml$/.test(k));
