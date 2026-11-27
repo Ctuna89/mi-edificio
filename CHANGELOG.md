@@ -1,6 +1,6 @@
 # Cambios
 
-## Sin publicar
+## 0.3.2 — 2026-11-27
 
 - **Revisión de seguridad** (servidor, base de datos y app) y sus correcciones: bloqueo por cuenta tras 10 fallos; confirmar la identidad antes de cambios delicados; solo nombres de host conocidos (DNS rebinding); respaldo solo en carpetas del propio computador; la contraseña del correo no se envía a un servidor nuevo; política CSP más estricta y valores escapados; topes para archivos importados; el comité no decide sobre su propia unidad; la mesa de asamblea solo registra y vota por quienes están en la sala; votos de propietarios por unidad; historial de incidencias que solo se agrega y fotos solo de su carpeta; nombres de propietarios visibles solo para el personal y la propia unidad; plazos mínimos para la bitácora (24 meses) y el libro de novedades (60), con registro de cada depuración.
 - **Contraseñas de 12 caracteres o más** para cuentas nuevas y cambios; a quien tenga una más corta el inicio le pide cambiarla. **Cerrar sesiones**: cada persona puede cerrar su sesión en los demás dispositivos (Mi cuenta) y la administración todas las de una cuenta (Usuarios); bloquear una cuenta cierra sus sesiones al instante.
