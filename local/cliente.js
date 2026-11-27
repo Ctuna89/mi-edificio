@@ -5,11 +5,15 @@
    ===================================================================== */
 (function(){
 'use strict';
-async function api(ruta, cuerpo){
+async function api(ruta, cuerpo, reintento){
   let r, j=null;
   try{ r=await fetch(ruta,{method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify(cuerpo||{}), credentials:'same-origin'}); }
   catch(e){ return {data:null, error:{message:'No se pudo conectar con el servidor del edificio'}}; }
   try{ j=await r.json(); }catch(e){}
+  // Cambios delicados: el servidor pide confirmar la identidad; la app la pide y se reintenta una vez
+  if(!r.ok&&j&&j.reconfirmar&&!reintento&&typeof window.miEdificioReconfirmar==='function'){
+    const ok=await window.miEdificioReconfirmar(!!j.codigo); if(ok) return api(ruta,cuerpo,true);
+    return {data:null, error:{message:'Se canceló: confirma tu identidad para hacer este cambio'}}; }
   if(!r.ok) return {data:null, error:{message:(j&&j.error)||('Error '+r.status)}};
   return {data:j?j.data:null, error:null};
 }
@@ -33,7 +37,10 @@ function createClient(){
   let sesion, oyentes=[];
   const cargar=()=>fetch('/api/auth/sesion',{credentials:'same-origin'}).then(r=>r.json()).then(j=>j.data||null).catch(()=>null);
   const avisar=ev=>oyentes.forEach(f=>{ try{ f(ev,sesion); }catch(e){ console.error(e); } });
-  const entrar=async(ruta,cred)=>{ const r=await api(ruta,{email:cred.email, clave:cred.password}); if(r.error) return r; sesion=r.data; avisar('SIGNED_IN'); return {data:{session:sesion, user:sesion.user}, error:null}; };
+  const entrar=async(ruta,cred)=>{ const r=await api(ruta,{email:cred.email, clave:cred.password}); if(r.error) return r;
+    if(r.data&&r.data.mfa) return {data:{session:null, user:null, mfa:r.data}, error:null};   // falta el segundo paso
+    sesion=r.data; avisar('SIGNED_IN'); return {data:{session:sesion, user:sesion.user}, error:null}; };
+  const verificar=async(desafio,codigo)=>{ const r=await api('/api/auth/verificar',{desafio, codigo}); if(r.error) return r; const aviso=r.data.aviso; delete r.data.aviso; sesion=r.data; avisar('SIGNED_IN'); return {data:{session:sesion, aviso}, error:null}; };
 
   // Cambios en vivo: el servidor avisa "algo cambió" y cada vista vuelve a consultar lo suyo
   let es=null; const canales=new Set();
@@ -62,11 +69,17 @@ function createClient(){
     }) },
     // Solo modo local: lo que no existe en Supabase
     local:{ restablecer:(uid,clave)=>api('/api/auth/restablecer',{uid, clave}),
+      confirmar:(clave,codigo)=>api('/api/auth/confirmar',{clave, codigo},true),
+      cerrarOtras:()=>api('/api/auth/cerrar_otras'), cerrarDe:uid=>api('/api/auth/cerrar_de',{uid}),
+      // verificación en dos pasos (TOTP) de la instalación local
+      dosPasos:{ verificar, estado:()=>api('/api/2fa/estado'), iniciar:()=>api('/api/2fa/iniciar'), activar:codigo=>api('/api/2fa/activar',{codigo}), codigos:codigo=>api('/api/2fa/codigos',{codigo}),
+        desactivar:()=>api('/api/2fa/desactivar'), quitar:uid=>api('/api/2fa/quitar',{uid}), lista:()=>api('/api/2fa/lista') },
       // respaldo cifrado en una carpeta sincronizada con la nube (OneDrive, Google Drive…)
       // versión instalada, versiones nuevas y actualización con un clic
       sistema:{ estado:()=>api('/api/sistema/estado'), buscar:()=>api('/api/sistema/buscar'), actualizar:()=>api('/api/sistema/actualizar') },
       // acceso desde internet mediante un túnel de Cloudflare que maneja el servidor
       tunel:{ estado:()=>api('/api/tunel/estado'), configurar:d=>api('/api/tunel/configurar',d) },
+      seguridad:()=>api('/api/seguridad/estado'),
       correo:{ estado:()=>api('/api/correo/estado'), configurar:d=>api('/api/correo/configurar',d), probar:para=>api('/api/correo/probar',{para}), enviar:()=>api('/api/correo/enviar') },
   respaldo:{ estado:()=>api('/api/respaldo/estado'), configurar:d=>api('/api/respaldo/configurar',d), ahora:()=>api('/api/respaldo/ahora') } },
   };

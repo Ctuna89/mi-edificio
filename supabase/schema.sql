@@ -135,6 +135,15 @@ create table if not exists public.unidades (
   primary key (edificio_id, depto)
 );
 
+-- Nombre del propietario de cada unidad: aparte de "unidades" (que todas las cuentas leen para listas y alícuotas),
+-- para que lo vean solo la administración, el comité, la conserjería y la propia unidad
+create table if not exists public.unidad_propietarios (
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  depto       text not null,
+  prop        text not null default '',
+  primary key (edificio_id, depto)
+);
+
 -- Si el arrendatario u ocupante representa al copropietario en asambleas cuando este no asiste ni da poder (Ley 21.442, art. 5)
 alter table public.unidades add column if not exists arrendatario_representa boolean not null default true;
 
@@ -1239,7 +1248,7 @@ begin
   end if;
 
   select id into def from public.edificios order by creado, id limit 1;
-  foreach t in array array['empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos','certificados','banco_movimientos','banco_pagadores','presupuestos','emergencia_responsables','emergencia_simulacros','proveedores','contratos','turnos','novedades','unidad_vehiculos','unidad_mascotas','unidad_espacios','comunicado_lecturas','usuario_unidades','proveedor_ingresos','plantillas','facturas']
+  foreach t in array array['empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos','certificados','banco_movimientos','banco_pagadores','presupuestos','emergencia_responsables','emergencia_simulacros','proveedores','contratos','turnos','novedades','unidad_vehiculos','unidad_mascotas','unidad_espacios','comunicado_lecturas','usuario_unidades','proveedor_ingresos','plantillas','facturas','unidad_propietarios']
   loop
     execute format('alter table public.%I add column if not exists edificio_id uuid references public.edificios(id) on delete cascade', t);
     execute format('select count(*) from public.%I where edificio_id is null', t) into n;
@@ -1269,6 +1278,11 @@ begin
       foreign key (edificio_id, conv_id) references public.conversaciones(edificio_id, id) on delete cascade;
   end if;
 end $$;
+-- Los nombres de propietarios pasan de "unidades" a su propia tabla (una vez que existe edificio_id)
+insert into public.unidad_propietarios (edificio_id, depto, prop)
+select edificio_id, depto, prop from public.unidades where coalesce(prop, '') <> '' on conflict (edificio_id, depto) do nothing;
+update public.unidades set prop = '' where coalesce(prop, '') <> '';
+
 drop function public._pk_cols(text);
 
 -- Registro de pagos: los cobros que ya estaban marcados como pagados pasan a tener su pago
@@ -1352,7 +1366,7 @@ $$;
 do $$
 declare t text;
 begin
-  foreach t in array array['empresas','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos','certificados','banco_movimientos','banco_pagadores','presupuestos','emergencia_responsables','emergencia_simulacros','proveedores','contratos','turnos','novedades','unidad_vehiculos','unidad_mascotas','unidad_espacios','comunicado_lecturas','usuario_unidades','proveedor_ingresos','plantillas','facturas']
+  foreach t in array array['empresas','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos','certificados','banco_movimientos','banco_pagadores','presupuestos','emergencia_responsables','emergencia_simulacros','proveedores','contratos','turnos','novedades','unidad_vehiculos','unidad_mascotas','unidad_espacios','comunicado_lecturas','usuario_unidades','proveedor_ingresos','plantillas','facturas','unidad_propietarios']
   loop
     execute format('alter table public.%I alter column edificio_id set default public.mi_edificio()', t);
   end loop;
@@ -1549,6 +1563,17 @@ create or replace function public.incidencias_antes() returns trigger
 language plpgsql security definer set search_path = public as $$
 begin
   if auth.uid() is null or public.es_staff() then return new; end if;
+  if exists (select 1 from unnest(coalesce(new.fotos, '{}')) f where f not like new.edificio_id || '/incidencias/%')
+     or exists (select 1 from jsonb_array_elements(coalesce(new.historial, '[]')) h, jsonb_array_elements_text(case when jsonb_typeof(h->'fotos') = 'array' then h->'fotos' else '[]' end) f
+                where f not like new.edificio_id || '/incidencias/%') then
+    raise exception 'Foto no válida';
+  end if;
+  if tg_op = 'UPDATE' and (jsonb_array_length(coalesce(new.historial, '[]')) < jsonb_array_length(coalesce(old.historial, '[]'))
+     or coalesce(new.historial, '[]') -> 0 is distinct from coalesce(old.historial, '[]') -> 0
+     or exists (select 1 from generate_series(0, jsonb_array_length(coalesce(old.historial, '[]')) - 1) i where new.historial -> i is distinct from old.historial -> i)
+     or not (coalesce(old.fotos, '{}') <@ coalesce(new.fotos, '{}'))) then
+    raise exception 'El historial de la incidencia no se modifica: solo se agrega';
+  end if;
   if tg_op = 'INSERT' then
     new.estado := 'abierta'; new.asignado_a := null; new.ot_id := null;
   else
@@ -2124,7 +2149,7 @@ declare t text;
 begin
   -- tablas con datos personales o de dinero (no los votos: el voto de un sondeo es secreto)
   foreach t in array array['edificios','usuarios','contactos','unidades','gastos','pagos','convenios','cargos','caja_movimientos','fondos','fondo_movimientos',
-                           'lecturas','multas_catalogo','indicadores','consentimientos','solicitudes_datos','estacionamientos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','certificados','banco_movimientos','presupuestos','emergencia_responsables','proveedores','contratos','turnos','unidad_vehiculos','unidad_mascotas','unidad_espacios','usuario_unidades','proveedor_ingresos','plantillas','facturas'] loop
+                           'lecturas','multas_catalogo','indicadores','consentimientos','solicitudes_datos','estacionamientos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','certificados','banco_movimientos','presupuestos','emergencia_responsables','proveedores','contratos','turnos','unidad_vehiculos','unidad_mascotas','unidad_espacios','usuario_unidades','proveedor_ingresos','plantillas','facturas','unidad_propietarios'] loop
     execute format('drop trigger if exists %I on public.%I', t || '_auditoria', t);
     execute format('create trigger %I after insert or update or delete on public.%I for each row execute function privado.auditar()', t || '_auditoria', t);
   end loop;
@@ -2450,10 +2475,11 @@ begin
   if not found or public.mi_rol() is distinct from 'comite' then raise exception 'Solo el comité aprueba'; end if;
   if sp.estado <> 'en_comite' then raise exception 'La suspensión no está esperando al comité'; end if;
   if not p_aprueba and coalesce(trim(p_comentario), '') = '' then raise exception 'Indica el motivo del rechazo'; end if;
+  if public.es_mi_depto(sp.depto) then raise exception 'Es tu unidad: abstente y deja que decida el resto del comité'; end if;
   if privado.susp_proteger(p_id) then return; end if;
   insert into public.suspension_votos (suspension_id, edificio_id, ronda, aprueba, comentario) values (p_id, sp.edificio_id, sp.ronda, p_aprueba, nullif(trim(p_comentario), ''));
   perform privado.evento_susp(p_id, 'voto', case when p_aprueba then 'Aprueba' else 'Rechaza: ' || trim(p_comentario) end);
-  n := privado.susp_cfg(sp.edificio_id, 'aprobaciones_comite', 1);
+  n := greatest(1, privado.susp_cfg(sp.edificio_id, 'aprobaciones_comite', 1));
   select count(*) filter (where aprueba), count(*) filter (where not aprueba) into si, no_ from public.suspension_votos where suspension_id = p_id and ronda = sp.ronda;
   if si >= n then update public.suspensiones set estado = 'aprobada' where id = p_id;
   elsif no_ >= n then update public.suspensiones set estado = 'rechazada', motivo_cierre = 'El comité no aprobó la suspensión' where id = p_id;
@@ -2614,7 +2640,10 @@ declare n text;
 begin
   select string_agg(nombre, ', ' order by desde, nombre) into n from public.registro_personas
   where edificio_id = new.edificio_id and depto = new.depto and relacion = 'copropietario' and estado = 'vigente' and hasta is null;
-  if n is not null then update public.unidades set prop = n where edificio_id = new.edificio_id and depto = new.depto and prop is distinct from n; end if;
+  if n is not null then
+    insert into public.unidad_propietarios (edificio_id, depto, prop) values (new.edificio_id, new.depto, n)
+    on conflict (edificio_id, depto) do update set prop = excluded.prop where unidad_propietarios.prop is distinct from excluded.prop;
+  end if;
   if tg_op = 'INSERT' and new.estado = 'pendiente' then
     perform privado.push(new.edificio_id, privado.usuarios_de(new.edificio_id, '{admin}'), '📇 Cambio en el registro por revisar', 'Depto ' || new.depto || ': ' || new.nombre || ' (' || new.relacion || ')', '#registro');
   elsif tg_op = 'UPDATE' and new.baja_solicitada and not old.baja_solicitada then
@@ -2804,6 +2833,8 @@ begin
   if not found or a.estado <> 'en_curso' then raise exception 'La asamblea no está en curso'; end if;
   if not exists (select 1 from public.unidades where edificio_id = a.edificio_id and depto = p_depto) then raise exception 'La unidad no existe'; end if;
   if mesa and p_calidad is not null then
+    if p_via <> 'presencial' or a.modalidad = 'telematica' then raise exception 'La mesa registra solo la asistencia presencial; quien participa a distancia la registra desde su cuenta'; end if;
+    if coalesce(trim(p_quien), '') = '' and p_calidad <> 'apoderado' then raise exception 'Indica el nombre de quien asiste'; end if;
     cal := p_calidad; q := coalesce(nullif(trim(p_quien), ''), case cal when 'apoderado' then (select nombre from public.asamblea_poderes where asamblea_id = a.id and depto = p_depto and revocado_at is null) end, initcap(cal));
     if cal = 'apoderado' and not exists (select 1 from public.asamblea_poderes where asamblea_id = a.id and depto = p_depto and revocado_at is null) then raise exception 'La unidad no tiene un poder vigente'; end if;
     if cal = 'arrendatario' and a.tipo = 'extraordinaria_reforzada' then raise exception 'En materias de mayoría reforzada el arrendatario necesita un poder'; end if;
@@ -2859,9 +2890,11 @@ begin
   if not found then raise exception 'Primero se registra la asistencia de la unidad'; end if;
   if not x.habil then raise exception 'La unidad tiene cuotas de gasto común impagas: no vota'; end if;
   if x.calidad = 'arrendatario' and m.regla = 'reforzada' then raise exception 'En materias de mayoría reforzada el arrendatario necesita un poder'; end if;
-  if not mesa then
-    cal := privado.calidad_en_asamblea(a, p_depto);
-    if cal is null or cal <> x.calidad then raise exception 'No representas a esa unidad'; end if;
+  cal := privado.calidad_en_asamblea(a, p_depto);
+  if cal is null or cal <> x.calidad then
+    if not mesa then raise exception 'No representas a esa unidad'; end if;
+    if x.via <> 'presencial' then raise exception 'La mesa vota solo por unidades presentes en la sala'; end if;
+    cal := null;
   end if;
   insert into public.asamblea_votos (mocion_id, edificio_id, depto, opcion, peso, calidad, registrado_por_mesa)
   values (p_mocion, a.edificio_id, p_depto, p_opcion, x.peso, x.calidad, mesa and cal is null);
@@ -3026,7 +3059,7 @@ begin
   -- nombre: todas las palabras (de 3 letras o más, al menos dos) del nombre de alguien del registro o del propietario
   select n.depto, n.nombre, count(*) over () into x from (
     select distinct r.depto, r.nombre from public.registro_personas r where r.edificio_id = p_e and r.estado = 'vigente' and r.hasta is null
-    union select u.depto, u.prop from public.unidades u where u.edificio_id = p_e and coalesce(u.prop, '') <> '') n
+    union select u.depto, u.prop from public.unidad_propietarios u where u.edificio_id = p_e and coalesce(u.prop, '') <> '') n
   where (select count(*) >= 2 and bool_and(position(w in g) > 0) from regexp_split_to_table(privado.sin_tildes(n.nombre), '[^A-Z]+') w where length(w) >= 3)
   limit 1;
   if found and x.count = 1 then depto := x.depto; motivo := 'nombre de ' || x.nombre; return; end if;
@@ -3300,6 +3333,17 @@ drop trigger if exists proveedor_ingresos_antes on public.proveedor_ingresos;
 create trigger proveedor_ingresos_antes before insert or update on public.proveedor_ingresos for each row execute function privado.proveedor_ingresos_antes();
 
 -- Patentes en un solo formato (sin espacios, puntos ni guiones, en mayúsculas)
+create or replace function privado.foto_en_carpeta() returns trigger
+language plpgsql as $$
+begin
+  if coalesce(new.foto, '') <> '' and new.foto not like new.edificio_id || '/' || tg_argv[0] || '/%' then raise exception 'Foto no válida'; end if;
+  return new;
+end $$;
+drop trigger if exists mascotas_foto on public.unidad_mascotas;
+create trigger mascotas_foto before insert or update on public.unidad_mascotas for each row execute function privado.foto_en_carpeta('mascotas');
+drop trigger if exists novedades_foto on public.novedades;
+create trigger novedades_foto before insert on public.novedades for each row execute function privado.foto_en_carpeta('novedades');
+
 create or replace function privado.vehiculos_antes() returns trigger
 language plpgsql as $$
 begin
@@ -3787,10 +3831,11 @@ begin
   if not found or public.mi_rol() is distinct from 'comite' then raise exception 'Solo el comité aprueba multas'; end if;
   if c.estado <> 'en_comite' then raise exception 'La multa no está esperando al comité'; end if;
   if not p_aprueba and coalesce(trim(p_comentario), '') = '' then raise exception 'Indica el motivo del rechazo'; end if;
+  if public.es_mi_depto(c.depto) then raise exception 'Es tu unidad: abstente y deja que decida el resto del comité'; end if;
   if exists (select 1 from public.infraccion_votos where infraccion_id = p_id and ronda = c.ronda and uid = auth.uid()) then raise exception 'Ya votaste esta multa'; end if;
   insert into public.infraccion_votos (infraccion_id, edificio_id, ronda, aprueba, comentario) values (p_id, c.edificio_id, c.ronda, p_aprueba, nullif(trim(p_comentario), ''));
   perform privado.evento_infraccion(p_id, 'voto', case when p_aprueba then 'Aprueba' else 'Rechaza: ' || trim(p_comentario) end);
-  n := privado.multas_cfg(c.edificio_id, 'aprobaciones_comite', 1);
+  n := greatest(1, privado.multas_cfg(c.edificio_id, 'aprobaciones_comite', 1));
   select count(*) filter (where aprueba), count(*) filter (where not aprueba) into si, no_ from public.infraccion_votos where infraccion_id = p_id and ronda = c.ronda;
   if si >= n then
     perform privado.aplicar_multa(p_id);
@@ -3966,6 +4011,18 @@ create trigger lecturas_despues after insert or update or delete on public.lectu
 for each row execute function public.lecturas_despues();
 
 -- Encuestas: ¿puede mi unidad votar esta opción ahora?
+create or replace function public.puede_votar(p_encuesta uuid, p_opcion int, p_depto text) returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists (
+    select 1 from public.encuestas e
+    where e.id = p_encuesta and e.edificio_id = public.mi_edificio()
+      and e.estado = 'abierta' and (e.cierra is null or e.cierra >= public.hoy())
+      and p_opcion >= 0 and p_opcion < jsonb_array_length(e.opciones)
+      and public.es_residente()
+      and (not e.solo_propietarios
+           or exists (select 1 from public.usuario_unidades x where x.uid = auth.uid() and x.depto = p_depto and x.rol = 'propietario')
+           or (p_depto = public.mi_depto() and public.mi_rol() = 'propietario')))
+$$;
 create or replace function public.puede_votar(p_encuesta uuid, p_opcion int) returns boolean
 language sql stable security definer set search_path = public as $$
   select exists (
@@ -4254,7 +4311,8 @@ create trigger push_ot after insert or update on public.ot for each row execute 
 -- ---------------------------------------------------------------------
 create or replace function privado.meses(r jsonb, k text) returns int
 language sql immutable as $$
-  select case when (r->>k) ~ '^[0-9]{1,3}$' then (r->>k)::int else 0 end
+  select case when (r->>k) ~ '^[0-9]{1,3}$' and (r->>k)::int > 0
+              then greatest((r->>k)::int, case k when 'auditoria' then 24 when 'novedades' then 60 else 0 end) else 0 end
 $$;
 
 create or replace function privado.encolar_archivos(p_e uuid, p_paths text[]) returns void
@@ -4339,11 +4397,16 @@ begin
     for rec in delete from public.incidencias where edificio_id = p_e and estado = 'cerrada' and ts < now() - make_interval(months => m) returning fotos, historial
     loop
       n := n + 1;
-      perform privado.encolar_archivos(p_e, rec.fotos);
+      -- solo archivos de la carpeta de incidencias: una incidencia no puede hacer borrar otros archivos
+      perform privado.encolar_archivos(p_e, array(select f from unnest(rec.fotos) f where f like p_e || '/incidencias/%'));
       perform privado.encolar_archivos(p_e, array(
-        select jsonb_array_elements_text(h->'fotos') from jsonb_array_elements(rec.historial) h where jsonb_typeof(h->'fotos') = 'array'));
+        select f from jsonb_array_elements(rec.historial) h, jsonb_array_elements_text(h->'fotos') f where jsonb_typeof(h->'fotos') = 'array' and f like p_e || '/incidencias/%'));
     end loop;
     res := res || jsonb_build_object('incidencias', n);
+  end if;
+  -- cada depuración que borra algo queda en la bitácora de auditoría (que no se puede modificar)
+  if exists (select 1 from jsonb_each_text(res) x where x.value::int > 0) then
+    insert into public.auditoria (edificio_id, uid, accion, tabla, motivo, despues) values (p_e, auth.uid(), 'borrar', 'depuracion', 'Borrado por plazo de conservación', res);
   end if;
   return res;
 end $$;
@@ -4466,6 +4529,7 @@ alter table public.usuario_unidades enable row level security;
 alter table public.proveedor_ingresos enable row level security;
 alter table public.plantillas       enable row level security;
 alter table public.facturas         enable row level security;
+alter table public.unidad_propietarios enable row level security;
 
 -- helper para (re)crear políticas sin errores. Salvo que se indique lo contrario, toda
 -- política queda además limitada a las filas del edificio del usuario.
@@ -4578,7 +4642,7 @@ select public._pol('encuestas','enc_upd','update','public.mi_rol() in (''comite'
 select public._pol('encuestas','enc_del','delete','public.mi_rol() in (''comite'',''admin'')');
 -- votos: cada unidad ve y emite solo el suyo; los totales salen de resultados_encuestas()
 select public._pol('votos','vot_sel','select','public.es_mi_depto(depto)');
-select public._pol('votos','vot_ins','insert','uid = auth.uid() and length(depto) > 0 and public.es_mi_depto(depto) and public.puede_votar(encuesta_id, opcion)');
+select public._pol('votos','vot_ins','insert','uid = auth.uid() and length(depto) > 0 and public.es_mi_depto(depto) and public.puede_votar(encuesta_id, opcion, depto)');
 select public._pol('votos','vot_upd','update','public.es_mi_depto(depto)','uid = auth.uid() and length(depto) > 0 and public.es_mi_depto(depto) and public.puede_votar(encuesta_id, opcion)');
 
 -- push_subs: cada usuario ve y borra las suyas; se guardan con guardar_push()
@@ -4691,6 +4755,10 @@ select public._pol('contratos','ctr_sel','select','public.mi_rol() in (''comite'
 select public._pol('contratos','ctr_ins','insert','public.es_admin()');
 select public._pol('contratos','ctr_upd','update','public.es_admin()');
 select public._pol('contratos','ctr_del','delete','public.es_admin()');
+select public._pol('unidad_propietarios','up_sel','select','public.mi_rol() in (''conserje'',''comite'',''admin'') or (public.es_residente() and public.es_mi_depto(depto))');
+select public._pol('unidad_propietarios','up_ins','insert','public.es_admin()');
+select public._pol('unidad_propietarios','up_upd','update','public.es_admin()');
+select public._pol('unidad_propietarios','up_del','delete','public.es_admin()');
 select public._pol('facturas','fac_sel','select','public.mi_rol() in (''comite'',''admin'')');
 select public._pol('facturas','fac_ins','insert','public.es_admin()');
 select public._pol('facturas','fac_upd','update','public.es_admin()');
@@ -4806,7 +4874,7 @@ create policy "fotos_delete" on storage.objects for delete to authenticated usin
 do $$
 declare t text;
 begin
-  foreach t in array array['edificios','empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos','certificados','banco_movimientos','banco_pagadores','presupuestos','emergencia_responsables','emergencia_simulacros','proveedores','contratos','turnos','novedades','unidad_vehiculos','unidad_mascotas','unidad_espacios','comunicado_lecturas','usuario_unidades','proveedor_ingresos','plantillas','facturas']
+  foreach t in array array['edificios','empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos','certificados','banco_movimientos','banco_pagadores','presupuestos','emergencia_responsables','emergencia_simulacros','proveedores','contratos','turnos','novedades','unidad_vehiculos','unidad_mascotas','unidad_espacios','comunicado_lecturas','usuario_unidades','proveedor_ingresos','plantillas','facturas','unidad_propietarios']
   loop
     begin
       execute format('alter publication supabase_realtime add table public.%I', t);

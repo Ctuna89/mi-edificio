@@ -4,6 +4,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 const AQUI = path.dirname(fileURLToPath(import.meta.url));
 const DATOS = fs.mkdtempSync(path.join(os.tmpdir(), 'mi-edificio-'));
 const PUERTO = 8900 + Math.floor(Math.random() * 90), B = `http://localhost:${PUERTO}`;
+const LLAVE = path.join(os.tmpdir(), `me-llave-${PUERTO}-${Date.now()}.bin`);   // fuera de la carpeta de datos, como en una instalación real
 // Un "cloudflared" de mentira, que escribe lo mismo que el real: así se prueba cómo lo maneja el servidor
 const FALSO = path.join(DATOS, 'cloudflared-de-prueba');
 fs.writeFileSync(FALSO, `#!/usr/bin/env node
@@ -27,12 +29,12 @@ let proc;
 const PUERTO_GH = PUERTO + 200; let ultimaPublicada = { tag_name: 'v0.0.1', html_url: 'https://example.test/v0.0.1', body: 'Notas', assets: [] };
 const gh = (await import('node:http')).createServer((req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(ultimaPublicada)); }).listen(PUERTO_GH);
 const levantar = (extra = {}) => new Promise((ok, mal) => {
-  proc = spawn(process.execPath, [path.join(AQUI, 'server.mjs')], { env: { ...process.env, MI_EDIFICIO_DATOS: DATOS, PUERTO: String(PUERTO), MI_EDIFICIO_CLOUDFLARED: FALSO, MI_EDIFICIO_ACTUALIZACIONES_URL: `http://localhost:${PUERTO_GH}/latest`, ...extra }, stdio: ['ignore', 'pipe', 'pipe'] });
+  proc = spawn(process.execPath, [path.join(AQUI, 'server.mjs')], { env: { ...process.env, MI_EDIFICIO_DATOS: DATOS, MI_EDIFICIO_LLAVE: LLAVE, PUERTO: String(PUERTO), MI_EDIFICIO_CLOUDFLARED: FALSO, MI_EDIFICIO_ACTUALIZACIONES_URL: `http://localhost:${PUERTO_GH}/latest`, ...extra }, stdio: ['ignore', 'pipe', 'pipe'] });
   let salida = ''; const ver = d => { salida += d; if (salida.includes('está funcionando')) ok(); };
   proc.stdout.on('data', ver); proc.stderr.on('data', ver); proc.on('exit', c => mal(new Error('el servidor terminó (' + c + '): ' + salida.slice(-500))));
 });
 const bajar = () => new Promise(ok => { proc.removeAllListeners('exit'); proc.on('exit', ok); proc.kill('SIGTERM'); });
-before(() => levantar()); after(async () => { await bajar(); gh.close(); fs.rmSync(DATOS, { recursive: true, force: true }); });
+before(() => levantar()); after(async () => { await bajar(); gh.close(); fs.rmSync(DATOS, { recursive: true, force: true }); fs.rmSync(LLAVE, { force: true }); });
 
 // Un "navegador": guarda su cookie de sesión
 function persona() {
@@ -56,6 +58,16 @@ let eid, ritaId;
 test('sin sesión no se puede consultar nada', async () => {
   assert.equal((await intruso.db({ t: 'usuarios', op: 'select' })).estado, 401);
   assert.equal((await intruso.rpc('buscar_edificio')).estado, 401);
+});
+
+test('por la red local sin cifrar no se atiende la app ni la API', async (t) => {
+  const ip = Object.values(os.networkInterfaces()).flat().find(i => i && i.family === 'IPv4' && !i.internal)?.address;
+  if (!ip) return t.skip('este equipo no tiene una dirección de red');
+  const r = await fetch(`http://${ip}:${PUERTO}/`); const html = await r.text();
+  assert.equal(r.status, 403); assert.match(html, /Entra por la dirección segura/); assert.ok(!html.includes('app.js'), 'no entrega la app');
+  const a = await fetch(`http://${ip}:${PUERTO}/api/auth/entrar`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'ana@test.cl', clave: 'clave-segura-1' }) });
+  assert.equal(a.status, 403); assert.ok(!a.headers.get('set-cookie'), 'ni abre sesiones');
+  assert.equal((await fetch(B + '/')).status, 200, 'en este mismo computador sí');
 });
 
 test('la app se sirve adaptada al modo local', async () => {
@@ -180,7 +192,12 @@ test('correo: la administración configura el SMTP y la app envía las notificac
     assert.equal(e.configurado, true); assert.equal(e.remitente, 'edificio@test.cl'); assert.equal(e.tieneClave, true); assert.ok(!JSON.stringify(e).includes('secreta'), 'la contraseña no vuelve al navegador');
     e = (await ana.pedir('/api/correo/configurar', { proveedor: 'gmail', remitente: 'x@gmail.com', clave: 'abcd efgh ijkl mnop' })).data;
     assert.equal(e.host, 'smtp.gmail.com'); assert.equal(e.puerto, 465); assert.equal(e.seguridad, 'tls');
-    assert.equal(JSON.parse(fs.readFileSync(path.join(DATOS, 'config.json'), 'utf8')).correo.clave, 'abcdefghijklmnop', 'Gmail: sin los espacios con que se muestra');
+    const cfg = fs.readFileSync(path.join(DATOS, 'config.json'), 'utf8'), guardada = JSON.parse(cfg).correo.clave;
+    assert.ok(guardada.startsWith('enc:v1:') && !cfg.includes('abcdefghijklmnop') && !cfg.includes('secreta'), 'la contraseña del correo queda cifrada en config.json');
+    assert.ok(!JSON.parse(cfg).secreto.match(/^[0-9a-f]{64}$/), 'y también el secreto de la instalación');
+    const crypto = await import('node:crypto'), llave = Buffer.from(fs.readFileSync(LLAVE, 'utf8').replace('archivo:', ''), 'base64'), b = Buffer.from(guardada.slice(7), 'base64');
+    const d = crypto.createDecipheriv('aes-256-gcm', llave, b.subarray(0, 12)); d.setAuthTag(b.subarray(b.length - 16));
+    assert.equal(Buffer.concat([d.update(b.subarray(12, b.length - 16)), d.final()]).toString(), 'abcdefghijklmnop', 'con la llave, que está fuera de la carpeta de datos, se recupera (Gmail: sin los espacios)');
     await ana.pedir('/api/correo/configurar', { proveedor: 'otro', host: 'localhost', puerto, seguridad: 'ninguna', usuario: '', remitente: 'edificio@test.cl' });
     const p = await ana.pedir('/api/correo/probar', {}); assert.equal(p.estado, 200, p.error); assert.equal(p.data.enviado, 'ana@test.cl');
     assert.ok(await hasta(() => recibidos.length >= 1)); assert.deepEqual(recibidos[0].para, ['ana@test.cl']); assert.match(recibidos[0].cuerpo, /Subject: Prueba de correo/);
@@ -192,6 +209,56 @@ test('correo: la administración configura el SMTP y la app envía las notificac
     const cita = recibidos.find(m => m.para.includes('rita@test.cl') && /Citaci/.test(m.cuerpo)); assert.match(cita.cuerpo, /Citaci/); assert.match(cita.cuerpo, /Reply-To|From: Torre Local|Torre Local/);
     assert.equal((await rita.db({ t: 'correos', op: 'select' })).data.length, 0, 'la cola es solo de la administración');
   } finally { smtp.close(); await ana.pedir('/api/correo/configurar', { borrar: true, proveedor: 'otro', host: 'x', remitente: 'a@b.cl' }); }
+});
+
+test('contraseñas de 12 caracteres o más y cierre de sesiones', async () => {
+  assert.match((await persona().registro('corto@test.cl', 'once-letras')).error, /al menos 12 caracteres/, 'una cuenta nueva necesita 12 caracteres');
+  assert.equal((await rita.pedir('/api/auth/clave', { clave: 'corta-11-ch' })).estado, 400, 'cambiar a una de 11 no se puede');
+  assert.equal((await fetch(B + '/api/auth/sesion', { headers: { cookie: rita.cookie } }).then(r => r.json())).data.user.clave_corta, false);
+  const otra = persona(); await otra.entrar('rita@test.cl'); assert.equal((await otra.db({ t: 'usuarios', op: 'select' })).estado, 200);
+  const c = await rita.pedir('/api/auth/cerrar_otras'); assert.equal(c.data.cerradas >= 1, true);
+  assert.equal((await otra.db({ t: 'usuarios', op: 'select' })).estado, 401, 'cerrar las demás sesiones saca a los otros dispositivos');
+  assert.equal((await rita.db({ t: 'usuarios', op: 'select' })).estado, 200, 'y deja la propia');
+  assert.equal((await rita.pedir('/api/auth/cerrar_de', { uid: ritaId })).estado, 403, 'solo la administración cierra sesiones de otros');
+  const otra2 = persona(); await otra2.entrar('rita@test.cl');
+  assert.equal((await ana.pedir('/api/auth/cerrar_de', { uid: ritaId })).estado, 200);
+  assert.equal((await otra2.db({ t: 'usuarios', op: 'select' })).estado, 401);
+  await rita.entrar('rita@test.cl');
+  assert.equal((await ana.db({ t: 'usuarios', op: 'update', p: { estado: 'bloqueado' }, f: [['id', 'eq', ritaId]] })).estado, 200);
+  assert.equal((await rita.db({ t: 'usuarios', op: 'select' })).estado, 401, 'bloquear una cuenta cierra al instante sus sesiones');
+  assert.equal((await ana.db({ t: 'usuarios', op: 'update', p: { estado: 'activo' }, f: [['id', 'eq', ritaId]] })).estado, 200);
+  await rita.entrar('rita@test.cl');
+});
+
+test('verificación en dos pasos: activar, entrar con código o código de respaldo, y quitarla', async () => {
+  const crypto = await import('node:crypto');
+  const deB32 = t => { const A = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'; const bits = t.split('').map(c => A.indexOf(c).toString(2).padStart(5, '0')).join(''); const o = []; for (let i = 0; i + 8 <= bits.length; i += 8) o.push(parseInt(bits.slice(i, i + 8), 2)); return Buffer.from(o); };
+  const codigo = (sec, desfase = 0) => { const m = Buffer.alloc(8); m.writeBigUInt64BE(BigInt(Math.floor(Date.now() / 30000) + desfase)); const h = crypto.createHmac('sha1', deB32(sec)).update(m).digest(), o = h[h.length - 1] & 15; return String((h.readUInt32BE(o) & 0x7fffffff) % 1000000).padStart(6, '0'); };
+  const rita2 = persona(); assert.equal((await rita2.entrar('rita@test.cl')).estado, 200);
+  assert.equal((await rita2.pedir('/api/2fa/estado')).data.activo, false);
+  const ini = (await rita2.pedir('/api/2fa/iniciar')).data; assert.match(ini.uri, /^otpauth:\/\/totp\/Mi%20Edificio%3Arita%40test\.cl\?secret=[A-Z2-7]{32}/);
+  assert.equal((await rita2.pedir('/api/2fa/activar', { codigo: '000000' })).estado, 400, 'un código equivocado no la activa');
+  const act = await rita2.pedir('/api/2fa/activar', { codigo: codigo(ini.secreto) }); assert.equal(act.estado, 200, act.error);
+  assert.equal(act.data.codigos.length, 10); assert.equal((await rita2.pedir('/api/2fa/estado')).data.quedan, 10);
+  const otro = persona(); const e1 = await otro.entrar('rita@test.cl'); assert.equal(e1.data.mfa, true, 'con la contraseña correcta todavía no hay sesión');
+  assert.equal((await otro.db({ t: 'usuarios', op: 'select' })).estado, 401);
+  assert.equal((await otro.pedir('/api/auth/verificar', { desafio: e1.data.desafio, codigo: '123456' })).error, 'Código incorrecto');
+  assert.equal((await otro.pedir('/api/auth/verificar', { desafio: e1.data.desafio, codigo: codigo(ini.secreto) })).estado, 400, 'el mismo código no sirve dos veces');
+  await new Promise(r => setTimeout(r, 30000 - Date.now() % 30000 + 200));   // espera el código siguiente
+  const v = await otro.pedir('/api/auth/verificar', { desafio: e1.data.desafio, codigo: codigo(ini.secreto) }); assert.equal(v.estado, 200, v.error);
+  assert.equal((await otro.db({ t: 'usuarios', op: 'select' })).estado, 200, 'con el segundo paso entra');
+  const tercero = persona(); const e2 = await tercero.entrar('rita@test.cl');
+  const r = await tercero.pedir('/api/auth/verificar', { desafio: e2.data.desafio, codigo: act.data.codigos[0].toLowerCase() }); assert.equal(r.estado, 200, r.error); assert.match(r.data.aviso, /código de respaldo/);
+  const cuarto = persona(); const e3 = await cuarto.entrar('rita@test.cl');
+  assert.equal((await cuarto.pedir('/api/auth/verificar', { desafio: e3.data.desafio, codigo: act.data.codigos[0] })).estado, 400, 'un código de respaldo sirve una sola vez');
+  for (let i = 0; i < 4; i++) await cuarto.pedir('/api/auth/verificar', { desafio: e3.data.desafio, codigo: '111111' });
+  assert.equal((await cuarto.pedir('/api/auth/verificar', { desafio: e3.data.desafio, codigo: act.data.codigos[1] })).estado, 401, 'tras 5 intentos el desafío se anula');
+  const cf = await rita2.pedir('/api/auth/confirmar', { clave: 'otra' }); assert.equal(cf.estado, 400); assert.match(cf.error, /contraseña o el código/, 'con la verificación activa, confirmar pide contraseña y código');
+  assert.equal((await rita2.pedir('/api/2fa/quitar', { uid: ritaId })).estado, 403, 'solo la administración la quita a otros');
+  assert.deepEqual((await ana.pedir('/api/2fa/lista')).data, [ritaId]);
+  assert.equal((await ana.pedir('/api/2fa/quitar', { uid: ritaId })).estado, 200);
+  assert.equal((await otro.db({ t: 'usuarios', op: 'select' })).estado, 401, 'quitarla cierra sus sesiones');
+  assert.equal((await rita.entrar('rita@test.cl')).data.user.id, ritaId, 'y vuelve a entrar solo con la contraseña');
 });
 
 test('respaldo cifrado en una carpeta, con aviso si no es de nube, y restauración en un equipo nuevo', async () => {
@@ -235,6 +302,36 @@ test('contraseñas: la restablece la administración, y los datos persisten tras
   assert.equal((await rita.db({ t: 'gasto_unidades', op: 'select' })).data[0].monto, 600, 'sesión y datos siguen ahí');
   assert.equal((await ana.db({ t: 'comunicados', op: 'select' })).data[0].titulo, 'Corte de agua');
   assert.ok(await hasta(async () => (await ana.pedir('/api/tunel/estado')).data.estado === 'conectado'), 'el acceso desde internet vuelve solo al reiniciar');
+});
+
+test('cambios delicados piden confirmar la identidad; bloqueo por cuenta; host y carpetas de red', async () => {
+  await bajar(); await levantar({ MI_EDIFICIO_CONFIRMAR_SEG: '2' });
+  const adm = persona(); assert.equal((await adm.entrar('ana@test.cl')).estado, 200);
+  await new Promise(r => setTimeout(r, 2500));
+  const sin = await adm.pedir('/api/correo/configurar', { proveedor: 'gmail', remitente: 'x@gmail.com', clave: 'abcd efgh ijkl mnop' });
+  assert.equal(sin.estado, 403); assert.match(sin.error, /Confirma tu identidad/, 'con la sesión abierta hace rato, el cambio pide confirmar');
+  assert.equal((await adm.pedir('/api/auth/confirmar', { clave: 'mala-clave-123' })).estado, 400);
+  assert.equal((await adm.pedir('/api/auth/confirmar', { clave: 'clave-segura-1' })).estado, 200);
+  assert.equal((await adm.pedir('/api/correo/configurar', { proveedor: 'gmail', remitente: 'x@gmail.com', clave: 'abcd efgh ijkl mnop' })).estado, 200, 'recién confirmada, sí');
+  assert.equal((await adm.pedir('/api/correo/configurar', { proveedor: 'otro', host: 'smtp.otro.cl', puerto: 587, seguridad: 'starttls', remitente: 'x@gmail.com', usuario: 'x@gmail.com' })).data.tieneClave, false, 'al cambiar de servidor, la contraseña guardada no se le envía al nuevo');
+  assert.equal((await adm.pedir('/api/correo/configurar', { proveedor: 'otro', host: 'smtp.otro.cl', puerto: 25, seguridad: 'ninguna', remitente: 'x@gmail.com' })).estado, 400, 'sin cifrar, solo a un servidor de este equipo');
+  assert.equal((await adm.pedir('/api/respaldo/configurar', { carpeta: '//servidor/compartida/respaldo', clave: 'clave-del-respaldo' })).estado, 400, 'el respaldo no va a una carpeta de red');
+  await adm.pedir('/api/correo/configurar', { borrar: true, proveedor: 'otro', host: 'x', remitente: 'a@b.cl' });
+  // bloqueo por cuenta, aunque cada intento venga de otra dirección
+  const v = persona(); await v.registro('victima@test.cl', 'clave-victima-12');
+  for (let i = 0; i < 10; i++) await persona().pedir('/api/auth/entrar', { email: 'victima@test.cl', clave: 'adivinando-' + i }, { headers: { 'cf-connecting-ip': '203.0.113.' + i } });
+  const b = await persona().pedir('/api/auth/entrar', { email: 'victima@test.cl', clave: 'clave-victima-12' }, { headers: { 'cf-connecting-ip': '198.51.100.7' } });
+  assert.equal(b.estado, 429, 'tras 10 fallos la cuenta queda bloqueada un rato, desde cualquier dirección');
+  // nombres de host ajenos (DNS rebinding)
+  const h = await new Promise(ok => { const r = http.request({ host: '127.0.0.1', port: PUERTO, path: '/api/auth/registro', method: 'POST', headers: { 'content-type': 'application/json', host: 'evil.example:' + PUERTO, origin: 'http://evil.example:' + PUERTO } }, res => { res.resume(); ok(res.statusCode); }); r.end(JSON.stringify({ email: 'x@evil.cl', clave: 'clave-segura-12' })); });
+  assert.equal(h, 421, 'una página de otro sitio que apunte a este equipo (DNS rebinding) no es atendida');
+  const o = await fetch(B + '/api/auth/registro', { method: 'POST', headers: { 'content-type': 'application/json', origin: 'http://evil.example' }, body: JSON.stringify({ email: 'y@evil.cl', clave: 'clave-segura-12' }) });
+  assert.equal(o.status, 403, 'ni con un origen ajeno');
+  assert.equal((await adm.subir(`${eid}/docs/2026-11-27/ACTA.pdf`, 'x')).estado, 200);
+  assert.equal((await adm.subir(`${eid}/docs/2026-11-27/acta.pdf`, 'y')).estado, 400, 'un nombre que en Windows es el mismo archivo no se acepta');
+  assert.equal((await adm.subir(`${eid}/docs/2026-11-27./z.pdf`, 'y')).estado, 400);
+  await bajar(); await levantar();
+  await ana.entrar('ana@test.cl'); await rita.entrar('rita@test.cl', 'nueva-clave-22');
 });
 
 test('versiones: aviso de versión nueva', async () => {

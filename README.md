@@ -67,7 +67,7 @@ La primera vez descarga sus dependencias (necesita internet) y crea la carpeta `
 
 ### En ambos casos
 
-La app ya funciona en ese computador y, por la dirección de red que muestra el servidor, en los equipos conectados a la red del edificio. Para que residentes y conserjes entren desde sus teléfonos, sigue con el paso 2.
+La app ya funciona en ese computador. **Desde cualquier otro equipo, incluso dentro del edificio, se entra solo por la dirección segura (HTTPS) del paso 2**: por seguridad, el servidor no atiende la app por la red local sin cifrar, donde otro equipo conectado podría ver contraseñas y datos. Sigue con el paso 2.
 
 Para cambiar el puerto, crea un archivo `puerto.txt` con el número en la carpeta de datos (o define la variable `PUERTO`) y reinicia.
 
@@ -417,7 +417,12 @@ El escaneo de rondas usa **Web NFC**, disponible solo en Chrome para Android. Gr
 
 ## Seguridad
 
-El modelo de seguridad y sus limitaciones están en [`SECURITY.md`](SECURITY.md). Lo esencial: el computador que ejecuta el servidor guarda los datos de toda la comunidad, así que mantenlo actualizado, con contraseña y con acceso restringido, y respalda `local/datos`.
+El modelo de seguridad y sus limitaciones están en [`SECURITY.md`](SECURITY.md). Lo esencial:
+
+- **Nada viaja sin cifrar por la red**: fuera del propio computador del edificio, la app se usa solo por la dirección HTTPS del acceso desde internet.
+- **Verificación en dos pasos** voluntaria (Mi cuenta), muy recomendada para la administración y el comité; contraseñas de 12 caracteres o más; cerrar sesiones en otros dispositivos.
+- **Las claves de la instalación se guardan cifradas**, con una llave fuera de la carpeta de datos.
+- **El computador del edificio guarda los datos de toda la comunidad**: cifra su disco (BitLocker), úsalo con una cuenta de Windows propia y con contraseña, mantenlo actualizado y configura el respaldo en la nube. Administración → Edificio → **Seguridad** revisa todo esto y explica cómo resolver lo que falte.
 
 ## Datos personales (Chile)
 

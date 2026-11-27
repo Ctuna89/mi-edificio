@@ -17,7 +17,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { PGlite } from '@electric-sql/pglite';
 import { pgcrypto } from '@electric-sql/pglite/contrib/pgcrypto';
@@ -111,7 +111,15 @@ if (versionDb && cmpVersion(versionDb, VERSION_APP) > 0 && !process.env.MI_EDIFI
       await tx.exec(fs.readFileSync(process.env.MI_EDIFICIO_ESQUEMA || path.join(RAIZ, 'supabase', 'schema.sql'), 'utf8'));
       await tx.exec(`update public.plataforma set push_url = 'local' where coalesce(push_url, '') = '';
         create schema if not exists sistema;
-        create table if not exists sistema.instalacion (id int primary key default 1 check (id = 1), version text not null, actualizado timestamptz default now(), historial jsonb not null default '[]'::jsonb);`);
+        create table if not exists sistema.instalacion (id int primary key default 1 check (id = 1), version text not null, actualizado timestamptz default now(), historial jsonb not null default '[]'::jsonb);
+        create or replace function auth.cerrar_si_baja() returns trigger language plpgsql security definer as $f$
+        begin
+          if tg_op = 'DELETE' then delete from auth.sesiones where user_id = old.id; return old; end if;
+          if new.estado is distinct from 'activo' and old.estado = 'activo' then delete from auth.sesiones where user_id = new.id; end if;
+          return new;
+        end $f$;
+        drop trigger if exists cerrar_sesiones_baja on public.usuarios;
+        create trigger cerrar_sesiones_baja after update of estado or delete on public.usuarios for each row execute function auth.cerrar_si_baja();`);
       if (versionDb !== VERSION_APP) await tx.query(`insert into sistema.instalacion (id, version, historial) values (1, $1, jsonb_build_array(jsonb_build_object('de', $2::text, 'a', $1::text, 'fecha', now())))
         on conflict (id) do update set version = excluded.version, actualizado = now(), historial = sistema.instalacion.historial || excluded.historial`, [VERSION_APP, versionDb]);
     });
@@ -139,6 +147,7 @@ function modoMantencion(m) {
   // el detalle solo se muestra a quien abre la página en este mismo computador
   const esLocal = req => ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress) && !req.headers['x-forwarded-for'] && !req.headers['cf-connecting-ip'];
   const srv = http.createServer((req, res) => {
+    if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress)) { res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' }); return res.end('Mi Edificio está en mantención. Revísalo en el computador del edificio.'); }
     if (req.url.startsWith('/api/')) { res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); return res.end(JSON.stringify({ data: null, error: 'Mi Edificio está en mantención.', mantencion: m.motivo })); }
     res.writeHead(503, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Retry-After': '600' }); res.end(pagina(esLocal(req)));
   });
@@ -150,16 +159,74 @@ function modoMantencion(m) {
   return new Promise(() => {});
 }
 
-// Secreto para firmar enlaces a archivos y claves VAPID de las notificaciones: se crean una vez
+// ---------------------------------------------------------------------
+// Llave de la configuración: los secretos de config.json (contraseña del correo, token del túnel, llave del
+// respaldo, clave privada de las notificaciones y el secreto de la instalación) se guardan cifrados con una
+// llave que vive FUERA de la carpeta de datos. En Windows, además, la protege DPAPI con la cuenta de Windows:
+// copiar la carpeta de datos, o el archivo de la llave, a otro equipo no permite leerlos.
+// ---------------------------------------------------------------------
+const RUTA_LLAVE = process.env.MI_EDIFICIO_LLAVE || (process.platform === 'win32'
+  ? path.join(process.env.APPDATA || os.homedir(), 'MiEdificio', `llave-${crypto.createHash('sha256').update(DATOS.toLowerCase()).digest('hex').slice(0, 10)}.bin`)
+  : path.join(os.homedir(), '.config', 'mi-edificio', `llave-${crypto.createHash('sha256').update(DATOS).digest('hex').slice(0, 10)}.bin`));
+function dpapi(accion, b64) {   // ProtectedData de .NET por PowerShell (sin dependencias nativas)
+  const r = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command',
+    `Add-Type -AssemblyName System.Security; $b=[Convert]::FromBase64String($env:ME_DATO); [Convert]::ToBase64String([Security.Cryptography.ProtectedData]::${accion}($b,$null,'CurrentUser'))`],
+    { env: { ...process.env, ME_DATO: b64 }, encoding: 'utf8', windowsHide: true, timeout: 30000 });
+  if (r.status !== 0 || !r.stdout.trim()) throw new Error((r.stderr || r.error?.message || 'DPAPI no respondió').trim().slice(0, 200));
+  return r.stdout.trim();
+}
+const LLAVE = { buf: null, modo: '', error: '' };
+function cargarLlave() {
+  try {
+    if (fs.existsSync(RUTA_LLAVE)) {
+      const t = fs.readFileSync(RUTA_LLAVE, 'utf8').trim();
+      if (t.startsWith('dpapi:')) { LLAVE.buf = Buffer.from(dpapi('Unprotect', t.slice(6)), 'base64'); LLAVE.modo = 'dpapi'; }
+      else { LLAVE.buf = Buffer.from(t.replace(/^archivo:/, ''), 'base64'); LLAVE.modo = 'archivo'; }
+      if (LLAVE.buf.length !== 32) throw new Error('Llave dañada');
+      return;
+    }
+    const nueva = crypto.randomBytes(32); let texto = 'archivo:' + nueva.toString('base64'); LLAVE.modo = 'archivo';
+    if (process.platform === 'win32') {
+      try { const p = dpapi('Protect', nueva.toString('base64')); if (Buffer.from(dpapi('Unprotect', p), 'base64').equals(nueva)) { texto = 'dpapi:' + p; LLAVE.modo = 'dpapi'; } }
+      catch (e) { log('DPAPI no disponible; la llave queda en un archivo aparte:', e.message); }
+    }
+    fs.mkdirSync(path.dirname(RUTA_LLAVE), { recursive: true });
+    fs.writeFileSync(RUTA_LLAVE, texto, { mode: 0o600 });
+    LLAVE.buf = nueva;
+  } catch (e) {
+    LLAVE.buf = null; LLAVE.error = e.message;
+    log(`NO SE PUDO LEER LA LLAVE DE LA CONFIGURACIÓN (${RUTA_LLAVE}): ${e.message}. Los secretos cifrados no se pueden usar; vuelve a configurar el correo, el túnel y el respaldo, o restaura la llave.`);
+  }
+}
+cargarLlave();
+const SECRETOS = [['secreto'], ['vapid', 'privateKey'], ['correo', 'clave'], ['tunel', 'token'], ['respaldo', 'llave']];
+const sellarCfg = v => { const iv = crypto.randomBytes(12), c = crypto.createCipheriv('aes-256-gcm', LLAVE.buf, iv); const x = Buffer.concat([c.update(String(v), 'utf8'), c.final()]); return 'enc:v1:' + Buffer.concat([iv, x, c.getAuthTag()]).toString('base64'); };
+const abrirCfg = v => { const b = Buffer.from(v.slice(7), 'base64'), d = crypto.createDecipheriv('aes-256-gcm', LLAVE.buf, b.subarray(0, 12)); d.setAuthTag(b.subarray(b.length - 16)); return Buffer.concat([d.update(b.subarray(12, b.length - 16)), d.final()]).toString('utf8'); };
+const enRuta = (o, r) => r.slice(0, -1).reduce((x, k) => (x && typeof x === 'object' ? x[k] : undefined), o);
+const SIN_LLAVE = new Set();   // secretos que quedaron cifrados y no se pudieron abrir (no se pisan al guardar)
+function leerCfg(texto) {
+  const c = JSON.parse(texto);
+  for (const r of SECRETOS) { const o = enRuta(c, r), k = r.at(-1); if (!o || typeof o[k] !== 'string' || !o[k].startsWith('enc:v1:')) continue;
+    if (!LLAVE.buf) { SIN_LLAVE.add(r.join('.')); continue; }
+    try { o[k] = abrirCfg(o[k]); } catch { SIN_LLAVE.add(r.join('.')); log(`No se pudo descifrar ${r.join('.')} de la configuración (¿llave de otro equipo?).`); } }
+  return c;
+}
 const rutaCfg = path.join(DATOS, 'config.json');
-let CFG = fs.existsSync(rutaCfg) ? JSON.parse(fs.readFileSync(rutaCfg, 'utf8')) : {};
+let CFG = fs.existsSync(rutaCfg) ? leerCfg(fs.readFileSync(rutaCfg, 'utf8')) : {};
+// Un secreto que no se pudo abrir no se puede usar: se descarta para que se vuelva a configurar (salvo el de la instalación)
+for (const r of SIN_LLAVE) { const p = r.split('.'), o = enRuta(CFG, p); if (r !== 'secreto' && o) delete o[p.at(-1)]; }
+if (SIN_LLAVE.has('secreto')) { log('El secreto de la instalación no se pudo abrir: se crea otro. Quien tenga la verificación en dos pasos deberá entrar con un código de respaldo y volver a activarla.'); delete CFG.secreto; }
 let webpush = null;
 try { webpush = (await import('web-push')).default; } catch { log('web-push no está instalado: sin notificaciones push'); }
 let nodemailer = null;
 try { nodemailer = (await import('nodemailer')).default; } catch { log('nodemailer no está instalado: sin envío de correos'); }
 if (!CFG.secreto) CFG.secreto = crypto.randomBytes(32).toString('hex');
 if (!CFG.vapid && webpush) CFG.vapid = webpush.generateVAPIDKeys();
-const guardarCfg = () => fs.writeFileSync(rutaCfg, JSON.stringify(CFG, null, 2), { mode: 0o600 });
+const guardarCfg = () => {
+  const c = structuredClone(CFG);
+  if (LLAVE.buf) for (const r of SECRETOS) { const o = enRuta(c, r), k = r.at(-1); if (o && typeof o[k] === 'string' && o[k] && !o[k].startsWith('enc:v1:')) o[k] = sellarCfg(o[k]); }
+  fs.writeFileSync(rutaCfg, JSON.stringify(c, null, 2), { mode: 0o600 });
+};
 guardarCfg();
 if (webpush && CFG.vapid) webpush.setVapidDetails(process.env.MI_EDIFICIO_CONTACTO || 'mailto:admin@example.com', CFG.vapid.publicKey, CFG.vapid.privateKey);
 
@@ -179,7 +246,7 @@ const TABLAS = new Map(), FUNCIONES = new Map();
   f.rows.forEach(r => FUNCIONES.set(r.n, { set: r.s, volatil: r.v === 'v', ret: r.r, args: r.tipos.map((tipo, i) => ({ nombre: r.nombres[i], tipo })) }));
 }
 
-class Fallo extends Error { constructor(m, estado = 400) { super(m); this.estado = estado; } }
+class Fallo extends Error { constructor(m, estado = 400, extra = null) { super(m); this.estado = estado; this.extra = extra; } }
 // Ejecuta fn dentro de una transacción con los permisos del usuario (o del sistema si uid es null)
 const como = (uid, fn) => db.transaction(async tx => {
   await tx.query(`select set_config('request.jwt.claim.sub', $1, true)`, [uid || '']);
@@ -191,23 +258,74 @@ const como = (uid, fn) => db.transaction(async tx => {
 // Cuentas y sesiones
 // ---------------------------------------------------------------------
 const sha = s => crypto.createHash('sha256').update(s).digest('hex');
-const cifrar = clave => { const sal = crypto.randomBytes(16); return sal.toString('hex') + ':' + crypto.scryptSync(clave, sal, 64).toString('hex'); };
-const coincide = (clave, guardada) => { const [sal, h] = String(guardada).split(':'); if (!sal || !h) return false; const x = crypto.scryptSync(clave, Buffer.from(sal, 'hex'), 64); const y = Buffer.from(h, 'hex'); return x.length === y.length && crypto.timingSafeEqual(x, y); };
-const validarClave = c => { if (typeof c !== 'string' || c.length < 8 || c.length > 200) throw new Fallo('Password should be at least 8 characters'); };
+const scrypt = (c, sal) => new Promise((ok, mal) => crypto.scrypt(c, sal, 64, (e, k) => e ? mal(e) : ok(k)));
+const cifrar = async clave => { const sal = crypto.randomBytes(16); return sal.toString('hex') + ':' + (await scrypt(clave, sal)).toString('hex'); };
+const FICTICIA = '00000000000000000000000000000000:' + '0'.repeat(128);   // para tardar lo mismo cuando el correo no existe
+const coincide = async (clave, guardada) => { const [sal, h] = String(guardada || FICTICIA).split(':'); if (!sal || !h) return false; const x = await scrypt(clave, Buffer.from(sal, 'hex')); const y = Buffer.from(h, 'hex'); return x.length === y.length && crypto.timingSafeEqual(x, y) && guardada !== FICTICIA; };
+// Bloqueo por cuenta: cada 10 fallos seguidos (contraseña o código), 15 minutos, que se duplican hasta 24 horas
+async function fallo(uid) {
+  await db.query(`update auth.users set fallos = fallos + 1, bloqueo_hasta = case when (fallos + 1) % 10 = 0 then now() + least(interval '24 hours', interval '15 minutes' * power(2, (fallos + 1) / 10 - 1)) else bloqueo_hasta end where id = $1`, [uid]);
+}
+const BLOQUEADA = 'Demasiados intentos para esta cuenta. Espera unos minutos o pide ayuda a la administración.';
+const MIN_CLAVE = 12;
+const validarClave = c => { if (typeof c !== 'string' || c.length < MIN_CLAVE || c.length > 200) throw new Fallo(`La contraseña debe tener al menos ${MIN_CLAVE} caracteres`); };
 const galleta = req => (req.headers.cookie || '').split(';').map(x => x.trim().split('=')).find(x => x[0] === 'me_sesion')?.[1] || '';
 const esHttps = req => (req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https';
 const ponerGalleta = (req, res, token, seg) => res.setHeader('Set-Cookie', `me_sesion=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${seg}${esHttps(req) ? '; Secure' : ''}`);
 async function sesionDe(req) {
   const tk = galleta(req); if (!tk) return null;
-  const r = await db.query(`select u.id, u.email from auth.sesiones s join auth.users u on u.id = s.user_id where s.token_hash = $1 and s.expira > now()`, [sha(tk)]);
-  return r.rows[0] ? { user: { id: r.rows[0].id, email: r.rows[0].email } } : null;
+  const r = await db.query(`select u.id, u.email, u.clave_corta from auth.sesiones s join auth.users u on u.id = s.user_id where s.token_hash = $1 and s.expira > now()`, [sha(tk)]);
+  return r.rows[0] ? { user: { id: r.rows[0].id, email: r.rows[0].email, clave_corta: r.rows[0].clave_corta } } : null;
 }
 async function abrirSesion(req, res, user) {
   const tk = crypto.randomBytes(32).toString('base64url');
-  await db.query(`insert into auth.sesiones (token_hash, user_id, expira) values ($1, $2, now() + make_interval(days => $3))`, [sha(tk), user.id, SESION_DIAS]);
+  await db.query(`insert into auth.sesiones (token_hash, user_id, expira, confirmado_at) values ($1, $2, now() + make_interval(days => $3), now())`, [sha(tk), user.id, SESION_DIAS]);   // recién entró: cuenta como confirmación
   ponerGalleta(req, res, tk, SESION_DIAS * 86400);
   return { user: { id: user.id, email: user.email } };
 }
+// ---------- Verificación en dos pasos (TOTP, RFC 6238: 30 s, 6 dígitos, SHA-1, compatible con cualquier app) ----------
+const B32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+const aBase32 = buf => { let bits = '', out = ''; for (const b of buf) bits += b.toString(2).padStart(8, '0'); for (let i = 0; i + 5 <= bits.length; i += 5) out += B32[parseInt(bits.slice(i, i + 5), 2)]; return out; };
+const deBase32 = s => { const bits = String(s).toUpperCase().replace(/[^A-Z2-7]/g, '').split('').map(c => B32.indexOf(c).toString(2).padStart(5, '0')).join(''); const out = []; for (let i = 0; i + 8 <= bits.length; i += 8) out.push(parseInt(bits.slice(i, i + 8), 2)); return Buffer.from(out); };
+function totp(secreto, paso) {
+  const m = Buffer.alloc(8); m.writeBigUInt64BE(BigInt(paso));
+  const h = crypto.createHmac('sha1', secreto).update(m).digest(), o = h[h.length - 1] & 15;
+  return String(((h.readUInt32BE(o) & 0x7fffffff) % 1000000)).padStart(6, '0');
+}
+// El secreto se guarda cifrado con una llave derivada del secreto de la instalación (que viaja en el respaldo cifrado)
+const llaveTotp = () => crypto.createHash('sha256').update('mi-edificio-totp|' + CFG.secreto).digest();
+const cifrarT = buf => { const iv = crypto.randomBytes(12), c = crypto.createCipheriv('aes-256-gcm', llaveTotp(), iv); const x = Buffer.concat([c.update(buf), c.final()]); return Buffer.concat([iv, x, c.getAuthTag()]).toString('base64'); };
+const descifrarT = s => { const b = Buffer.from(s, 'base64'), d = crypto.createDecipheriv('aes-256-gcm', llaveTotp(), b.subarray(0, 12)); d.setAuthTag(b.subarray(b.length - 16)); return Buffer.concat([d.update(b.subarray(12, b.length - 16)), d.final()]); };
+// Devuelve el intervalo que calza (±30 s), o 0
+function pasoValido(secreto, codigo, ultimo) {
+  const c = String(codigo || '').replace(/\D/g, ''); if (c.length !== 6) return 0;
+  const ahora = Math.floor(Date.now() / 30000);
+  for (const p of [ahora, ahora - 1, ahora + 1]) if (p > ultimo && crypto.timingSafeEqual(Buffer.from(totp(secreto, p)), Buffer.from(c))) return p;
+  return 0;
+}
+const nuevosCodigos = () => Array.from({ length: 10 }, () => { const x = crypto.randomBytes(5).toString('hex').toUpperCase(); return x.slice(0, 5) + '-' + x.slice(5); });
+const normCodigo = c => String(c || '').toUpperCase().replace(/[^0-9A-F]/g, '');
+// Segundo paso pendiente: tras la contraseña correcta queda un desafío de 5 minutos y 5 intentos
+const desafios = new Map();
+setInterval(() => { const a = Date.now(); for (const [k, v] of desafios) if (v.expira < a) desafios.delete(k); }, 60000).unref();
+async function verificarSegundo(uid, codigo) {
+  const r = (await db.query(`select totp_secreto, totp_respaldo, totp_paso from auth.users where id = $1 and totp_activo`, [uid])).rows[0];
+  if (!r) return false;
+  const p = pasoValido(descifrarT(r.totp_secreto), codigo, Number(r.totp_paso));
+  if (p) { await db.query(`update auth.users set totp_paso = $2 where id = $1`, [uid, p]); return true; }
+  const h = sha(normCodigo(codigo));
+  if (normCodigo(codigo).length === 10 && r.totp_respaldo.includes(h)) { await db.query(`update auth.users set totp_respaldo = array_remove(totp_respaldo, $2) where id = $1`, [uid, h]); return 'respaldo'; }
+  return false;
+}
+
+// Cambios delicados (respaldo, túnel, correo, actualizar, contraseñas, verificación en dos pasos): piden volver a
+// confirmar la identidad si no se hizo en los últimos 10 minutos, aunque haya una sesión abierta
+const VENTANA_CONFIRMACION = Number(process.env.MI_EDIFICIO_CONFIRMAR_SEG) || 600;
+async function exigirConfirmacion(req) {
+  const r = await db.query(`select s.confirmado_at > now() - make_interval(secs => ${VENTANA_CONFIRMACION}) as ok, u.totp_activo from auth.sesiones s join auth.users u on u.id = s.user_id where s.token_hash = $1`, [sha(galleta(req))]);
+  if (!r.rows[0]?.ok) throw new Fallo('Confirma tu identidad para hacer este cambio', 403, { reconfirmar: true, codigo: !!r.rows[0]?.totp_activo });
+}
+
 // Freno a los intentos de adivinar contraseñas: 8 fallos seguidos → 5 minutos de espera
 const intentos = new Map();
 const ipDe = req => (req.headers['cf-connecting-ip'] || (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || '');
@@ -222,33 +340,150 @@ const AUTH = {
     validarClave(clave); frenar('r|' + ipDe(req)); anotar('r|' + ipDe(req), false);   // también limita la creación masiva de cuentas
     const ya = await db.query(`select 1 from auth.users where email = $1`, [email]);
     if (ya.rows.length) throw new Fallo('User already registered');
-    const r = await db.query(`insert into auth.users (email, clave) values ($1, $2) returning id, email`, [email, cifrar(clave)]);
+    const r = await db.query(`insert into auth.users (email, clave) values ($1, $2) returning id, email`, [email, await cifrar(clave)]);
     return abrirSesion(req, res, r.rows[0]);
   },
   async entrar(req, res, { email, clave }) {
     email = String(email || '').trim().toLowerCase(); const k = email + '|' + ipDe(req); frenar(k);
-    const r = await db.query(`select id, email, clave from auth.users where email = $1`, [email]);
-    const ok = !!r.rows[0] && coincide(String(clave || ''), r.rows[0].clave); anotar(k, ok);
-    if (!ok) throw new Fallo('Invalid login credentials');
+    const r = await db.query(`select id, email, clave, totp_activo, bloqueo_hasta > now() as bloqueada from auth.users where email = $1`, [email]);
+    const ok = await coincide(String(clave || ''), r.rows[0]?.clave); anotar(k, ok);
+    if (r.rows[0]?.bloqueada) throw new Fallo(BLOQUEADA, 429);
+    if (!ok) { if (r.rows[0]) await fallo(r.rows[0].id); throw new Fallo('Invalid login credentials'); }
+    if (!r.rows[0].totp_activo) await db.query(`update auth.users set fallos = 0, bloqueo_hasta = null where id = $1`, [r.rows[0].id]);
+    await db.query(`update auth.users set clave_corta = $2 where id = $1`, [r.rows[0].id, String(clave).length < MIN_CLAVE]);
+    if (r.rows[0].totp_activo) {   // falta el segundo paso: todavía no hay sesión
+      const desafio = crypto.randomBytes(24).toString('base64url');
+      desafios.set(desafio, { uid: r.rows[0].id, email: r.rows[0].email, expira: Date.now() + 5 * 60000, n: 0 });
+      return { mfa: true, desafio };
+    }
     return abrirSesion(req, res, r.rows[0]);
+  },
+  async verificar(req, res, { desafio, codigo }) {
+    const k = 'm|' + ipDe(req); frenar(k);
+    const d = desafios.get(String(desafio || ''));
+    if (!d || d.expira < Date.now()) { desafios.delete(desafio); throw new Fallo('El inicio de sesión expiró. Vuelve a escribir tu contraseña.', 401); }
+    if ((await db.query(`select bloqueo_hasta > now() as b from auth.users where id = $1`, [d.uid])).rows[0]?.b) { desafios.delete(desafio); throw new Fallo(BLOQUEADA, 429); }
+    const ok = await verificarSegundo(d.uid, codigo); anotar(k, !!ok);
+    if (!ok) { await fallo(d.uid); if (++d.n >= 5) desafios.delete(desafio); throw new Fallo('Código incorrecto'); }
+    desafios.delete(desafio);
+    await db.query(`update auth.users set fallos = 0, bloqueo_hasta = null where id = $1`, [d.uid]);
+    const ses = await abrirSesion(req, res, { id: d.uid, email: d.email });
+    if (ok === 'respaldo') ses.aviso = 'Usaste un código de respaldo: cada uno sirve una sola vez.';
+    return ses;
   },
   async salir(req, res) { const tk = galleta(req); if (tk) await db.query(`delete from auth.sesiones where token_hash = $1`, [sha(tk)]); ponerGalleta(req, res, '', 0); return null; },
   async clave(req, res, { clave }, ses) {
-    if (!ses) throw new Fallo('Debes iniciar sesión', 401); validarClave(clave);
-    await db.query(`update auth.users set clave = $1 where id = $2`, [cifrar(clave), ses.user.id]);
+    if (!ses) throw new Fallo('Debes iniciar sesión', 401); validarClave(clave); await exigirConfirmacion(req);
+    await db.query(`update auth.users set clave = $1, clave_corta = false where id = $2`, [await cifrar(clave), ses.user.id]);
     await db.query(`delete from auth.sesiones where user_id = $1 and token_hash <> $2`, [ses.user.id, sha(galleta(req))]);
     return null;
+  },
+  async confirmar(req, res, { clave, codigo }, ses) {
+    if (!ses) throw new Fallo('Debes iniciar sesión', 401);
+    const u = (await db.query(`select clave, totp_activo, bloqueo_hasta > now() as bloqueada from auth.users where id = $1`, [ses.user.id])).rows[0];
+    if (u.bloqueada) throw new Fallo(BLOQUEADA, 429);
+    let ok = await coincide(String(clave || ''), u.clave);
+    if (ok && u.totp_activo) ok = await verificarSegundo(ses.user.id, codigo) === true;
+    if (!ok) { await fallo(ses.user.id); throw new Fallo(u.totp_activo ? 'La contraseña o el código no son correctos' : 'La contraseña no es correcta', 400, { reconfirmar: true, codigo: u.totp_activo }); }
+    await db.query(`update auth.sesiones set confirmado_at = now() where token_hash = $1`, [sha(galleta(req))]);
+    await db.query(`update auth.users set fallos = 0 where id = $1`, [ses.user.id]);
+    return { ok: true };
+  },
+  // Cerrar la sesión en todos los demás dispositivos
+  async cerrar_otras(req, res, b, ses) {
+    if (!ses) throw new Fallo('Debes iniciar sesión', 401);
+    const r = await db.query(`delete from auth.sesiones where user_id = $1 and token_hash <> $2`, [ses.user.id, sha(galleta(req))]);
+    return { cerradas: r.affectedRows ?? 0 };
+  },
+  // La administración cierra todas las sesiones de una cuenta (teléfono perdido, cambio de conserje…)
+  async cerrar_de(req, res, { uid }, ses) {
+    if (!ses) throw new Fallo('Debes iniciar sesión', 401);
+    const ok = await como(ses.user.id, tx => tx.query(`select public.es_admin() and exists (select 1 from public.usuarios where id = $1 and edificio_id = public.mi_edificio()) as ok`, [uid]));
+    if (!ok.rows[0]?.ok) throw new Fallo('Solo la administración puede cerrar sesiones de otros', 403);
+    const r = await db.query(`delete from auth.sesiones where user_id = $1`, [uid]);
+    return { cerradas: r.affectedRows ?? 0 };
   },
   // Sin correo no hay enlace de recuperación: la administración fija una contraseña nueva
   async restablecer(req, res, { uid, clave }, ses) {
     if (!ses) throw new Fallo('Debes iniciar sesión', 401); validarClave(clave);
     const ok = await como(ses.user.id, tx => tx.query(`select public.es_admin() and exists (select 1 from public.usuarios where id = $1 and edificio_id = public.mi_edificio()) as ok`, [uid]));
     if (!ok.rows[0]?.ok) throw new Fallo('Solo la administración puede restablecer contraseñas', 403);
-    await db.query(`update auth.users set clave = $1 where id = $2`, [cifrar(clave), uid]);
+    await exigirConfirmacion(req);
+    await db.query(`update auth.users set clave = $1, clave_corta = false, fallos = 0, bloqueo_hasta = null where id = $2`, [await cifrar(clave), uid]);
     await db.query(`delete from auth.sesiones where user_id = $1`, [uid]);
     return null;
   },
 };
+
+async function dosPasos(req, accion, d, ses) {
+  const uid = ses.user.id;
+  const yo = async () => (await db.query(`select email, clave, totp_activo, totp_pendiente, cardinality(totp_respaldo) as quedan from auth.users where id = $1`, [uid])).rows[0];
+  const u = await yo();
+  if (accion === 'estado') return { activo: u.totp_activo, quedan: u.totp_activo ? Number(u.quedan) : 0 };
+  if (accion === 'iniciar') {
+    if (u.totp_activo) throw new Fallo('Ya está activada');
+    const s = crypto.randomBytes(20);
+    await db.query(`update auth.users set totp_pendiente = $2 where id = $1`, [uid, cifrarT(s)]);
+    const emisor = 'Mi Edificio', b = aBase32(s);
+    return { secreto: b, uri: `otpauth://totp/${encodeURIComponent(emisor + ':' + u.email)}?secret=${b}&issuer=${encodeURIComponent(emisor)}&period=30&digits=6&algorithm=SHA1` };
+  }
+  if (accion === 'activar') {
+    frenar('a|' + uid);
+    if (u.totp_activo || !u.totp_pendiente) throw new Fallo('Primero genera el código QR');
+    const p = pasoValido(descifrarT(u.totp_pendiente), d.codigo, 0); anotar('a|' + uid, !!p);
+    if (!p) throw new Fallo('El código no coincide. Revisa que la hora del teléfono esté bien y prueba con el código nuevo.');
+    const cods = nuevosCodigos();
+    await db.query(`update auth.users set totp_secreto = totp_pendiente, totp_pendiente = null, totp_activo = true, totp_paso = $2, totp_respaldo = $3 where id = $1`, [uid, p, cods.map(c => sha(normCodigo(c)))]);
+    await db.query(`delete from auth.sesiones where user_id = $1 and token_hash <> $2`, [uid, sha(galleta(req))]);   // las demás sesiones vuelven a entrar con el segundo paso
+    return { activo: true, codigos: cods };
+  }
+  if (accion === 'codigos') {
+    frenar('a|' + uid);
+    const ok = u.totp_activo && await verificarSegundo(uid, d.codigo) === true; anotar('a|' + uid, ok);
+    if (!ok) throw new Fallo('Código incorrecto');
+    const cods = nuevosCodigos();
+    await db.query(`update auth.users set totp_respaldo = $2 where id = $1`, [uid, cods.map(c => sha(normCodigo(c)))]);
+    return { activo: true, codigos: cods };
+  }
+  if (accion === 'desactivar') {
+    await exigirConfirmacion(req);
+    await db.query(`update auth.users set totp_activo = false, totp_secreto = null, totp_pendiente = null, totp_respaldo = '{}', totp_paso = 0 where id = $1`, [uid]);
+    return { activo: false };
+  }
+  if (accion === 'quitar') {   // la administración, a quien perdió el teléfono y sus códigos
+    const ok = await como(uid, tx => tx.query(`select public.es_admin() and exists (select 1 from public.usuarios where id = $1 and edificio_id = public.mi_edificio()) as ok`, [d.uid]));
+    if (!ok.rows[0]?.ok) throw new Fallo('Solo la administración puede quitar la verificación en dos pasos', 403);
+    if (d.uid === uid) throw new Fallo('Para tu propia cuenta, desactívala en Mi cuenta');
+    await exigirConfirmacion(req);
+    await db.query(`update auth.users set totp_activo = false, totp_secreto = null, totp_pendiente = null, totp_respaldo = '{}', totp_paso = 0 where id = $1`, [d.uid]);
+    await db.query(`delete from auth.sesiones where user_id = $1`, [d.uid]);
+    await db.query(`insert into public.auditoria (edificio_id, uid, accion, tabla, registro, motivo) select edificio_id, $2, 'cambiar', 'usuarios', $1::text, 'Se quitó la verificación en dos pasos' from public.usuarios where id = $1`, [d.uid, uid]).catch(e => log('auditoría 2FA:', e.message));
+    return { activo: false };
+  }
+  if (accion === 'lista') {   // qué cuentas del edificio la tienen activa (solo administración)
+    const ok = await como(uid, tx => tx.query(`select public.es_admin() as ok`));
+    if (!ok.rows[0]?.ok) throw new Fallo('Solo administración', 403);
+    const r = await como(uid, tx => tx.query(`select id from public.usuarios where edificio_id = public.mi_edificio()`));
+    const ids = r.rows.map(x => x.id);
+    return (await db.query(`select id from auth.users where totp_activo and id = any($1::uuid[])`, [ids])).rows.map(x => x.id);
+  }
+  throw new Fallo('No encontrado', 404);
+}
+
+// Cifrado del disco donde están los datos (BitLocker o cifrado de dispositivo). Se consulta sin permisos de
+// administrador con la propiedad que muestra el Explorador; si no se puede saber, se dice.
+let discoCache = null;
+async function cifradoDisco() {
+  if (discoCache && discoCache.t > Date.now() - 600000) return discoCache.v;
+  let v = 'desconocido';
+  if (process.platform === 'win32') {
+    const unidad = path.parse(DATOS).root.replace(/\\$/, '');
+    const r = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `(New-Object -ComObject Shell.Application).NameSpace('${unidad}\\').Self.ExtendedProperty('System.Volume.BitLockerProtection')`], { encoding: 'utf8', windowsHide: true, timeout: 20000 });
+    const n = parseInt((r.stdout || '').trim(), 10);
+    v = n === 1 || n === 3 || n === 5 ? 'cifrado' : n === 2 ? 'sin cifrar' : 'desconocido';
+  }
+  discoCache = { t: Date.now(), v }; return v;
+}
 
 // ---------------------------------------------------------------------
 // Consultas de la app → SQL. Los valores viajan como JSON y Postgres los convierte al tipo
@@ -311,8 +546,10 @@ const enDisco = r => path.join(DIR.archivos, ...r.split('/'));
 const firma = (r, exp) => crypto.createHmac('sha256', CFG.secreto).update(r + '|' + exp).digest('base64url');
 const TIPOS = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif', pdf: 'application/pdf' };
 
+const RESERVADOS = /^(con|prn|aux|nul|com\d|lpt\d)(\.|$)/i;
 async function subir(uid, ruta, cuerpo) {
-  if (!rutaValida(ruta)) throw new Fallo('Ruta no válida');
+  if (!rutaValida(ruta) || ruta.split('/').some(p => !p || /[. ]$/.test(p) || RESERVADOS.test(p))) throw new Fallo('Ruta no válida');
+  if ((await db.query(`select 1 from storage.objects where lower(name) = lower($1)`, [ruta])).rows.length) throw new Fallo('Ya existe un archivo con ese nombre');
   await como(uid, async tx => {
     await tx.query(`insert into storage.objects (bucket_id, name) values ('fotos', $1)`, [ruta]);   // RLS decide si puede
     fs.mkdirSync(path.dirname(enDisco(ruta)), { recursive: true }); fs.writeFileSync(enDisco(ruta), cuerpo);
@@ -320,7 +557,7 @@ async function subir(uid, ruta, cuerpo) {
   return { path: ruta };
 }
 async function firmar(uid, rutas, seg) {
-  rutas = (Array.isArray(rutas) ? rutas : []).filter(rutaValida).slice(0, 500); seg = Math.max(60, Math.min(86400, Number(seg) || 3600));
+  rutas = (Array.isArray(rutas) ? rutas : []).filter(rutaValida).slice(0, 500); seg = Math.max(60, Math.min(3600, Number(seg) || 3600));
   const r = await como(uid, tx => tx.query(`select name from storage.objects where bucket_id = 'fotos' and name = any($1::text[])`, [rutas]));
   const visibles = new Set(r.rows.map(x => x.name)), exp = Math.floor(Date.now() / 1000) + seg;
   return rutas.map(x => ({ path: x, signedUrl: visibles.has(x) ? `/api/archivos/f/${x.split('/').map(encodeURIComponent).join('/')}?e=${exp}&s=${firma(x, exp)}` : null }));
@@ -399,6 +636,7 @@ function configurarRespaldo({ carpeta, clave, hora }) {
   if (hora !== undefined && hora !== null && hora !== '' && !(Number.isInteger(Number(hora)) && Number(hora) >= 0 && Number(hora) <= 23)) throw new Fallo('La hora del respaldo debe estar entre 0 y 23');
   carpeta = String(carpeta || '').trim();
   if (!carpeta || !path.isAbsolute(carpeta)) throw new Fallo('Escribe la ruta completa de la carpeta, por ejemplo C:\\Users\\Conserjeria\\OneDrive\\Respaldo Mi Edificio');
+  if (/^[\\/]{2}/.test(carpeta) || (process.platform === 'win32' && !/^[a-z]:[\\/]/i.test(carpeta))) throw new Fallo('El respaldo va a una carpeta de este computador (por ejemplo, la de OneDrive), no a una carpeta de red');
   carpeta = path.resolve(carpeta);
   if ((carpeta + path.sep).startsWith(DATOS + path.sep)) throw new Fallo('Elige una carpeta fuera de los datos de Mi Edificio');
   try { fs.mkdirSync(carpeta, { recursive: true }); fs.writeFileSync(path.join(carpeta, '.prueba'), 'ok'); fs.rmSync(path.join(carpeta, '.prueba')); } catch (e) { throw new Fallo('No se puede escribir en esa carpeta: ' + e.message); }
@@ -447,7 +685,10 @@ function pedirUrl(url, { max = 5e6, ms = 30000, saltos = 5 } = {}) {
     let u; try { u = new URL(url); } catch { return mal(new Error('dirección no válida')); }
     const mod = u.protocol === 'https:' ? https : u.protocol === 'http:' ? http : null; if (!mod) return mal(new Error('dirección no válida'));
     const r = mod.get(u, { headers: { 'User-Agent': 'mi-edificio', Accept: 'application/vnd.github+json, */*' }, timeout: ms }, res => {
-      if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location && saltos > 0) { res.resume(); return ok(pedirUrl(new URL(res.headers.location, u).href, { max, ms, saltos: saltos - 1 })); }
+      if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location && saltos > 0) {
+        res.resume(); const sig = new URL(res.headers.location, u);
+        if (sig.protocol !== 'https:' && !process.env.MI_EDIFICIO_ACTUALIZACIONES_URL) return mal(new Error('redirección no segura'));
+        return ok(pedirUrl(sig.href, { max, ms, saltos: saltos - 1 })); }
       if (res.statusCode !== 200) { res.resume(); return mal(new Error('respondió ' + res.statusCode)); }
       const t = []; let n = 0;
       res.on('data', d => { n += d.length; if (n > max) { r.destroy(); mal(new Error('la descarga es más grande de lo esperado')); } else t.push(d); });
@@ -570,7 +811,8 @@ function transporte() {
   if (correo.transporte) return correo.transporte;
   const c = CFG.correo || {}; if (!nodemailer || !c.host || !c.remitente) return null;
   correo.transporte = nodemailer.createTransport({
-    host: c.host, port: Number(c.puerto) || 587, secure: c.seguridad === 'tls', requireTLS: c.seguridad === 'starttls', ignoreTLS: c.seguridad === 'ninguna',
+    host: c.host, port: Number(c.puerto) || 587, secure: c.seguridad === 'tls', requireTLS: c.seguridad === 'starttls',
+    ignoreTLS: c.seguridad === 'ninguna' && ['localhost', '127.0.0.1', '::1'].includes(c.host), tls: { minVersion: 'TLSv1.2' },
     auth: c.usuario ? { user: c.usuario, pass: c.clave || '' } : undefined,
     connectionTimeout: 20000, greetingTimeout: 20000, socketTimeout: 60000,
   });
@@ -584,8 +826,10 @@ function configurarCorreo(d) {
   const usuario = String(d.usuario ?? remitente).trim();
   const puerto = Number(p.puerto || d.puerto || 587), seguridad = p.seguridad || (['tls', 'starttls', 'ninguna'].includes(d.seguridad) ? d.seguridad : 'starttls');
   if (!host || !/^[a-z0-9.-]+$/i.test(host)) throw new Fallo('Indica el servidor SMTP');
+  if (seguridad === 'ninguna' && !['localhost', '127.0.0.1', '::1'].includes(host)) throw new Fallo('El correo debe enviarse cifrado: elige TLS o STARTTLS');
   if (!Number.isInteger(puerto) || puerto < 1 || puerto > 65535) throw new Fallo('Puerto no válido');
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(remitente)) throw new Fallo('Indica el correo desde el que se enviará');
+  if (c.clave && (c.host !== host || Number(c.puerto) !== puerto || c.usuario !== usuario) && !d.clave) delete c.clave;
   Object.assign(c, { proveedor, host, puerto, seguridad, usuario, remitente, activo: d.activo !== false });
   if (d.clave) c.clave = String(d.clave).replace(/\s+/g, proveedor === 'gmail' ? '' : ' ');   // Gmail muestra la contraseña de aplicación en grupos de 4
   if (d.borrar) { delete CFG.correo; } else CFG.correo = c;
@@ -650,7 +894,7 @@ const SEG = { 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referr
 // index.html para modo local: cliente propio en vez de supabase-js por CDN, y conexiones solo al propio servidor
 const indice = () => fs.readFileSync(path.join(WEB, 'index.html'), 'utf8')
   .replace(/<script src="https:\/\/cdn\.jsdelivr\.net\/npm\/@supabase[^>]*><\/script>/, '<script src="local-cliente.js"></script>')
-  .replace("script-src 'self' https://cdn.jsdelivr.net", "script-src 'self'")
+  .replace("script-src 'self' https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.119.2/dist/umd/supabase.js", "script-src 'self'")
   .replace("connect-src 'self' https://*.supabase.co wss://*.supabase.co", "connect-src 'self'");
 const configJs = () => `// Generado por el servidor local\nwindow.APP_CONFIG = ${JSON.stringify({ LOCAL: true, VAPID_PUBLIC_KEY: (webpush && CFG.vapid?.publicKey) || '' })};\n`;
 
@@ -661,9 +905,14 @@ function leerCuerpo(req, max) {
 }
 const responder = (res, estado, cuerpo) => { res.writeHead(estado, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...SEG }); res.end(JSON.stringify(cuerpo)); };
 // Las peticiones que cambian algo deben venir de la propia app (mismo origen)
+function hostPermitido(h) {
+  if (!h) return false; let n; try { n = new URL('http://' + h).hostname.toLowerCase(); } catch { return false; }
+  if (['localhost', '127.0.0.1', '[::1]'].includes(n)) return true;
+  const t = estadoTunel(); return [t.direccion, t.direccionFija].filter(Boolean).some(d => { try { return new URL(d).hostname.toLowerCase() === n; } catch { return false; } });
+}
 function mismoOrigen(req) {
   const o = req.headers.origin; if (!o) return true;
-  try { return new URL(o).host === (req.headers['x-forwarded-host'] || req.headers.host); } catch { return false; }
+  try { return hostPermitido(new URL(o).host); } catch { return false; }
 }
 
 async function api(req, res, url) {
@@ -700,27 +949,39 @@ async function api(req, res, url) {
   if (ruta.startsWith('/api/sistema/')) {   // solo administración
     const adm = await como(uid, tx => tx.query(`select public.es_admin() as ok`)); if (!adm.rows[0]?.ok) throw new Fallo('Solo la administración puede gestionar las actualizaciones', 403);
     if (ruta === '/api/sistema/buscar') await buscarActualizacion();
-    else if (ruta === '/api/sistema/actualizar') await actualizarAhora();
+    else if (ruta === '/api/sistema/actualizar') { await exigirConfirmacion(req); await actualizarAhora(); }
     else if (ruta !== '/api/sistema/estado') throw new Fallo('No encontrado', 404);
     return responder(res, 200, { data: await estadoSistema() });
   }
   if (ruta.startsWith('/api/tunel/')) {   // solo administración
     const adm = await como(uid, tx => tx.query(`select public.es_admin() as ok`)); if (!adm.rows[0]?.ok) throw new Fallo('Solo la administración puede gestionar el acceso desde internet', 403);
-    if (ruta === '/api/tunel/configurar') configurarTunel(cuerpo);
+    if (ruta === '/api/tunel/configurar') { await exigirConfirmacion(req); configurarTunel(cuerpo); }
     else if (ruta !== '/api/tunel/estado') throw new Fallo('No encontrado', 404);
     return responder(res, 200, { data: estadoTunel() });
   }
   if (ruta.startsWith('/api/respaldo/')) {   // solo administración
     const adm = await como(uid, tx => tx.query(`select public.es_admin() as ok`)); if (!adm.rows[0]?.ok) throw new Fallo('Solo la administración puede gestionar el respaldo', 403);
-    if (ruta === '/api/respaldo/configurar') configurarRespaldo(cuerpo);
+    if (ruta === '/api/respaldo/configurar') { await exigirConfirmacion(req); configurarRespaldo(cuerpo); }
     else if (ruta === '/api/respaldo/ahora') { if (!estadoRespaldo().configurado) throw new Fallo('Primero configura la carpeta y la contraseña del respaldo'); await respaldarNube(); }
     else if (ruta !== '/api/respaldo/estado') throw new Fallo('No encontrado', 404);
     return responder(res, 200, { data: estadoRespaldo() });
   }
+  if (ruta.startsWith('/api/2fa/')) return responder(res, 200, { data: await dosPasos(req, ruta.slice('/api/2fa/'.length), cuerpo, ses) });
+  if (ruta === '/api/seguridad/estado') {   // solo administración
+    const adm = await como(uid, tx => tx.query(`select public.es_admin() as ok`)); if (!adm.rows[0]?.ok) throw new Fallo('Solo administración', 403);
+    const r = await como(uid, tx => tx.query(`select id, rol from public.usuarios where edificio_id = public.mi_edificio() and estado = 'activo' and rol in ('admin','comite')`));
+    const con2 = new Set((await db.query(`select id from auth.users where totp_activo and id = any($1::uuid[])`, [r.rows.map(x => x.id)])).rows.map(x => x.id));
+    const t = estadoTunel(), rs = estadoRespaldo();
+    return responder(res, 200, { data: {
+      https: t.estado === 'conectado', tunel: t.modo, respaldo: rs.configurado, respaldoOk: !!rs.ultimo?.ok,
+      admins: r.rows.filter(x => x.rol === 'admin').length, admins2: r.rows.filter(x => x.rol === 'admin' && con2.has(x.id)).length,
+      comite: r.rows.filter(x => x.rol === 'comite').length, comite2: r.rows.filter(x => x.rol === 'comite' && con2.has(x.id)).length,
+      llave: LLAVE.buf ? LLAVE.modo : 'error', llaveError: LLAVE.error, disco: await cifradoDisco(), sistema: process.platform } });
+  }
   if (ruta.startsWith('/api/correo/')) {   // solo administración
     const adm = await como(uid, tx => tx.query(`select public.es_admin() as ok`)); if (!adm.rows[0]?.ok) throw new Fallo('Solo la administración puede configurar el correo', 403);
     let enviado = null;
-    if (ruta === '/api/correo/configurar') configurarCorreo(cuerpo);
+    if (ruta === '/api/correo/configurar') { await exigirConfirmacion(req); configurarCorreo(cuerpo); }
     else if (ruta === '/api/correo/probar') enviado = await probarCorreo(uid, cuerpo.para);
     else if (ruta === '/api/correo/enviar') await despacharCorreos();
     else if (ruta !== '/api/correo/estado') throw new Fallo('No encontrado', 404);
@@ -740,8 +1001,24 @@ function estatico(req, res, url) {
   res.writeHead(200, { 'Content-Type': MIME[path.extname(f)] || 'application/octet-stream', ...cab }); fs.createReadStream(f).pipe(res);
 }
 
+// Nada viaja sin cifrar por la red: la app se atiende solo a este mismo computador (la conexión no sale de él) y,
+// desde cualquier otro equipo, por el túnel HTTPS (cloudflared corre aquí y también llega por esta vía). A quien
+// entre por la red local sin cifrar solo se le explica cómo entrar: sin la app, sin sesión y sin datos.
+const esEsteEquipo = req => ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress);
+function sinCifrar(res) {
+  const t = estadoTunel(), dir = t.estado === 'conectado' && t.direccion ? t.direccion : '';
+  const e = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', ...SEG });
+  res.end(`<!doctype html><html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Mi Edificio · conexión segura</title>
+<body style="font-family:system-ui,sans-serif;max-width:560px;margin:60px auto;padding:0 18px;color:#111;line-height:1.5"><h1 style="font-size:24px">🔒 Entra por la dirección segura</h1>
+<p>Por seguridad, Mi Edificio no se usa por la red local sin cifrar: tu contraseña y los datos de la comunidad podrían verse desde otro equipo conectado a la misma red.</p>
+${dir ? `<p><a href="${e(dir)}" style="display:inline-block;background:#1e5eff;color:#fff;padding:12px 18px;border-radius:10px;text-decoration:none">Ir a ${e(dir)}</a></p>` : `<p>La administración debe activar el acceso seguro (HTTPS) en <b>Administración → Edificio → Acceso desde internet</b>, desde el computador del edificio. Mientras tanto, la app solo se puede usar en ese computador.</p>`}
+</body></html>`);
+}
 const servidor = http.createServer(async (req, res) => {
   try {
+    if (!esEsteEquipo(req)) return sinCifrar(res);
+    if (!hostPermitido(req.headers.host)) { res.writeHead(421, { 'Content-Type': 'text/plain; charset=utf-8' }); return res.end('Dirección no reconocida'); }
     const url = new URL(req.url, 'http://local');
     if (url.pathname.startsWith('/api/')) await api(req, res, url);
     else if (req.method === 'GET' || req.method === 'HEAD') estatico(req, res, url);
@@ -750,14 +1027,14 @@ const servidor = http.createServer(async (req, res) => {
     if (res.headersSent) return res.end();
     const estado = e instanceof Fallo ? e.estado : 400;   // los rechazos de la base de datos (permisos, validaciones) son errores de la petición
     if (!(e instanceof Fallo) && !e.message) log('error:', e);
-    responder(res, estado, { error: e.message || 'Error interno' });
+    responder(res, estado, { error: e.message || 'Error interno', ...(e instanceof Fallo && e.extra ? e.extra : {}) });
   }
 });
 servidor.listen(PUERTO, () => {
   const ips = Object.values(os.networkInterfaces()).flat().filter(i => i && i.family === 'IPv4' && !i.internal).map(i => i.address);
   log(`Mi Edificio ${VERSION_APP} está funcionando.`);
   console.log(`  En este computador:   http://localhost:${PUERTO}`);
-  ips.forEach(ip => console.log(`  En la red del edificio: http://${ip}:${PUERTO}`));
+  if (ips.length) console.log(`  Desde otros equipos: solo por la dirección segura (HTTPS) del acceso desde internet; la red local sin cifrar está bloqueada.`);
   console.log(`  Datos y respaldos en:  ${DATOS}`);
   console.log(`  Para que entren desde fuera: Administración → Edificio → Acceso desde internet.`);
   iniciarTunel();

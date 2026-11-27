@@ -11,12 +11,26 @@ create table if not exists auth.users (
   clave  text not null,                  -- scrypt: sal:hash
   creado timestamptz default now()
 );
+-- Verificación en dos pasos (voluntaria): secreto TOTP cifrado, códigos de respaldo (sha256) y el último
+-- intervalo usado, para que un código no sirva dos veces
+alter table auth.users add column if not exists totp_secreto text;
+alter table auth.users add column if not exists totp_pendiente text;
+alter table auth.users add column if not exists totp_activo boolean not null default false;
+alter table auth.users add column if not exists totp_respaldo text[] not null default '{}';
+alter table auth.users add column if not exists totp_paso bigint not null default 0;
+-- Contraseña de menos de 12 caracteres (de antes del mínimo actual): la app pide cambiarla
+alter table auth.users add column if not exists clave_corta boolean not null default false;
+-- Bloqueo por cuenta (contraseña o código equivocados), independiente de la dirección desde donde se intente
+alter table auth.users add column if not exists fallos int not null default 0;
+alter table auth.users add column if not exists bloqueo_hasta timestamptz;
 create table if not exists auth.sesiones (
   token_hash text primary key,           -- sha256 del token de la cookie
   user_id    uuid not null references auth.users(id) on delete cascade,
   expira     timestamptz not null,
   creado     timestamptz default now()
 );
+-- Momento en que la persona volvió a confirmar su identidad en esta sesión (para cambios delicados)
+alter table auth.sesiones add column if not exists confirmado_at timestamptz;
 -- El servidor fija este valor al inicio de cada petición, con el usuario de la sesión
 create or replace function auth.uid() returns uuid language sql stable as $$
   select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid
