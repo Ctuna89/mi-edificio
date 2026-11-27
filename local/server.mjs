@@ -139,6 +139,7 @@ function modoMantencion(m) {
   // el detalle solo se muestra a quien abre la página en este mismo computador
   const esLocal = req => ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress) && !req.headers['x-forwarded-for'] && !req.headers['cf-connecting-ip'];
   const srv = http.createServer((req, res) => {
+    if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress)) { res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' }); return res.end('Mi Edificio está en mantención. Revísalo en el computador del edificio.'); }
     if (req.url.startsWith('/api/')) { res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); return res.end(JSON.stringify({ data: null, error: 'Mi Edificio está en mantención.', mantencion: m.motivo })); }
     res.writeHead(503, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Retry-After': '600' }); res.end(pagina(esLocal(req)));
   });
@@ -677,7 +678,8 @@ function transporte() {
   if (correo.transporte) return correo.transporte;
   const c = CFG.correo || {}; if (!nodemailer || !c.host || !c.remitente) return null;
   correo.transporte = nodemailer.createTransport({
-    host: c.host, port: Number(c.puerto) || 587, secure: c.seguridad === 'tls', requireTLS: c.seguridad === 'starttls', ignoreTLS: c.seguridad === 'ninguna',
+    host: c.host, port: Number(c.puerto) || 587, secure: c.seguridad === 'tls', requireTLS: c.seguridad === 'starttls',
+    ignoreTLS: c.seguridad === 'ninguna' && ['localhost', '127.0.0.1', '::1'].includes(c.host), tls: { minVersion: 'TLSv1.2' },
     auth: c.usuario ? { user: c.usuario, pass: c.clave || '' } : undefined,
     connectionTimeout: 20000, greetingTimeout: 20000, socketTimeout: 60000,
   });
@@ -691,6 +693,7 @@ function configurarCorreo(d) {
   const usuario = String(d.usuario ?? remitente).trim();
   const puerto = Number(p.puerto || d.puerto || 587), seguridad = p.seguridad || (['tls', 'starttls', 'ninguna'].includes(d.seguridad) ? d.seguridad : 'starttls');
   if (!host || !/^[a-z0-9.-]+$/i.test(host)) throw new Fallo('Indica el servidor SMTP');
+  if (seguridad === 'ninguna' && !['localhost', '127.0.0.1', '::1'].includes(host)) throw new Fallo('El correo debe enviarse cifrado: elige TLS o STARTTLS');
   if (!Number.isInteger(puerto) || puerto < 1 || puerto > 65535) throw new Fallo('Puerto no válido');
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(remitente)) throw new Fallo('Indica el correo desde el que se enviará');
   Object.assign(c, { proveedor, host, puerto, seguridad, usuario, remitente, activo: d.activo !== false });
@@ -848,8 +851,23 @@ function estatico(req, res, url) {
   res.writeHead(200, { 'Content-Type': MIME[path.extname(f)] || 'application/octet-stream', ...cab }); fs.createReadStream(f).pipe(res);
 }
 
+// Nada viaja sin cifrar por la red: la app se atiende solo a este mismo computador (la conexión no sale de él) y,
+// desde cualquier otro equipo, por el túnel HTTPS (cloudflared corre aquí y también llega por esta vía). A quien
+// entre por la red local sin cifrar solo se le explica cómo entrar: sin la app, sin sesión y sin datos.
+const esEsteEquipo = req => ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress);
+function sinCifrar(res) {
+  const t = estadoTunel(), dir = t.estado === 'conectado' && t.direccion ? t.direccion : '';
+  const e = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', ...SEG });
+  res.end(`<!doctype html><html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Mi Edificio · conexión segura</title>
+<body style="font-family:system-ui,sans-serif;max-width:560px;margin:60px auto;padding:0 18px;color:#111;line-height:1.5"><h1 style="font-size:24px">🔒 Entra por la dirección segura</h1>
+<p>Por seguridad, Mi Edificio no se usa por la red local sin cifrar: tu contraseña y los datos de la comunidad podrían verse desde otro equipo conectado a la misma red.</p>
+${dir ? `<p><a href="${e(dir)}" style="display:inline-block;background:#1e5eff;color:#fff;padding:12px 18px;border-radius:10px;text-decoration:none">Ir a ${e(dir)}</a></p>` : `<p>La administración debe activar el acceso seguro (HTTPS) en <b>Administración → Edificio → Acceso desde internet</b>, desde el computador del edificio. Mientras tanto, la app solo se puede usar en ese computador.</p>`}
+</body></html>`);
+}
 const servidor = http.createServer(async (req, res) => {
   try {
+    if (!esEsteEquipo(req)) return sinCifrar(res);
     const url = new URL(req.url, 'http://local');
     if (url.pathname.startsWith('/api/')) await api(req, res, url);
     else if (req.method === 'GET' || req.method === 'HEAD') estatico(req, res, url);
@@ -865,7 +883,7 @@ servidor.listen(PUERTO, () => {
   const ips = Object.values(os.networkInterfaces()).flat().filter(i => i && i.family === 'IPv4' && !i.internal).map(i => i.address);
   log(`Mi Edificio ${VERSION_APP} está funcionando.`);
   console.log(`  En este computador:   http://localhost:${PUERTO}`);
-  ips.forEach(ip => console.log(`  En la red del edificio: http://${ip}:${PUERTO}`));
+  if (ips.length) console.log(`  Desde otros equipos: solo por la dirección segura (HTTPS) del acceso desde internet; la red local sin cifrar está bloqueada.`);
   console.log(`  Datos y respaldos en:  ${DATOS}`);
   console.log(`  Para que entren desde fuera: Administración → Edificio → Acceso desde internet.`);
   iniciarTunel();

@@ -2,6 +2,7 @@
 
 ## Sin publicar
 
+- **Ninguna comunicación sin cifrar**: el servidor local atiende la app solo en el mismo computador; desde cualquier otro equipo, también dentro del edificio, se entra únicamente por la dirección segura (HTTPS). Por la red local sin cifrar solo se muestra cómo entrar, sin la app ni la API. El correo se envía siempre cifrado (TLS 1.2 o más), salvo hacia un servidor en el mismo computador. **Si hoy usas la app por la red del edificio (http://192.168…), activa antes el acceso desde internet.**
 - **Verificación en dos pasos** (voluntaria): en Mi cuenta se activa con el código QR de una app de autenticación (Google Authenticator, Microsoft Authenticator u otra); se entregan 10 códigos de respaldo de un solo uso. En la instalación local un código no sirve dos veces, el desafío se anula tras 5 intentos y la administración puede quitarla a quien perdió el teléfono (queda en la bitácora y cierra sus sesiones). En Supabase usa los factores TOTP de Supabase Auth.
 
 ## 0.3.1 — 2026-11-26

@@ -58,6 +58,16 @@ test('sin sesión no se puede consultar nada', async () => {
   assert.equal((await intruso.rpc('buscar_edificio')).estado, 401);
 });
 
+test('por la red local sin cifrar no se atiende la app ni la API', async (t) => {
+  const ip = Object.values(os.networkInterfaces()).flat().find(i => i && i.family === 'IPv4' && !i.internal)?.address;
+  if (!ip) return t.skip('este equipo no tiene una dirección de red');
+  const r = await fetch(`http://${ip}:${PUERTO}/`); const html = await r.text();
+  assert.equal(r.status, 403); assert.match(html, /Entra por la dirección segura/); assert.ok(!html.includes('app.js'), 'no entrega la app');
+  const a = await fetch(`http://${ip}:${PUERTO}/api/auth/entrar`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'ana@test.cl', clave: 'clave-segura-1' }) });
+  assert.equal(a.status, 403); assert.ok(!a.headers.get('set-cookie'), 'ni abre sesiones');
+  assert.equal((await fetch(B + '/')).status, 200, 'en este mismo computador sí');
+});
+
 test('la app se sirve adaptada al modo local', async () => {
   const html = await (await fetch(B + '/')).text();
   assert.ok(html.includes('local-cliente.js') && !html.includes('cdn.jsdelivr.net'), 'no depende de internet para cargar');

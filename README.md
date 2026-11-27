@@ -67,7 +67,7 @@ La primera vez descarga sus dependencias (necesita internet) y crea la carpeta `
 
 ### En ambos casos
 
-La app ya funciona en ese computador y, por la dirección de red que muestra el servidor, en los equipos conectados a la red del edificio. Para que residentes y conserjes entren desde sus teléfonos, sigue con el paso 2.
+La app ya funciona en ese computador. **Desde cualquier otro equipo, incluso dentro del edificio, se entra solo por la dirección segura (HTTPS) del paso 2**: por seguridad, el servidor no atiende la app por la red local sin cifrar, donde otro equipo conectado podría ver contraseñas y datos. Sigue con el paso 2.
 
 Para cambiar el puerto, crea un archivo `puerto.txt` con el número en la carpeta de datos (o define la variable `PUERTO`) y reinicia.
 

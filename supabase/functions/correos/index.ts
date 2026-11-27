@@ -60,10 +60,12 @@ async function porResend(x: Correo) {
 }
 
 let transporte: ReturnType<typeof nodemailer.createTransport> | null = null;
+const sinTls = env("SMTP_TLS") === "no" && ["localhost", "127.0.0.1", "::1"].includes(env("SMTP_HOST"));
 async function porSmtp(x: Correo) {
   const puerto = Number(env("SMTP_PORT") || 465);
   transporte ??= nodemailer.createTransport({
-    host: env("SMTP_HOST"), port: puerto, secure: puerto === 465, requireTLS: puerto !== 465 && env("SMTP_TLS") !== "no", ignoreTLS: env("SMTP_TLS") === "no",
+    // siempre cifrado; "SMTP_TLS=no" solo se acepta hacia un servidor local (pruebas)
+    host: env("SMTP_HOST"), port: puerto, secure: puerto === 465, requireTLS: puerto !== 465 && !sinTls, ignoreTLS: sinTls, tls: { minVersion: "TLSv1.2" },
     auth: env("SMTP_USER") ? { user: env("SMTP_USER"), pass: env("SMTP_PASS") } : undefined,
     connectionTimeout: 20000, greetingTimeout: 20000, socketTimeout: 60000,
   });
