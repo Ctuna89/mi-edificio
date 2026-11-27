@@ -159,6 +159,9 @@ const MODULES = [
   {id:'incidencias', ic:'🛠️', t:'Incidencias', d:'Reportar problemas', roles:['residente','propietario','conserje','comite','admin']},
   {id:'mensajes', ic:'💬', t:'Mensajes', d:'Conserjería, comité, administración', roles:['residente','propietario','conserje','comite','admin']},
   {id:'comunicados', ic:'📣', t:'Comunicados', d:'Avisos de la comunidad', roles:['residente','propietario','conserje','comite','admin','mantencion']},
+  {id:'chat', ic:'🗨️', t:'Comunidad', d:'Chat de los vecinos (el comité decide si participan la administración y la conserjería)', roles:['residente','propietario','comite','admin','conserje']},
+  {id:'mercado', ic:'🛍️', t:'Vecinos', d:'Avisos entre vecinos: venta, regalo, busco, servicios y préstamos', roles:['residente','propietario','comite','admin','conserje']},
+  {id:'tecnicos', ic:'🧑‍🔧', t:'Técnicos', d:'Gasfíter, electricista y otros recomendados por los vecinos', roles:['residente','propietario','comite','admin','conserje']},
   {id:'encuestas', ic:'🗳️', t:'Encuestas', d:'Votaciones de la comunidad', roles:['residente','propietario','comite','admin']},
   {id:'encomiendas', ic:'📦', t:'Encomiendas', d:'Paquetes recibidos', roles:['residente','propietario','conserje','admin']},
   {id:'visitas', ic:'🚪', t:'Visitas', d:'Anunciar y registrar', roles:['residente','propietario','conserje','admin']},
@@ -184,7 +187,7 @@ const MODULES = [
 const MOD_BASICOS=['inicio','perfil','admin','gastos','finanzas'];
 const modEstado=id=>MOD_BASICOS.includes(id)?'on':((S.cfg?.modulos||{})[id]||'on');
 const modAbierto=(id,r=role())=>{ const e=modEstado(id); return e==='on'||(e==='personal'&&['conserje','comite','admin','mantencion'].includes(r)); };
-const puedeVer=(m,r=role())=>m.roles.includes(r)&&modAbierto(m.id,r);
+const puedeVer=(m,r=role())=>m.roles.includes(r)&&modAbierto(m.id,r)&&(m.id!=='chat'||enChat(r));
 const BOTTOM = { residente:['inicio','gastos','reservas','incidencias','mensajes'], propietario:['inicio','gastos','reservas','incidencias','mensajes'], conserje:['inicio','rondas','incidencias','encomiendas','mensajes'], comite:['inicio','gastos','incidencias','mensajes','mantencion'], admin:['inicio','incidencias','mensajes','mantencion','admin'], mantencion:['inicio','mantencion','comunicados','perfil'] };
 
 // ---------- notificaciones push ----------
@@ -286,7 +289,7 @@ async function start(){
 const selUnidad=id=>(S.misUnidades||[]).length>1&&['residente','propietario'].includes(S.me?.rol)?`<select id="${id}" aria-label="Unidad" style="width:auto;padding:6px 8px;font-size:12px">${S.misUnidades.map(x=>`<option value="${esc(x.depto)}" ${x.depto===S.me.depto?'selected':''}>Depto ${esc(x.depto)}${x.rol==='propietario'?'':' (residente)'}</option>`).join('')}</select>`:'';
 async function cambiarUnidad(d){ try{ await q(sb.rpc('cambiar_unidad',{p_depto:d})); S.usersW?.reload(); toast('Unidad '+d); }catch(err){ toast(errMsg(err)); } }
 function meKey(){ const m=S.me||{}; return [m.edificio_id,m.rol,m.estado,m.nombre,m.depto,m.empresa_id].join('|'); }
-function cfgKey(){ const c=S.cfg||{}; return [c.id,c.nombre,c.direccion,c.logo,c.color,JSON.stringify(c.espacios||[]),JSON.stringify(c.medidores||[]),JSON.stringify(c.modulos||{})].join('|'); }
+function cfgKey(){ const c=S.cfg||{}; return [c.id,c.nombre,c.direccion,c.logo,c.color,JSON.stringify(c.espacios||[]),JSON.stringify(c.medidores||[]),JSON.stringify(c.modulos||{}),JSON.stringify(c.comunidad||{})].join('|'); }
 function gate(){ if(S.ready) return; if(!S.cfgLoaded || !S.meLoaded) return; S.ready=true; routeNow(); pushSync(); limpiarArchivos(); }
 // Borra del bucket los archivos de filas eliminadas por plazo de conservación (solo administración)
 async function limpiarArchivos(){ try{ if(realRole()!=='admin' || S.me.estado!=='activo') return; const rows=await q(T('archivos_por_borrar').select('id,path').limit(500)); if(!rows.length) return; await sb.storage.from('fotos').remove(rows.map(r=>r.path)); await q(T('archivos_por_borrar').delete().in('id',rows.map(r=>r.id))); }catch(e){ console.warn('limpiarArchivos',e); } }
@@ -584,6 +587,7 @@ VIEWS.inicio = function(){
   watch('comunicados', ()=>q(T('comunicados').select('*').order('ts',{ascending:false}).limit(3)), rows=>{ const el=$('#homeCom'); if(!el) return; el.innerHTML = rows.length? rows.map(c=>`<div class="item static"><div class="hd"><b>${esc(c.titulo)}</b><span class="muted small">${fmtDate(c.ts)}</span></div><div class="small" style="margin-top:4px">${esc(c.cuerpo).slice(0,160)}${c.cuerpo.length>160?'…':''}</div></div>`).join('') : '<div class="empty">Sin comunicados aún</div>'; });
   const badge=(id,n)=>{ const t=$(`[data-tile="${id}"]`); if(!t) return; let b=$('.badge',t); if(n>0){ if(!b){b=document.createElement('span');b.className='badge';t.appendChild(b);} b.textContent=n; } else b?.remove(); };
   const count=(table,build,id)=>watch(table, ()=>build().then(r=>r.length), n=>badge(id,n), {silent:true});
+  if(enChat(r)&&modAbierto('chat')) count('chat_mensajes', ()=>q(T('chat_mensajes').select('id,uid,sistema').gt('ts', chatVisto()||'1970-01-01T00:00:00Z').order('ts',{ascending:false}).limit(99)).then(x=>x.filter(m=>m.uid!==S.uid&&!m.sistema)), 'chat');
   if(['residente','propietario'].includes(r)){
     count('encomiendas', ()=>q(T('encomiendas').select('id').eq('depto',myDepto()).eq('entregado',false)), 'encomiendas');
     count('conversaciones', ()=>q(T('conversaciones').select('id').eq('depto',myDepto()).eq('no_leido_residente',true)), 'mensajes');
@@ -2427,6 +2431,156 @@ function drawCal(el, docs, contratos){
     const dia=z.dataset.dia; if(x.tipo==='plan') return dia?nuevaPreventiva(x.activo, dia):null;
     if(await programarOT(x.o, dia)){ Object.assign(x.o, adm?{fecha_programada:dia||null, ...(x.o.fecha_agendada?{fecha_agendada:null,hora_agendada:null}:{})}:{fecha_agendada:dia, estado:'agendada'}); drawCal(el,docs,contratos); } };
 }
+
+// ---------- Comunidad: chat de los vecinos, avisos entre vecinos y técnicos recomendados ----------
+// Participan del chat residentes, propietarios y comité; la administración y la conserjería solo si el comité las invita
+const enChat=(r=role())=>['residente','propietario','comite'].includes(r)||(r==='admin'&&!!S.cfg?.comunidad?.admin_en_chat)||(r==='conserje'&&!!S.cfg?.comunidad?.conserjeria_en_chat);
+const chatVistoKey=()=>'chatVisto.'+(S.cfg?.id||'')+'.'+(S.uid||'');
+function chatVisto(ts){ try{ if(ts===undefined) return localStorage.getItem(chatVistoKey())||''; localStorage.setItem(chatVistoKey(),ts); }catch(e){ return ''; } }
+const linkify=t=>t.replace(/https:\/\/[^\s<]+/g,u=>`<a href="${u}" target="_blank" rel="noopener noreferrer">${u}</a>`);
+// Teléfonos móviles chilenos: enlace para llamar y para WhatsApp
+const telLinks=t=>t.replace(/(?:\+?56[\s-]?)?9[\s-]?\d{4}[\s-]?\d{4}/g,m0=>{ const d=m0.replace(/\D/g,''); const n=d.startsWith('56')?d:'56'+d; return `<a href="tel:+${n}">${m0}</a> · <a href="https://wa.me/${n}" target="_blank" rel="noopener noreferrer">WhatsApp</a>`; });
+
+VIEWS.chat=function(){
+  const r=role(), com=r==='comite', c=S.cfg?.comunidad||{};
+  if(!enChat(r)){ setMain(`<h1>Comunidad</h1><div class="empty">El chat de la comunidad es de los vecinos y el comité. ${r==='admin'?'La administración participa solo si el comité la invita.':''}</div>`); return; }
+  const quienes=['los vecinos','el comité'].concat(c.admin_en_chat?['la administración']:[]).concat(c.conserjeria_en_chat?['la conserjería']:[]);
+  setMain(`<div class="row wrap" style="align-items:center;justify-content:space-between;gap:8px"><h1 style="margin:0">Comunidad</h1>${com?'<div class="row" style="gap:6px"><button class="btn sec sm" id="chQuien">⚙️ Quién participa</button><button class="btn sec sm" id="chRet">Retirados</button></div>':''}</div>
+    <p class="small muted" style="margin:6px 0 10px">Participan ${quienes.slice(0,-1).join(', ')} y ${quienes[quienes.length-1]}.${c.admin_en_chat?'':' La administración no ve este chat.'} Sé respetuoso: el comité puede retirar mensajes. No publiques datos de otras personas. Los mensajes se borran al año.</p>
+    <div class="chat" id="chList"><div class="empty">Cargando…</div></div>
+    <form class="chat-in" id="chForm"><div id="chResp" class="chat-resp" hidden></div><div class="row" style="gap:6px;align-items:flex-end"><label class="btn sec chat-foto" title="Adjuntar una foto" aria-label="Adjuntar una foto">📷<input type="file" accept="image/*" name="foto" hidden></label><textarea name="texto" rows="1" maxlength="2000" placeholder="Escribe a tus vecinos…" aria-label="Mensaje"></textarea><button class="btn" id="chSend">Enviar</button></div><div id="chFotoN" class="small muted"></div></form>`);
+  let msgs=[], resp=null, primera=true; const L=$('#chList'), F=$('#chForm'), ta=$('[name=texto]',F);
+  const quien=m=>`${esc(m.autor||'Vecino')}${m.depto?' · '+esc(m.depto):''}${['comite','admin','conserje'].includes(m.rol)?' · '+esc(ROLES[m.rol]||m.rol):''}`;
+  const draw=()=>{ if(!$('#chList')) return; const abajo=primera||L.scrollHeight-L.scrollTop-L.clientHeight<120; let prev='';
+    L.innerHTML=msgs.map(m=>{ const d=ymdOf(new Date(m.ts)); const sep=d!==prev?`<div class="chat-dia">${esc(fmtDay(d))}</div>`:''; prev=d;
+      if(m.sistema) return sep+`<div class="chat-sis">${esc(m.texto)} · ${horaDe(m.ts)}</div>`;
+      const mio=m.uid===S.uid, ref=m.responde_a&&msgs.find(x=>x.id===m.responde_a);
+      return sep+`<div class="chat-m ${mio?'mio':''}" data-m="${m.id}">${mio?'':`<div class="chat-a">${quien(m)}</div>`}
+        ${ref?`<div class="chat-ref">↪ ${esc(ref.oculto?'Mensaje retirado':((ref.autor||'')+': '+(ref.texto||'📷 Foto')).slice(0,120))}</div>`:''}
+        ${m.oculto?`<div class="chat-t"><i class="muted">${esc(m.oculto_motivo||'Mensaje retirado')}</i></div>`:`${m.foto?`<img class="chat-img" data-f="${esc(m.foto)}" data-img="${esc(m.foto)}" alt="Foto">`:''}${m.texto?`<div class="chat-t">${linkify(esc(m.texto))}</div>`:''}`}
+        <div class="chat-h">${horaDe(m.ts)}${m.oculto?'':` · <a href="#" data-resp="${m.id}">Responder</a>`}${!m.oculto&&(mio||com)?` · <a href="#" data-ret="${m.id}">Retirar</a>`:''}</div></div>`; }).join('')||'<div class="empty">Aún no hay mensajes. ¡Saluda a tus vecinos!</div>';
+    if(abajo) L.scrollTop=L.scrollHeight; primera=false; if(msgs.length) chatVisto(msgs[msgs.length-1].ts); };
+  watch('chat_mensajes', ()=>q(T('chat_mensajes').select('*').order('ts',{ascending:false}).limit(300)).then(x=>x.reverse()), rows=>{ msgs=rows; draw(); });
+  const setResp=id=>{ resp=id||null; const el=$('#chResp'), m=msgs.find(x=>x.id===id); if(!m){ el.hidden=true; el.innerHTML=''; return; } el.hidden=false; el.innerHTML=`↪ Respondiendo a ${esc(m.autor)}: ${esc((m.texto||'📷 Foto').slice(0,80))} <a href="#" id="chRespX" aria-label="No responder">✕</a>`; ta.focus(); };
+  $('#chResp').addEventListener('click',e=>{ if(e.target.id==='chRespX'){ e.preventDefault(); setResp(null); } });
+  ta.addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey&&!matchMedia('(pointer: coarse)').matches){ e.preventDefault(); F.requestSubmit(); } });
+  ta.addEventListener('input',()=>{ ta.style.height='auto'; ta.style.height=Math.min(140,ta.scrollHeight)+'px'; });
+  $('[name=foto]',F).addEventListener('change',e=>{ $('#chFotoN').textContent=e.target.files[0]?'📷 '+e.target.files[0].name:''; });
+  F.addEventListener('submit',async e=>{ e.preventDefault(); const b=$('#chSend'), t=ta.value.trim(), f=$('[name=foto]',F).files[0]; if(!t&&!f) return; busy(b,true,'…');
+    try{ const foto=f?await uploadImage(f,'chat'):''; await q(T('chat_mensajes').insert({texto:t, foto, responde_a:resp})); ta.value=''; ta.style.height=''; $('[name=foto]',F).value=''; $('#chFotoN').textContent=''; setResp(null); primera=true; }
+    catch(err){ toast('Error: '+errMsg(err)); } busy(b,false); ta.focus(); });
+  L.addEventListener('click',async e=>{ const im=e.target.closest('[data-img]'); if(im) return viewImg(im.dataset.img);
+    const rp=e.target.closest('[data-resp]'); if(rp){ e.preventDefault(); return setResp(rp.dataset.resp); }
+    const rt=e.target.closest('[data-ret]'); if(!rt) return; e.preventDefault(); const m=msgs.find(x=>x.id===rt.dataset.ret); if(!m) return;
+    let motivo=''; if(m.uid!==S.uid){ motivo=await askText('Motivo para retirar el mensaje (lo verán todos)'); if(motivo===null) return; } else if(!confirm('¿Retirar tu mensaje? Quedará como "Mensaje retirado".')) return;
+    try{ await q(T('chat_mensajes').update({oculto:true, oculto_motivo:motivo}).eq('id',m.id)); toast('Mensaje retirado'); }catch(err){ toast(errMsg(err)); } });
+  $('#chQuien')?.addEventListener('click',()=>{ const m=modal(`<h3>¿Quién participa del chat?</h3><p class="small muted">Los vecinos y el comité siempre participan. Lo que decidas se anuncia en el chat.</p><form id="fQ">
+      <label class="row" style="gap:8px;margin:10px 0;align-items:flex-start"><input type="checkbox" name="adm" ${c.admin_en_chat?'checked':''} style="margin-top:3px"><span><b>La administración</b><br><span class="small muted">Mientras esté invitada lee todo el chat, también los mensajes anteriores, y puede escribir.</span></span></label>
+      <label class="row" style="gap:8px;margin:10px 0;align-items:flex-start"><input type="checkbox" name="con" ${c.conserjeria_en_chat?'checked':''} style="margin-top:3px"><span><b>La conserjería</b></span></label><button class="btn full">Guardar</button></form>`);
+    $('#fQ',m).addEventListener('submit',async e=>{ e.preventDefault(); const d=formData(e.target); try{ await q(sb.rpc('configurar_chat',{p_admin:!!d.adm, p_conserjeria:!!d.con})); closeModal(); toast('Guardado y anunciado en el chat'); }catch(err){ toast(errMsg(err)); } }); });
+  $('#chRet')?.addEventListener('click',async()=>{ try{ const rs=await q(T('chat_retirados').select('*').order('ts',{ascending:false}).limit(100)); const ms=rs.length?await q(T('chat_mensajes').select('id,autor,depto,ts,oculto_motivo').in('id',rs.map(x=>x.mensaje_id))):[];
+    modal(`<h3>Mensajes retirados</h3><p class="small muted">Solo el comité ve lo que decían, por si hay que revisar un abuso. Se borran junto con el chat.</p><div class="list">${rs.map(x=>{ const o=ms.find(y=>y.id===x.mensaje_id)||{}; return `<div class="item static"><div class="hd"><b>${esc(o.autor||'')}${o.depto?' · '+esc(o.depto):''}</b><span class="small muted">${o.ts?fmtDate(o.ts):''}</span></div><div class="meta">${esc(o.oculto_motivo||'')}</div>${x.texto?`<div style="white-space:pre-wrap">${esc(x.texto)}</div>`:''}${x.foto?`<img data-f="${esc(x.foto)}" style="max-width:200px;border-radius:8px">`:''}</div>`; }).join('')||'<div class="empty">Ninguno</div>'}</div>`); }catch(err){ toast(errMsg(err)); } });
+};
+
+// Avisos entre vecinos: la comunidad no participa en los acuerdos ni en los pagos
+const MERCADO_TIPOS={venta:['Venta','in'],regalo:['Regalo','ok'],busco:['Busco','wa'],servicio:['Servicio','mu'],prestamo:['Préstamo','ok']};
+const MERCADO_IC={venta:'🏷️',regalo:'🎁',busco:'🔎',servicio:'🧰',prestamo:'🤝'};
+VIEWS.mercado=function(){
+  const r=role(), mod=['comite','admin'].includes(r), puede=['residente','propietario','comite'].includes(r), hoy=todayStr();
+  let xs=[], tipo='', qq='', mios=false;
+  setMain(`<h1>Avisos entre vecinos</h1><p class="small muted">Vende, regala, pide prestado, busca u ofrece un servicio a tus vecinos. Los acuerdos y pagos son entre ustedes: la comunidad no participa ni garantiza lo publicado.</p>
+    <div class="row wrap" style="gap:8px;margin-bottom:10px">${puede?'<button class="btn" id="mNew">+ Publicar aviso</button>':''}<input type="search" id="mQ" placeholder="Buscar…" style="max-width:260px"></div>
+    <div class="tabs" id="mTabs"><button data-t="" class="on">Todos</button>${Object.entries(MERCADO_TIPOS).map(([k,v])=>`<button data-t="${k}">${v[0]}</button>`).join('')}${puede?'<button data-t="mios">Mis avisos</button>':''}</div><div id="mList" class="mer-grid"></div>`);
+  const vigente=x=>x.estado!=='cerrado'&&x.vence>=hoy&&!x.oculto;
+  const pills=x=>`${pillOf(MERCADO_TIPOS,x.tipo)}${x.estado==='reservado'?'<span class="pill wa">Reservado</span>':''}${x.estado==='cerrado'?'<span class="pill mu">Cerrado</span>':''}${x.oculto?'<span class="pill er">Oculto</span>':''}${x.estado!=='cerrado'&&x.vence<hoy?'<span class="pill mu">Vencido</span>':''}`;
+  const draw=()=>{ const el=$('#mList'); if(!el) return; const l=xs.filter(x=>mios?x.uid===S.uid:(vigente(x)||(mod&&x.oculto))).filter(x=>!tipo||x.tipo===tipo).filter(x=>!qq||sinTildes(x.titulo+' '+x.descripcion).includes(sinTildes(qq)));
+    el.innerHTML=l.map(x=>`<a href="#" class="mer-card" data-av="${x.id}">${x.fotos?.[0]?`<img data-f="${esc(x.fotos[0])}" alt="">`:`<div class="mer-sin">${MERCADO_IC[x.tipo]||'🏷️'}</div>`}<div class="mer-b"><div class="row" style="gap:4px;flex-wrap:wrap">${pills(x)}</div><b>${esc(x.titulo)}</b><div class="mer-p">${x.precio!=null?clp(x.precio):x.tipo==='regalo'?'Gratis':''}</div><div class="small muted">${esc(x.autor)}${x.depto?' · '+esc(x.depto):''}</div></div></a>`).join('')||`<div class="empty" style="grid-column:1/-1">${mios?'No has publicado avisos':'No hay avisos por ahora'}</div>`; };
+  watch('mercado_avisos', ()=>q(T('mercado_avisos').select('*').order('ts',{ascending:false}).limit(500)), rows=>{ xs=rows; draw(); });
+  $('#mTabs').addEventListener('click',e=>{ const b=e.target.closest('[data-t]'); if(!b) return; $$('#mTabs button').forEach(x=>x.classList.toggle('on',x===b)); mios=b.dataset.t==='mios'; tipo=mios?'':b.dataset.t; draw(); });
+  $('#mQ').addEventListener('input',e=>{ qq=e.target.value; draw(); });
+  const form=(x={})=>{ const m=modal(`<h3>${x.id?'Editar aviso':'Publicar aviso'}</h3><form id="fM">
+      <label class="f"><span>Tipo</span><select name="tipo">${Object.entries(MERCADO_TIPOS).map(([k,v])=>`<option value="${k}" ${x.tipo===k?'selected':''}>${v[0]}</option>`).join('')}</select></label>
+      <label class="f"><span>Título</span><input type="text" name="titulo" required minlength="3" maxlength="120" value="${esc(x.titulo||'')}" placeholder="Ej: Bicicleta aro 26, cuna de regalo, busco quien riegue mis plantas"></label>
+      <label class="f"><span>Descripción</span><textarea name="descripcion" maxlength="2000">${esc(x.descripcion||'')}</textarea></label>
+      <label class="f" id="mPre"><span>Precio (CLP, opcional)</span><input type="text" inputmode="numeric" data-clp name="precio" value="${x.precio??''}"></label>
+      <label class="f"><span>Contacto (opcional)</span><input type="text" name="contacto" maxlength="200" value="${esc(x.contacto||'')}" placeholder="Ej: WhatsApp +56 9 1234 5678"><span class="small muted">Lo verán tus vecinos. Si lo dejas vacío, te escribirán por el chat de la comunidad.</span></label>
+      <label class="f"><span>Fotos (hasta 4)</span><input type="file" name="fotos" accept="image/*" multiple></label>${x.fotos?.length?`<div class="small muted">Tiene ${x.fotos.length} foto(s); si eliges otras, se reemplazan.</div>`:''}
+      <button class="btn full">${x.id?'Guardar':'Publicar'}</button></form>`);
+    const vis=()=>{ $('#mPre',m).style.display=['venta','servicio'].includes($('[name=tipo]',m).value)?'':'none'; }; $('[name=tipo]',m).addEventListener('change',vis); vis();
+    $('#fM',m).addEventListener('submit',async e=>{ e.preventDefault(); const d=formData(e.target), b=$('button.full',m), inp=$('[name=fotos]',m); if(inp.files.length>4){ toast('Puedes subir hasta 4 fotos'); return; } busy(b,true,'Publicando…');
+      try{ const nuevas=await subirFotos(inp,'mercado');
+        const o={tipo:d.tipo, titulo:d.titulo.trim(), descripcion:d.descripcion.trim(), precio:['venta','servicio'].includes(d.tipo)&&d.precio!==''?Number(d.precio):null, contacto:d.contacto.trim(), fotos:nuevas.length?nuevas:(x.fotos||[])};
+        await q(x.id?T('mercado_avisos').update(o).eq('id',x.id):T('mercado_avisos').insert(o)); closeModal(); toast(x.id?'Guardado':'Aviso publicado'); }catch(err){ toast(errMsg(err)); busy(b,false); } }); };
+  const detalle=x=>{ const mio=x.uid===S.uid; const m=modal(`<h3>${esc(x.titulo)}</h3><div class="row wrap" style="gap:6px;margin-bottom:8px">${pills(x)}</div>
+      ${x.precio!=null?`<div class="mer-p" style="font-size:22px;margin-bottom:6px">${clp(x.precio)}</div>`:''}
+      ${x.fotos?.length?`<div class="photos">${x.fotos.map(f=>`<img data-f="${esc(f)}" data-img="${esc(f)}">`).join('')}</div>`:''}
+      ${x.descripcion?`<p style="white-space:pre-wrap">${esc(x.descripcion)}</p>`:''}
+      <div class="card" style="padding:10px;margin-top:8px"><b>Contacto</b><div>${x.contacto?telLinks(esc(x.contacto)):'Escríbele por el <a href="#chat">chat de la comunidad</a>'}</div><div class="small muted" style="margin-top:4px">${esc(x.autor)}${x.depto?' · depto '+esc(x.depto):''} · publicado el ${fmtDay(ymdOf(new Date(x.ts)))} · vence el ${fmtDay(x.vence)}</div></div>
+      ${x.oculto?`<div class="err" style="margin-top:8px">Oculto por el comité o la administración${x.oculto_motivo?': '+esc(x.oculto_motivo):''}</div>`:''}
+      <div class="row wrap" style="gap:6px;margin-top:12px">${mio&&!x.oculto?`<button class="btn sec sm" data-a="editar">Editar</button>${x.estado==='activo'?'<button class="btn sec sm" data-a="reservar">Marcar reservado</button>':''}${x.estado==='reservado'?'<button class="btn sec sm" data-a="activar">Volver a disponible</button>':''}${x.estado!=='cerrado'?'<button class="btn sec sm" data-a="cerrar">Cerrar aviso</button>':''}<button class="btn sec sm" data-a="renovar">Renovar 30 días</button>`:''}${mod&&!mio?(x.oculto?'<button class="btn sec sm" data-a="mostrar">Mostrar de nuevo</button>':'<button class="btn dan sm" data-a="ocultar">Ocultar</button>'):''}</div>`);
+    m.addEventListener('click',async e=>{ const im=e.target.closest('[data-img]'); if(im) return viewImg(im.dataset.img); const b=e.target.closest('[data-a]'); if(!b) return; const a=b.dataset.a, up=p=>q(T('mercado_avisos').update(p).eq('id',x.id));
+      try{ if(a==='editar') return form(x);
+        if(a==='reservar') await up({estado:'reservado'}); if(a==='activar') await up({estado:'activo'}); if(a==='cerrar') await up({estado:'cerrado'});
+        if(a==='renovar') await up({vence:ymdOf(masDias(deYmd(hoy),30)), estado:x.estado==='cerrado'?'activo':x.estado});
+        if(a==='ocultar'){ const mo=await askText('Motivo (lo verá su autor)'); if(mo===null) return; await up({oculto:true, oculto_motivo:mo}); }
+        if(a==='mostrar') await up({oculto:false, oculto_motivo:''});
+        closeModal(); toast('Listo'); }catch(err){ toast(errMsg(err)); } }); };
+  $('#mNew')?.addEventListener('click',()=>form());
+  $('#mList').addEventListener('click',e=>{ const c=e.target.closest('[data-av]'); if(!c) return; e.preventDefault(); const x=xs.find(y=>y.id===c.dataset.av); if(x) detalle(x); });
+};
+
+// Técnicos de confianza recomendados por los vecinos
+const OFICIOS={gasfiter:'Gasfíter',electricista:'Electricista',gas:'Gas (calefont, cocina)',cerrajero:'Cerrajero',pintor:'Pintor',maestro:'Maestro / albañil',carpintero:'Carpintero',electrodomesticos:'Electrodomésticos',computacion:'Computación',jardinero:'Jardinero',aseo:'Aseo',mudanzas:'Mudanzas y fletes',vidriero:'Vidriero',otro:'Otro'};
+const estrellas=n=>{ const r=Math.max(0,Math.min(5,Math.round(n))); return '★'.repeat(r)+'☆'.repeat(5-r); };
+const starInputs=(sel,req)=>`<span class="estrellas-in">${[5,4,3,2,1].map(n=>`<input type="radio" name="nota" id="st${n}" value="${n}" ${sel===n?'checked':''} ${req?'required':''}><label for="st${n}" title="${n} de 5">★</label>`).join('')}</span>`;
+VIEWS.tecnicos=function(){
+  const r=role(), mod=['comite','admin'].includes(r);
+  let ts=[], ops=[], of='', qq='';
+  setMain(`<h1>Técnicos recomendados</h1><p class="small muted">Gasfíter, electricista, cerrajero y otros que recomiendan los vecinos, con sus opiniones. Comparte solo el teléfono de trabajo del técnico, con su permiso. Para gas y electricidad, prefiere instaladores autorizados SEC.</p>
+    <div class="row wrap" style="gap:8px;margin-bottom:10px"><button class="btn" id="tNew">+ Recomendar un técnico</button><input type="search" id="tQ" placeholder="Buscar nombre u oficio…" style="max-width:260px"></div>
+    <div class="tabs" id="tTabs"><button data-o="" class="on">Todos</button>${Object.entries(OFICIOS).map(([k,v])=>`<button data-o="${k}">${v}</button>`).join('')}</div><div id="tList" class="list"></div>`);
+  const resumen=t=>{ const o=ops.filter(x=>x.tecnico_id===t.id&&!x.oculto); return {o, p:o.length?o.reduce((a,x)=>a+x.nota,0)/o.length:0}; };
+  const prom=p=>p.toFixed(1).replace('.',',');
+  const draw=()=>{ const el=$('#tList'); if(!el) return; const l=ts.filter(t=>!of||t.oficio===of).filter(t=>!qq||sinTildes(t.nombre+' '+(OFICIOS[t.oficio]||'')+' '+t.nota).includes(sinTildes(qq))).map(t=>({t,...resumen(t)})).sort((a,b)=>(b.p-a.p)||(b.o.length-a.o.length)||a.t.nombre.localeCompare(b.t.nombre));
+    el.innerHTML=l.map(({t,o,p})=>`<div class="item" data-t="${t.id}"><div class="hd"><b>${esc(t.nombre)}</b><span>${o.length?`<span class="estrellas">${estrellas(p)}</span> <span class="small muted">${prom(p)} (${o.length})</span>`:'<span class="small muted">Sin opiniones</span>'}</span></div>
+      <div class="meta">${esc(OFICIOS[t.oficio]||t.oficio)}${t.sec?' · <span class="pill ok">SEC</span>':''}${t.telefono?' · '+telLinks(esc(t.telefono)):''}${t.oculto?' · <span class="pill er">Oculto</span>':''}</div>
+      <div class="small muted">Recomendado por ${esc(t.autor)}${t.depto?' ('+esc(t.depto)+')':''}${t.nota?' · '+esc(t.nota.slice(0,140)):''}</div></div>`).join('')||'<div class="empty">Aún no hay técnicos recomendados. ¿Conoces uno bueno?</div>'; };
+  watch(['tecnicos','tecnico_opiniones'], async()=>{ const [a,b]=await Promise.all([q(T('tecnicos').select('*').order('nombre')), q(T('tecnico_opiniones').select('*').order('ts',{ascending:false}))]); return {a,b}; },
+    ({a,b})=>{ ts=a; ops=b; draw(); });
+  $('#tTabs').addEventListener('click',e=>{ const b=e.target.closest('[data-o]'); if(!b) return; $$('#tTabs button').forEach(x=>x.classList.toggle('on',x===b)); of=b.dataset.o; draw(); });
+  $('#tQ').addEventListener('input',e=>{ qq=e.target.value; draw(); });
+  const form=(t={})=>{ const m=modal(`<h3>${t.id?'Editar técnico':'Recomendar un técnico'}</h3><form id="fT">
+      <label class="f"><span>Nombre</span><input type="text" name="nombre" required minlength="2" maxlength="120" value="${esc(t.nombre||'')}" placeholder="Ej: Juan Pérez, o Gasfitería Los Andes"></label>
+      <div class="row"><label class="f grow"><span>Oficio</span><select name="oficio" required>${Object.entries(OFICIOS).map(([k,v])=>`<option value="${k}" ${t.oficio===k?'selected':''}>${v}</option>`).join('')}</select></label><label class="f grow"><span>Teléfono de trabajo</span><input type="tel" name="telefono" maxlength="40" value="${esc(t.telefono||'')}" placeholder="+56 9 1234 5678"></label></div>
+      <label class="row" style="gap:8px;margin:6px 0;align-items:flex-start" id="tSec"><input type="checkbox" name="sec" ${t.sec?'checked':''} style="margin-top:3px"><span class="small">Es instalador autorizado SEC (lo exige la ley para trabajos de gas y de instalaciones eléctricas)</span></label>
+      <label class="f"><span>Comentario (zona, horarios, precios de referencia…)</span><textarea name="tnota" maxlength="1000">${esc(t.nota||'')}</textarea></label>
+      ${t.id?'':`<div class="f"><span>Tu opinión (opcional)</span>${starInputs()}<textarea name="comentario" maxlength="1000" placeholder="Qué hizo, si fue puntual, si cobró lo acordado…" style="margin-top:6px"></textarea></div>`}
+      <p class="small muted">Comparte solo datos que el técnico usa para trabajar, con su permiso.</p><button class="btn full">${t.id?'Guardar':'Recomendar'}</button></form>`);
+    const vis=()=>{ $('#tSec',m).style.display=['gasfiter','electricista','gas'].includes($('[name=oficio]',m).value)?'':'none'; }; $('[name=oficio]',m).addEventListener('change',vis); vis();
+    $('#fT',m).addEventListener('submit',async e=>{ e.preventDefault(); const d=formData(e.target), b=$('button.full',m); busy(b,true);
+      const o={nombre:d.nombre.trim(), oficio:d.oficio, telefono:d.telefono.trim(), sec:!!d.sec&&['gasfiter','electricista','gas'].includes(d.oficio), nota:(d.tnota||'').trim()};
+      try{ if(t.id) await q(T('tecnicos').update(o).eq('id',t.id)); else { const [n]=await q(T('tecnicos').insert(o).select()); const est=Number(new FormData(e.target).get('nota'))||0; if(n&&est) await q(T('tecnico_opiniones').insert({tecnico_id:n.id, nota:est, comentario:(d.comentario||'').trim()})); }
+        closeModal(); toast(t.id?'Guardado':'¡Gracias por la recomendación!'); }catch(err){ toast(errMsg(err)); busy(b,false); } }); };
+  function detalle(t){ const {o,p}=resumen(t), mia=ops.find(x=>x.tecnico_id===t.id&&x.uid===S.uid), mio=t.uid===S.uid;
+    const m=modal(`<h3 data-tdet>${esc(t.nombre)}</h3><div class="meta">${esc(OFICIOS[t.oficio]||t.oficio)}${t.sec?' · <span class="pill ok">Instalador autorizado SEC</span>':''}</div>
+      ${t.telefono?`<p style="font-size:17px">📞 ${telLinks(esc(t.telefono))}</p>`:''}${t.nota?`<p style="white-space:pre-wrap">${esc(t.nota)}</p>`:''}
+      <div class="small muted">Recomendado por ${esc(t.autor)}${t.depto?' ('+esc(t.depto)+')':''} · ${fmtDay(ymdOf(new Date(t.ts)))}</div>
+      ${t.oculto?`<div class="err" style="margin-top:8px">Oculto${t.oculto_motivo?': '+esc(t.oculto_motivo):''}</div>`:''}
+      <h2>Opiniones${o.length?` · <span class="estrellas">${estrellas(p)}</span> ${prom(p)}`:''}</h2>
+      <div class="list">${ops.filter(x=>x.tecnico_id===t.id).map(x=>`<div class="item static"><div class="hd"><span class="estrellas">${estrellas(x.nota)}</span><span class="small muted">${esc(x.autor)}${x.depto?' · '+esc(x.depto):''} · ${fmtDay(ymdOf(new Date(x.ts)))}</span></div>${x.comentario?`<div>${esc(x.comentario)}</div>`:''}${x.oculto?'<span class="pill er">Oculta</span>':''}${mod&&x.uid!==S.uid?` <a href="#" data-oo="${x.id}" data-v="${x.oculto?0:1}" class="small">${x.oculto?'Mostrar':'Ocultar'}</a>`:''}</div>`).join('')||'<div class="empty">Sin opiniones todavía</div>'}</div>
+      ${t.oculto?'':`<form id="fOp" class="card" style="margin-top:10px;padding:12px"><b>${mia?'Tu opinión':'¿Trabajó contigo? Deja tu opinión'}</b><div style="margin:6px 0">${starInputs(mia?.nota,true)}</div><textarea name="comentario" maxlength="1000" placeholder="Qué hizo, si fue puntual, si cobró lo acordado…">${esc(mia?.comentario||'')}</textarea><button class="btn full" style="margin-top:8px">${mia?'Actualizar mi opinión':'Publicar opinión'}</button></form>`}
+      <div class="row wrap" style="gap:6px;margin-top:10px">${mio?'<button class="btn sec sm" data-a="editar">Editar datos</button>':''}${mod&&!mio?(t.oculto?'<button class="btn sec sm" data-a="mostrar">Mostrar de nuevo</button>':'<button class="btn dan sm" data-a="ocultar">Ocultar</button>'):''}</div>`);
+    $('#fOp',m)?.addEventListener('submit',async e=>{ e.preventDefault(); const nota=Number(new FormData(e.target).get('nota')), comentario=$('[name=comentario]',e.target).value.trim();
+      try{ await q(mia?T('tecnico_opiniones').update({nota, comentario}).eq('id',mia.id):T('tecnico_opiniones').insert({tecnico_id:t.id, nota, comentario})); closeModal(); toast('¡Gracias por tu opinión!'); }catch(err){ toast(errMsg(err)); } });
+    m.addEventListener('click',async e=>{ const oo=e.target.closest('[data-oo]'); const b=e.target.closest('[data-a]'); if(!oo&&!b) return; e.preventDefault();
+      try{ if(oo){ await q(T('tecnico_opiniones').update({oculto:oo.dataset.v==='1'}).eq('id',oo.dataset.oo)); closeModal(); return toast('Listo'); }
+        const a=b.dataset.a; if(a==='editar')return form(t);
+        if(a==='ocultar'){ const mo=await askText('Motivo (lo verá quien lo recomendó)'); if(mo===null) return; await q(T('tecnicos').update({oculto:true, oculto_motivo:mo}).eq('id',t.id)); }
+        if(a==='mostrar') await q(T('tecnicos').update({oculto:false, oculto_motivo:''}).eq('id',t.id));
+        closeModal(); toast('Listo'); }catch(err){ toast(errMsg(err)); } }); }
+  $('#tNew').addEventListener('click',()=>form());
+  $('#tList').addEventListener('click',e=>{ if(e.target.closest('a')) return; const c=e.target.closest('[data-t]'); if(!c) return; const t=ts.find(x=>x.id===c.dataset.t); if(t) detalle(t); });
+};
 
 // MANTENCIÓN / OT
 VIEWS.mantencion = function(param){

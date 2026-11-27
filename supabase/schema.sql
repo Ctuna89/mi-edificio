@@ -1142,6 +1142,84 @@ create index if not exists proveedor_ingresos_idx on public.proveedor_ingresos (
 -- Visita técnica de una orden de trabajo: conserjería la espera en Ingresos el día confirmado
 alter table public.proveedor_ingresos add column if not exists ot_id uuid references public.ot(id) on delete set null;
 
+-- ---------- Comunidad: chat de vecinos, avisos entre vecinos y técnicos recomendados ----------
+-- Quién participa del chat, además de residentes, propietarios y comité, lo decide el comité (configurar_chat).
+alter table public.edificios add column if not exists comunidad jsonb not null default '{"admin_en_chat":false,"conserjeria_en_chat":false}'::jsonb;
+create table if not exists public.chat_mensajes (
+  id            uuid primary key default gen_random_uuid(),
+  edificio_id   uuid references public.edificios(id) on delete cascade,
+  uid           uuid references public.usuarios(id) on delete set null,
+  autor         text not null default '',
+  depto         text,
+  rol           rol_t,
+  sistema       boolean not null default false,          -- avisos del propio chat (quién entra o sale)
+  texto         text not null default '' check (length(texto) <= 2000),
+  foto          text not null default '',
+  responde_a    uuid references public.chat_mensajes(id) on delete set null,
+  ts            timestamptz not null default now(),
+  oculto        boolean not null default false,          -- retirado por su autor o por el comité (no se edita ni se borra)
+  oculto_por    uuid,
+  oculto_motivo text not null default '',
+  oculto_at     timestamptz
+);
+create index if not exists chat_mensajes_ts_idx on public.chat_mensajes (edificio_id, ts);
+-- Lo que decía un mensaje retirado: solo lo ve el comité (por si hay que revisar un abuso); se borra con el mensaje
+create table if not exists public.chat_retirados (
+  mensaje_id  uuid primary key references public.chat_mensajes(id) on delete cascade,
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  texto       text not null default '',
+  foto        text not null default '',
+  ts          timestamptz not null default now()
+);
+-- Avisos entre vecinos (venta, regalo, busco, servicios, préstamo). La comunidad no participa en pagos.
+create table if not exists public.mercado_avisos (
+  id            uuid primary key default gen_random_uuid(),
+  edificio_id   uuid references public.edificios(id) on delete cascade,
+  uid           uuid references public.usuarios(id) on delete set null,
+  autor         text not null default '',
+  depto         text,
+  tipo          text not null default 'venta' check (tipo in ('venta','regalo','busco','servicio','prestamo')),
+  titulo        text not null check (length(trim(titulo)) between 3 and 120),
+  descripcion   text not null default '' check (length(descripcion) <= 2000),
+  precio        numeric(12,0) check (precio is null or precio >= 0),
+  contacto      text not null default '' check (length(contacto) <= 200),
+  fotos         text[] not null default '{}' check (cardinality(fotos) <= 6),
+  estado        text not null default 'activo' check (estado in ('activo','reservado','cerrado')),
+  vence         date not null default ((now() at time zone 'America/Santiago')::date + 30),
+  oculto        boolean not null default false,
+  oculto_motivo text not null default '',
+  ts            timestamptz not null default now()
+);
+-- Técnicos de confianza recomendados por los vecinos, con opiniones
+create table if not exists public.tecnicos (
+  id            uuid primary key default gen_random_uuid(),
+  edificio_id   uuid references public.edificios(id) on delete cascade,
+  uid           uuid references public.usuarios(id) on delete set null,
+  autor         text not null default '',
+  depto         text,
+  nombre        text not null check (length(trim(nombre)) between 2 and 120),
+  oficio        text not null,
+  telefono      text not null default '' check (length(telefono) <= 40),
+  sec           boolean not null default false,          -- instalador autorizado SEC (gas o electricidad)
+  nota          text not null default '' check (length(nota) <= 1000),
+  oculto        boolean not null default false,
+  oculto_motivo text not null default '',
+  ts            timestamptz not null default now()
+);
+create table if not exists public.tecnico_opiniones (
+  id          uuid primary key default gen_random_uuid(),
+  edificio_id uuid references public.edificios(id) on delete cascade,
+  tecnico_id  uuid not null references public.tecnicos(id) on delete cascade,
+  uid         uuid references public.usuarios(id) on delete set null,
+  autor       text not null default '',
+  depto       text,
+  nota        int not null check (nota between 1 and 5),
+  comentario  text not null default '' check (length(comentario) <= 1000),
+  oculto      boolean not null default false,
+  ts          timestamptz not null default now(),
+  unique (tecnico_id, uid)
+);
+
 
 -- Libro de novedades de conserjería: lo anotado no se edita ni se borra (se corrige con otra anotación).
 -- Cada anotación queda en el turno abierto de quien la escribe.
@@ -1260,7 +1338,7 @@ begin
   end if;
 
   select id into def from public.edificios order by creado, id limit 1;
-  foreach t in array array['empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos','certificados','banco_movimientos','banco_pagadores','presupuestos','emergencia_responsables','emergencia_simulacros','proveedores','contratos','turnos','novedades','unidad_vehiculos','unidad_mascotas','unidad_espacios','comunicado_lecturas','usuario_unidades','proveedor_ingresos','plantillas','facturas','unidad_propietarios']
+  foreach t in array array['empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos','certificados','banco_movimientos','banco_pagadores','presupuestos','emergencia_responsables','emergencia_simulacros','proveedores','contratos','turnos','novedades','unidad_vehiculos','unidad_mascotas','unidad_espacios','comunicado_lecturas','usuario_unidades','proveedor_ingresos','plantillas','facturas','unidad_propietarios','chat_mensajes','chat_retirados','mercado_avisos','tecnicos','tecnico_opiniones']
   loop
     execute format('alter table public.%I add column if not exists edificio_id uuid references public.edificios(id) on delete cascade', t);
     execute format('select count(*) from public.%I where edificio_id is null', t) into n;
@@ -1378,7 +1456,7 @@ $$;
 do $$
 declare t text;
 begin
-  foreach t in array array['empresas','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos','certificados','banco_movimientos','banco_pagadores','presupuestos','emergencia_responsables','emergencia_simulacros','proveedores','contratos','turnos','novedades','unidad_vehiculos','unidad_mascotas','unidad_espacios','comunicado_lecturas','usuario_unidades','proveedor_ingresos','plantillas','facturas','unidad_propietarios']
+  foreach t in array array['empresas','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','push_subs','archivos_por_borrar','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos','certificados','banco_movimientos','banco_pagadores','presupuestos','emergencia_responsables','emergencia_simulacros','proveedores','contratos','turnos','novedades','unidad_vehiculos','unidad_mascotas','unidad_espacios','comunicado_lecturas','usuario_unidades','proveedor_ingresos','plantillas','facturas','unidad_propietarios','chat_mensajes','chat_retirados','mercado_avisos','tecnicos','tecnico_opiniones']
   loop
     execute format('alter table public.%I alter column edificio_id set default public.mi_edificio()', t);
   end loop;
@@ -2219,7 +2297,7 @@ do $$
 declare t text;
 begin
   -- tablas con datos personales o de dinero (no los votos: el voto de un sondeo es secreto)
-  foreach t in array array['edificios','usuarios','contactos','unidades','gastos','pagos','convenios','cargos','caja_movimientos','fondos','fondo_movimientos',
+  foreach t in array array['mercado_avisos','tecnicos','edificios','usuarios','contactos','unidades','gastos','pagos','convenios','cargos','caja_movimientos','fondos','fondo_movimientos',
                            'lecturas','multas_catalogo','indicadores','consentimientos','solicitudes_datos','estacionamientos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','certificados','banco_movimientos','presupuestos','emergencia_responsables','proveedores','contratos','turnos','unidad_vehiculos','unidad_mascotas','unidad_espacios','usuario_unidades','proveedor_ingresos','plantillas','facturas','unidad_propietarios'] loop
     execute format('drop trigger if exists %I on public.%I', t || '_auditoria', t);
     execute format('create trigger %I after insert or update or delete on public.%I for each row execute function privado.auditar()', t || '_auditoria', t);
@@ -3978,6 +4056,7 @@ begin
   begin perform privado.avisar_cobros(); exception when others then raise warning 'avisar_cobros: %', sqlerrm; end;
   begin perform privado.avisos_contratos(); exception when others then raise warning 'avisos_contratos: %', sqlerrm; end;
   begin perform privado.recordatorios_cobro(); exception when others then raise warning 'recordatorios_cobro: %', sqlerrm; end;
+  begin perform privado.depurar_comunidad(); exception when others then raise warning 'depurar_comunidad: %', sqlerrm; end;
   perform privado.depurar();
 end $$;
 
@@ -4642,6 +4721,11 @@ alter table public.proveedor_ingresos enable row level security;
 alter table public.plantillas       enable row level security;
 alter table public.facturas         enable row level security;
 alter table public.unidad_propietarios enable row level security;
+alter table public.chat_mensajes    enable row level security;
+alter table public.chat_retirados   enable row level security;
+alter table public.mercado_avisos   enable row level security;
+alter table public.tecnicos         enable row level security;
+alter table public.tecnico_opiniones enable row level security;
 
 -- helper para (re)crear políticas sin errores. Salvo que se indique lo contrario, toda
 -- política queda además limitada a las filas del edificio del usuario.
@@ -4912,6 +4996,201 @@ select public._pol('suspension_eventos','se_sel','select','exists (select 1 from
 select public._pol('archivos_por_borrar','apb_sel','select','public.es_admin()');
 select public._pol('archivos_por_borrar','apb_del','delete','public.es_admin()');
 
+-- ---------------------------------------------------------------------
+-- Comunidad: chat, avisos entre vecinos y técnicos recomendados
+-- ---------------------------------------------------------------------
+-- Participan del chat residentes, propietarios y comité; la administración y la conserjería, solo si el comité lo decide
+create or replace function public.en_chat() returns boolean
+language sql stable security definer set search_path = public as $$
+  select case public.mi_rol()
+    when 'residente' then true when 'propietario' then true when 'comite' then true
+    when 'admin' then coalesce((select (comunidad ->> 'admin_en_chat')::boolean from public.edificios where id = public.mi_edificio()), false)
+    when 'conserje' then coalesce((select (comunidad ->> 'conserjeria_en_chat')::boolean from public.edificios where id = public.mi_edificio()), false)
+    else false end
+$$;
+create or replace function privado.yo() returns public.usuarios
+language sql stable security definer set search_path = public as $$ select * from public.usuarios where id = auth.uid() $$;
+
+create or replace function privado.chat_antes() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare u public.usuarios; motivo text;
+begin
+  if tg_op = 'INSERT' then
+    new.ts := now(); new.oculto := false; new.oculto_por := null; new.oculto_motivo := ''; new.oculto_at := null;
+    if auth.uid() is null or coalesce(current_setting('mi_edificio.interno', true), '') = '1' then return new; end if;
+    if not public.en_chat() then raise exception 'No participas del chat de la comunidad'; end if;
+    u := privado.yo();
+    new.uid := u.id; new.autor := u.nombre; new.rol := u.rol; new.sistema := false;
+    new.depto := case when u.rol in ('residente','propietario') then u.depto end;
+    new.texto := trim(coalesce(new.texto, '')); new.foto := coalesce(new.foto, '');
+    if new.texto = '' and new.foto = '' then raise exception 'Escribe un mensaje'; end if;
+    if new.foto <> '' and new.foto not like new.edificio_id || '/chat/%' then raise exception 'Foto no válida'; end if;
+    if new.responde_a is not null and not exists (select 1 from public.chat_mensajes where id = new.responde_a and edificio_id = new.edificio_id) then new.responde_a := null; end if;
+    if (select count(*) from public.chat_mensajes where uid = u.id and ts > now() - interval '1 minute') >= 20 then
+      raise exception 'Estás enviando demasiados mensajes: espera un momento';
+    end if;
+    return new;
+  end if;
+  -- Un mensaje no se edita: solo se retira (queda "Mensaje retirado" y el texto pasa a chat_retirados)
+  if auth.uid() is null or coalesce(current_setting('mi_edificio.interno', true), '') = '1' then return new; end if;
+  if old.oculto then raise exception 'El mensaje ya fue retirado'; end if;
+  if not new.oculto then raise exception 'Los mensajes no se editan: puedes retirarlo y escribir otro'; end if;
+  if old.uid is distinct from auth.uid() and public.mi_rol() is distinct from 'comite' then raise exception 'Solo su autor o el comité pueden retirar un mensaje'; end if;
+  motivo := nullif(trim(coalesce(new.oculto_motivo, '')), '');
+  insert into public.chat_retirados (mensaje_id, edificio_id, texto, foto) values (old.id, old.edificio_id, old.texto, old.foto) on conflict do nothing;
+  new := old;
+  new.oculto := true; new.oculto_por := auth.uid(); new.oculto_at := now(); new.texto := ''; new.foto := '';
+  new.oculto_motivo := case when old.uid = auth.uid() then 'Retirado por su autor' else 'Retirado por el comité' || coalesce(': ' || left(motivo, 200), '') end;
+  return new;
+end $$;
+drop trigger if exists chat_antes on public.chat_mensajes;
+create trigger chat_antes before insert or update on public.chat_mensajes for each row execute function privado.chat_antes();
+
+-- El comité decide si la administración y la conserjería participan; el cambio se anuncia en el chat
+create or replace function public.configurar_chat(p_admin boolean, p_conserjeria boolean) returns void
+language plpgsql security definer set search_path = public as $$
+declare e uuid := public.mi_edificio(); antes jsonb; quien text := (privado.yo()).nombre;
+begin
+  if public.mi_rol() is distinct from 'comite' then raise exception 'Solo el comité decide quién participa del chat'; end if;
+  select comunidad into antes from public.edificios where id = e;
+  perform set_config('mi_edificio.interno', '1', true);
+  update public.edificios set comunidad = coalesce(comunidad, '{}'::jsonb) || jsonb_build_object('admin_en_chat', coalesce(p_admin, false), 'conserjeria_en_chat', coalesce(p_conserjeria, false)) where id = e;
+  if coalesce((antes ->> 'admin_en_chat')::boolean, false) is distinct from coalesce(p_admin, false) then
+    insert into public.chat_mensajes (edificio_id, autor, rol, sistema, texto) values (e, 'Comité', 'comite', true,
+      quien || ', del comité, ' || case when p_admin then 'invitó a la administración al chat.' else 'sacó a la administración del chat.' end);
+  end if;
+  if coalesce((antes ->> 'conserjeria_en_chat')::boolean, false) is distinct from coalesce(p_conserjeria, false) then
+    insert into public.chat_mensajes (edificio_id, autor, rol, sistema, texto) values (e, 'Comité', 'comite', true,
+      quien || ', del comité, ' || case when p_conserjeria then 'invitó a la conserjería al chat.' else 'sacó a la conserjería del chat.' end);
+  end if;
+  perform set_config('mi_edificio.interno', '', true);
+end $$;
+-- Nadie más cambia quién participa (tampoco la administración editando el edificio)
+create or replace function privado.edificio_comunidad() returns trigger
+language plpgsql as $$
+begin
+  if new.comunidad is distinct from old.comunidad and auth.uid() is not null and coalesce(current_setting('mi_edificio.interno', true), '') <> '1' then
+    raise exception 'Quién participa del chat de la comunidad lo decide el comité';
+  end if;
+  return new;
+end $$;
+grant execute on function privado.edificio_comunidad() to authenticated;
+drop trigger if exists edificio_comunidad on public.edificios;
+create trigger edificio_comunidad before update on public.edificios for each row execute function privado.edificio_comunidad();
+
+-- Avisos entre vecinos: el autor edita el suyo; el comité y la administración solo pueden ocultarlo (con motivo)
+create or replace function privado.mercado_antes() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare u public.usuarios; hoy date := public.hoy(); moderador boolean;
+begin
+  if auth.uid() is null then return new; end if;
+  u := privado.yo();
+  if tg_op = 'INSERT' then
+    if u.rol not in ('residente','propietario','comite') then raise exception 'Solo los vecinos publican avisos'; end if;
+    new.uid := u.id; new.autor := u.nombre; new.depto := case when u.rol in ('residente','propietario') then u.depto end;
+    new.ts := now(); new.estado := 'activo'; new.oculto := false; new.oculto_motivo := '';
+  else
+    moderador := u.rol in ('comite','admin') and old.uid is distinct from u.id;
+    if moderador then
+      if new.oculto is not distinct from old.oculto then raise exception 'Solo su autor modifica el aviso'; end if;
+      new.tipo := old.tipo; new.titulo := old.titulo; new.descripcion := old.descripcion; new.precio := old.precio;
+      new.contacto := old.contacto; new.fotos := old.fotos; new.estado := old.estado; new.vence := old.vence;
+    else
+      new.oculto := old.oculto; new.oculto_motivo := old.oculto_motivo;
+    end if;
+    new.uid := old.uid; new.autor := old.autor; new.depto := old.depto; new.ts := old.ts;
+  end if;
+  if new.vence < hoy and (tg_op = 'INSERT' or new.vence is distinct from old.vence) then new.vence := hoy + 30; end if;
+  if new.vence > hoy + 60 then new.vence := hoy + 60; end if;
+  if new.tipo in ('regalo','busco','prestamo') then new.precio := null; end if;
+  if exists (select 1 from unnest(new.fotos) f where f not like new.edificio_id || '/mercado/%') then raise exception 'Foto no válida'; end if;
+  return new;
+end $$;
+drop trigger if exists mercado_antes on public.mercado_avisos;
+create trigger mercado_antes before insert or update on public.mercado_avisos for each row execute function privado.mercado_antes();
+
+create or replace function privado.tecnicos_antes() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare u public.usuarios; moderador boolean;
+begin
+  if auth.uid() is null then return new; end if;
+  u := privado.yo();
+  if tg_op = 'INSERT' then
+    new.uid := u.id; new.autor := u.nombre; new.depto := case when u.rol in ('residente','propietario') then u.depto end;
+    new.ts := now(); new.oculto := false; new.oculto_motivo := '';
+  else
+    moderador := u.rol in ('comite','admin') and old.uid is distinct from u.id;
+    if moderador then
+      if new.oculto is not distinct from old.oculto then raise exception 'Solo quien lo recomendó modifica sus datos'; end if;
+      new.nombre := old.nombre; new.oficio := old.oficio; new.telefono := old.telefono; new.sec := old.sec; new.nota := old.nota;
+    else
+      new.oculto := old.oculto; new.oculto_motivo := old.oculto_motivo;
+    end if;
+    new.uid := old.uid; new.autor := old.autor; new.depto := old.depto; new.ts := old.ts;
+  end if;
+  new.nombre := trim(new.nombre); new.telefono := trim(new.telefono);
+  if new.oficio not in ('gasfiter','electricista','gas','cerrajero','pintor','maestro','carpintero','electrodomesticos','computacion','jardinero','aseo','mudanzas','vidriero','otro') then
+    raise exception 'Oficio no válido';
+  end if;
+  return new;
+end $$;
+drop trigger if exists tecnicos_antes on public.tecnicos;
+create trigger tecnicos_antes before insert or update on public.tecnicos for each row execute function privado.tecnicos_antes();
+
+create or replace function privado.opiniones_antes() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare u public.usuarios;
+begin
+  if auth.uid() is null then return new; end if;
+  u := privado.yo();
+  if tg_op = 'INSERT' then
+    new.uid := u.id; new.autor := u.nombre; new.depto := case when u.rol in ('residente','propietario') then u.depto end; new.oculto := false;
+  elsif old.uid is distinct from u.id then
+    if u.rol not in ('comite','admin') or new.oculto is not distinct from old.oculto then raise exception 'Solo su autor modifica la opinión'; end if;
+    new.nota := old.nota; new.comentario := old.comentario;
+  else
+    new.oculto := old.oculto;
+  end if;
+  if tg_op = 'UPDATE' then new.uid := old.uid; new.autor := old.autor; new.depto := old.depto; new.tecnico_id := old.tecnico_id; end if;
+  new.ts := now(); new.comentario := trim(new.comentario);
+  return new;
+end $$;
+drop trigger if exists opiniones_antes on public.tecnico_opiniones;
+create trigger opiniones_antes before insert or update on public.tecnico_opiniones for each row execute function privado.opiniones_antes();
+
+-- Plazos: el chat se borra a los 12 meses (o lo que fije la administración en Conservación); los avisos cerrados o
+-- vencidos, a los 6 meses, con sus fotos
+create or replace function privado.depurar_comunidad() returns void
+language plpgsql security definer set search_path = public as $$
+declare e record; m int; ps text[];
+begin
+  for e in select id, retencion from public.edificios loop
+    m := coalesce(nullif(privado.meses(e.retencion, 'chat'), 0), 12);
+    select array_agg(f) into ps from (select foto f from public.chat_mensajes where edificio_id = e.id and ts < now() - make_interval(months => m) and foto <> ''
+      union all select x.foto from public.chat_retirados x join public.chat_mensajes c on c.id = x.mensaje_id where c.edificio_id = e.id and c.ts < now() - make_interval(months => m) and x.foto <> '') z;
+    if ps is not null then perform privado.encolar_archivos(e.id, array(select p from unnest(ps) p where p like e.id || '/chat/%')); end if;
+    delete from public.chat_mensajes where edificio_id = e.id and ts < now() - make_interval(months => m);
+    select array_agg(f) into ps from public.mercado_avisos a, unnest(a.fotos) f
+      where a.edificio_id = e.id and (a.estado = 'cerrado' or a.vence < public.hoy()) and greatest(a.ts::date, a.vence) < public.hoy() - 180;
+    if ps is not null then perform privado.encolar_archivos(e.id, array(select p from unnest(ps) p where p like e.id || '/mercado/%')); end if;
+    delete from public.mercado_avisos where edificio_id = e.id and (estado = 'cerrado' or vence < public.hoy()) and greatest(ts::date, vence) < public.hoy() - 180;
+  end loop;
+end $$;
+
+select public._pol('chat_mensajes','chat_sel','select','public.en_chat()');
+select public._pol('chat_mensajes','chat_ins','insert','public.en_chat()');
+select public._pol('chat_mensajes','chat_upd','update','public.en_chat()');
+select public._pol('chat_retirados','chr_sel','select','public.mi_rol() = ''comite''');
+select public._pol('mercado_avisos','mer_sel','select','public.mi_rol() in (''residente'',''propietario'',''comite'',''admin'',''conserje'') and (not oculto or uid = auth.uid() or public.mi_rol() in (''comite'',''admin''))');
+select public._pol('mercado_avisos','mer_ins','insert','public.mi_rol() in (''residente'',''propietario'',''comite'')');
+select public._pol('mercado_avisos','mer_upd','update','uid = auth.uid() or public.mi_rol() in (''comite'',''admin'')');
+select public._pol('tecnicos','tec_sel','select','public.mi_rol() in (''residente'',''propietario'',''comite'',''admin'',''conserje'') and (not oculto or uid = auth.uid() or public.mi_rol() in (''comite'',''admin''))');
+select public._pol('tecnicos','tec_ins','insert','public.mi_rol() in (''residente'',''propietario'',''comite'',''admin'',''conserje'')');
+select public._pol('tecnicos','tec_upd','update','uid = auth.uid() or public.mi_rol() in (''comite'',''admin'')');
+select public._pol('tecnico_opiniones','top_sel','select','public.mi_rol() in (''residente'',''propietario'',''comite'',''admin'',''conserje'') and (not oculto or uid = auth.uid() or public.mi_rol() in (''comite'',''admin''))');
+select public._pol('tecnico_opiniones','top_ins','insert','public.mi_rol() in (''residente'',''propietario'',''comite'',''admin'',''conserje'') and exists (select 1 from public.tecnicos t where t.id = tecnico_id and t.edificio_id = tecnico_opiniones.edificio_id and not t.oculto)');
+select public._pol('tecnico_opiniones','top_upd','update','uid = auth.uid() or public.mi_rol() in (''comite'',''admin'')');
+
 drop function public._pol(text, text, text, text, text, boolean);
 
 -- ---------------------------------------------------------------------
@@ -4951,6 +5230,11 @@ begin
       or (r = 'mantencion' and exists (select 1 from public.ot o where o.edificio_id = e and o.empresa_id = public.mi_empresa() and p_name = any(o.fotos_antes)));
   end if;
   if c = 'emergencia' then return r <> 'mantencion'; end if;
+  if c = 'chat' then
+    return (public.en_chat() and exists (select 1 from public.chat_mensajes m where m.edificio_id = e and m.foto = p_name))
+      or (r = 'comite' and exists (select 1 from public.chat_retirados x where x.edificio_id = e and x.foto = p_name));
+  end if;
+  if c = 'mercado' then return r <> 'mantencion'; end if;
   if c = 'novedades' then return r in ('conserje','comite','admin'); end if;
   if c = 'mascotas' then return r in ('conserje','comite','admin') or exists (select 1 from public.unidad_mascotas x where x.edificio_id = e and x.foto = p_name and r in ('residente','propietario') and x.depto = public.mi_depto()); end if;
   if c = 'proveedores' then return r in ('comite','admin'); end if;
@@ -4986,7 +5270,7 @@ create policy "fotos_delete" on storage.objects for delete to authenticated usin
 do $$
 declare t text;
 begin
-  foreach t in array array['edificios','empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos','certificados','banco_movimientos','banco_pagadores','presupuestos','emergencia_responsables','emergencia_simulacros','proveedores','contratos','turnos','novedades','unidad_vehiculos','unidad_mascotas','unidad_espacios','comunicado_lecturas','usuario_unidades','proveedor_ingresos','plantillas','facturas','unidad_propietarios']
+  foreach t in array array['edificios','empresas','usuarios','unidades','gastos','gasto_unidades','reservas','incidencias','conversaciones','mensajes','comunicados','documentos','encomiendas','visitas','activos','registros','ot','encuestas','votos','estacionamientos','estacionamiento_usos','pagos','convenios','convenio_cuotas','caja_movimientos','lecturas','fondos','fondo_movimientos','cargos','indicadores','multas_catalogo','infracciones','infraccion_eventos','infraccion_votos','contactos','auditoria','consentimientos','solicitudes_datos','polizas','siniestros','unidad_documentos','condiciones_especiales','suspensiones','suspension_votos','suspension_eventos','registro_personas','registro_confirmaciones','asambleas','asamblea_poderes','asamblea_asistencia','asamblea_mociones','asamblea_votos','correos','certificados','banco_movimientos','banco_pagadores','presupuestos','emergencia_responsables','emergencia_simulacros','proveedores','contratos','turnos','novedades','unidad_vehiculos','unidad_mascotas','unidad_espacios','comunicado_lecturas','usuario_unidades','proveedor_ingresos','plantillas','facturas','unidad_propietarios','chat_mensajes','chat_retirados','mercado_avisos','tecnicos','tecnico_opiniones']
   loop
     begin
       execute format('alter publication supabase_realtime add table public.%I', t);

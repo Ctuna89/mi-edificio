@@ -35,6 +35,7 @@ No abras un issue público. Usa **Security → Report a vulnerability** en GitHu
 - **Un enlace firmado sirve hasta 1 hora para quien lo tenga**, aunque no tenga sesión.
 - **Supabase**: en una instalación nueva con registro abierto, la primera cuenta que crea el edificio queda como administradora; créalo de inmediato. Las funciones de la base no revocan el permiso de ejecución al rol anónimo: todas exigen una sesión para devolver datos, pero no hay una segunda barrera.
 - **Los Documentos los lee todo residente del edificio** (no las empresas de mantención).
+- **El chat de la comunidad no es cifrado de extremo a extremo.** Que la administración no lo vea lo hacen cumplir los permisos de la base de datos, pero quien controla el computador del edificio (o el proyecto de Supabase) puede leer la base de datos directamente. Además, la administración asigna los roles: podría darse el rol de comité. Por eso cada cambio de quién participa se anuncia en el chat.
 - **El historial de incidencias y órdenes lo escribe el navegador** de quien tiene permiso de edición; no es un registro de auditoría inalterable.
 - **Comité y conserjería ven nombre, unidad y teléfono de todos los usuarios.**
 - **Las actualizaciones confían en GitHub.** La actualización con un clic descarga el instalador solo desde las publicaciones del repositorio y comprueba su suma, lo que detecta descargas dañadas pero no una publicación hecha por alguien que tomara control del repositorio.

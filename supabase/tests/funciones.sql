@@ -811,3 +811,71 @@ select t.ok(privado.recordar_mantenciones((public.hoy() + time '20:00') at time 
 select t.ok(privado.recordar_mantenciones((public.hoy() + time '21:00') at time zone 'America/Santiago') = 0, 'una sola vez');
 select t.soy(:'a2'); select t.ok((select count(*) = 0 from ot) and (select count(*) = 0 from proveedor_ingresos), 'los residentes no ven las órdenes ni la portería');
 \echo 'OK: aviso a los residentes y visita en portería'
+
+-- ============ chat de la comunidad ============
+select t.soy(:'a2');
+insert into chat_mensajes (texto) values ('Hola vecinos, ¿alguien tiene una escalera?') returning id as cm1 \gset
+select t.ok((select autor = 'Rita' and depto = '101' and rol = 'propietario' from chat_mensajes where id = :'cm1'), 'el autor y la unidad los pone la base de datos');
+insert into chat_mensajes (texto, autor, depto) values ('x', 'Otra persona', '102');
+select t.ok((select count(*) = 0 from chat_mensajes where autor = 'Otra persona' or depto = '102'), 'no se puede firmar como otra persona ni otra unidad');
+select t.falla(format($$update chat_mensajes set texto = 'otra cosa' where id = %L$$, :'cm1'), 'editar un mensaje');
+select t.soy(:'a3'); insert into chat_mensajes (texto, responde_a) values ('Yo tengo una, depto 102', :'cm1') returning id as cm2 \gset
+select t.falla(format($$update chat_mensajes set oculto = true where id = %L$$, :'cm1'), 'retirar el mensaje de otra persona');
+select t.soy(:'a1'); select t.ok((select count(*) = 0 from chat_mensajes), 'la administración no ve el chat si el comité no la invita');
+select t.falla($$insert into chat_mensajes (texto) values ('hola')$$, 'la administración escribe en el chat sin invitación');
+select t.falla(format($$update edificios set comunidad = '{"admin_en_chat":true}' where id = %L$$, :'ea'), 'la administración se invita sola editando el edificio');
+select t.falla($$select public.configurar_chat(true, false)$$, 'la administración se invita sola');
+select t.soy(:'a4'); select t.ok((select count(*) = 0 from chat_mensajes), 'tampoco la conserjería');
+select t.soy(:'m1'); select t.ok((select count(*) = 0 from chat_mensajes), 'ni las empresas de mantención');
+select t.soy(:'a5'); select public.configurar_chat(true, false);
+select t.ok((select count(*) = 1 from chat_mensajes where sistema and texto like '%invitó a la administración%'), 'el comité invita a la administración y queda anunciado en el chat');
+select t.soy(:'a1'); select t.ok((select count(*) >= 3 from chat_mensajes), 'invitada, la administración lee el chat');
+insert into chat_mensajes (texto) values ('Gracias por la invitación');
+select t.soy(:'a5'); update chat_mensajes set oculto = true, oculto_motivo = 'Datos personales de un tercero' where id = :'cm2';
+select t.ok((select oculto and texto = '' and oculto_motivo = 'Retirado por el comité: Datos personales de un tercero' from chat_mensajes where id = :'cm2'), 'el comité retira un mensaje: queda el aviso, sin el texto');
+select t.ok((select texto = 'Yo tengo una, depto 102' from chat_retirados where mensaje_id = :'cm2'), 'el comité conserva lo que decía');
+select t.soy(:'a3'); select t.ok((select count(*) = 0 from chat_retirados), 'nadie más lo ve');
+select t.soy(:'a2'); update chat_mensajes set oculto = true where id = :'cm1';
+select t.ok((select oculto_motivo = 'Retirado por su autor' from chat_mensajes where id = :'cm1'), 'el autor retira su propio mensaje');
+select t.soy(:'a5'); select public.configurar_chat(false, false);
+select t.soy(:'a1'); select t.ok((select count(*) = 0 from chat_mensajes), 'el comité saca a la administración y deja de ver el chat');
+select t.ok((select count(*) = 0 from auditoria where tabla in ('chat_mensajes','chat_retirados')), 'el chat no pasa por la bitácora de auditoría');
+\echo 'OK: chat de la comunidad'
+
+-- ============ avisos entre vecinos ============
+select t.soy(:'a2');
+insert into mercado_avisos (tipo, titulo, descripcion, precio, contacto, vence) values ('venta', 'Bicicleta aro 26', 'Poco uso', 80000, 'WhatsApp +56 9 1234 5678', public.hoy() + 365) returning id as av1 \gset
+select t.ok((select autor = 'Rita' and depto = '101' and vence = public.hoy() + 60 and estado = 'activo' from mercado_avisos where id = :'av1'), 'el aviso queda a nombre de su autor y vence a los 60 días como máximo');
+insert into mercado_avisos (tipo, titulo, precio) values ('regalo', 'Cuna de madera', 5000) returning id as av2 \gset
+select t.ok((select precio is null from mercado_avisos where id = :'av2'), 'un regalo no tiene precio');
+select t.falla(format($$insert into mercado_avisos (titulo, fotos) values ('Silla', array[%L])$$, :'ea' || '/logo/x.png'), 'un aviso con fotos de otra carpeta');
+select t.soy(:'a3'); update mercado_avisos set precio = 1 where id = :'av1';
+select t.ok((select precio = 80000 from mercado_avisos where id = :'av1'), 'otro vecino no modifica el aviso');
+select t.soy(:'a5'); update mercado_avisos set oculto = true, oculto_motivo = 'Venta no permitida', precio = 1 where id = :'av2';
+select t.ok((select oculto and oculto_motivo = 'Venta no permitida' and precio is null from mercado_avisos where id = :'av2'), 'el comité oculta un aviso (sin cambiar su contenido)');
+select t.soy(:'a3'); select t.ok((select count(*) = 1 from mercado_avisos), 'los vecinos no ven los avisos ocultos');
+select t.soy(:'a2'); select t.ok((select count(*) = 2 from mercado_avisos), 'su autor sí');
+update mercado_avisos set oculto = false where id = :'av2';
+select t.ok((select oculto from mercado_avisos where id = :'av2'), 'el autor no puede volver a mostrar un aviso oculto');
+update mercado_avisos set estado = 'reservado' where id = :'av1';
+select t.soy(:'a4'); select t.ok((select count(*) = 1 from mercado_avisos), 'la conserjería ve los avisos');
+select t.falla($$insert into mercado_avisos (titulo) values ('Servicio de conserjería')$$, 'la conserjería publica avisos');
+select t.soy(:'m1'); select t.ok((select count(*) = 0 from mercado_avisos), 'las empresas de mantención no ven los avisos');
+\echo 'OK: avisos entre vecinos'
+
+-- ============ técnicos recomendados ============
+select t.soy(:'a3');
+insert into tecnicos (nombre, oficio, telefono, sec, nota) values ('Juan Gasfíter', 'gasfiter', '+56 9 8765 4321', true, 'Puntual, cobra justo') returning id as tc1 \gset
+select t.falla($$insert into tecnicos (nombre, oficio) values ('X', 'astronauta')$$, 'un oficio que no está en la lista');
+insert into tecnico_opiniones (tecnico_id, nota, comentario) values (:'tc1', 5, 'Arregló el calefont en una hora');
+select t.falla(format($$insert into tecnico_opiniones (tecnico_id, nota) values (%L, 4)$$, :'tc1'), 'opinar dos veces sobre el mismo técnico');
+select t.soy(:'a2'); insert into tecnico_opiniones (tecnico_id, nota, comentario) values (:'tc1', 4, 'Bien');
+select t.falla(format($$insert into tecnico_opiniones (tecnico_id, nota) values (%L, 6)$$, :'tc1'), 'una nota mayor que 5');
+update tecnicos set telefono = '000' where id = :'tc1';
+select t.ok((select telefono = '+56 9 8765 4321' from tecnicos where id = :'tc1'), 'solo quien lo recomendó cambia sus datos');
+select t.ok((select round(avg(nota), 1) = 4.5 and count(*) = 2 from tecnico_opiniones where tecnico_id = :'tc1'), 'las opiniones se promedian');
+select t.soy(:'a4'); select t.ok((select count(*) = 1 from tecnicos), 'la conserjería los ve (útil en una emergencia)');
+select t.soy(:'a1'); update tecnicos set oculto = true, oculto_motivo = 'Pidió que lo sacaran' where id = :'tc1';
+select t.soy(:'a2'); select t.ok((select count(*) = 0 from tecnicos), 'la administración o el comité pueden ocultar un técnico');
+select t.falla(format($$insert into tecnico_opiniones (tecnico_id, nota) values (%L, 1)$$, :'tc1'), 'opinar sobre un técnico oculto');
+\echo 'OK: técnicos recomendados'
