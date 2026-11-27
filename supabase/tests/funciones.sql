@@ -325,9 +325,11 @@ select t.soy(:'a7'); select public.eliminar_mi_cuenta();
 select t.soy(:'a1');
 select t.ok((select count(*) = 0 from contactos where uid = :'a7'), 'al eliminar la cuenta se borra su teléfono');
 select t.ok((select count(*) = 0 from auditoria where registro = :'a7' and (antes::text like '%Sánchez%' or despues::text like '%Sánchez%' or antes::text like '%1111%' or despues::text like '%1111%')), 'y sus datos desaparecen de la bitácora');
-reset role; update edificios set retencion = retencion || '{"auditoria": 1}'; select set_config('mi_edificio.interno', '1', false); update auditoria set ts = now() - interval '2 months' where id = (select min(id) from auditoria); select set_config('mi_edificio.interno', '', false);
+reset role; update edificios set retencion = retencion || '{"auditoria": 1}'; select set_config('mi_edificio.interno', '1', false); update auditoria set ts = now() - interval '25 months' where id = (select min(id) from auditoria); update auditoria set ts = now() - interval '2 months' where id = (select min(id) + 1 from auditoria); select set_config('mi_edificio.interno', '', false);
 select privado.depurar_edificio(:'ea');
-select t.ok((select count(*) = 0 from auditoria where ts < now() - interval '1 month'), 'la bitácora respeta el plazo de conservación que fija la administración');
+select t.ok((select count(*) = 0 from auditoria where ts < now() - interval '24 months'), 'la bitácora respeta el plazo de conservación');
+select t.ok((select count(*) = 1 from auditoria where ts < now() - interval '1 month' and ts > now() - interval '24 months'), 'pero nunca menos de 24 meses, aunque la administración fije 1');
+select t.ok((select count(*) = 1 from auditoria where tabla = 'depuracion' and accion = 'borrar'), 'y la depuración queda registrada en la bitácora');
 \echo 'OK: datos personales'
 
 -- ---------- seguros ----------
@@ -416,7 +418,7 @@ select t.falla($$insert into registro_personas (depto, relacion, nombre, rut) va
 select t.falla($$insert into registro_personas (depto, relacion, nombre) values ('101', 'copropietario', 'Sin RUT')$$, 'copropietario sin RUT');
 select t.falla($$insert into registro_personas (depto, relacion, nombre, rut, persona_juridica) values ('101', 'copropietario', 'Inmobiliaria X', '76.086.428-5', true)$$, 'persona jurídica sin representante');
 insert into registro_personas (depto, relacion, nombre, rut, correo, domicilio) values ('101', 'copropietario', 'Rita Rojas', '12.345.678-5', 'RITA@correo.cl', 'Los Olmos 1234, depto 101');
-select t.ok((select prop = 'Rita Rojas' from unidades where depto = '101'), 'el nombre del copropietario se refleja en la unidad');
+select t.ok((select prop = 'Rita Rojas' from unidad_propietarios where depto = '101'), 'el nombre del copropietario queda como propietario de la unidad');
 select t.ok((select rut = '12345678-5' and correo = 'rita@correo.cl' from registro_personas where nombre = 'Rita Rojas'), 'RUT y correo quedan normalizados');
 select t.ok((select faltantes = '{}' and not confirmado from public.registro_estado() where depto = '101'), 'el 101 tiene lo mínimo, pero aún no confirma este año');
 select t.ok((select 'Sin copropietario registrado' = any(faltantes) from public.registro_estado() where depto = '103'), 'el 103 aparece sin copropietario');
@@ -737,3 +739,22 @@ select t.ok((select estado = 'pagada' and pagada_fecha = '2026-11-30' from factu
 select t.falla(format($$update facturas set estado = 'anulada' where id = %L$$, :'fac'), 'anular una factura pagada');
 select t.soy(:'a2'); select t.ok((select count(*) = 0 from facturas), 'los residentes no ven las facturas');
 \echo 'OK: facturas de proveedores'
+
+-- ============ correcciones de la revisión de seguridad ============
+select t.soy(:'a3'); select t.ok((select count(*) = 0 from unidad_propietarios where depto = '101') and (select count(*) = 0 from unidades where coalesce(prop, '') <> ''), 'un residente no ve el nombre del propietario de otra unidad');
+select t.soy(:'a4'); select t.ok((select count(*) = 1 from unidad_propietarios where depto = '101'), 'la conserjería sí');
+reset role; select set_config('request.jwt.claim.sub', '', false); update usuarios set depto = '102' where id = :'a5';
+select set_config('mi_edificio.interno', '1', false);
+update infracciones set estado = 'en_comite' where id = (select id from infracciones where depto = '102' and estado = 'resuelto' limit 1) returning id as caso102 \gset
+select set_config('mi_edificio.interno', '', false);
+select t.soy(:'a5'); select t.falla(format($$select public.votar_multa(%L, false, 'no')$$, :'caso102'), 'un miembro del comité vota la multa de su propia unidad');
+reset role; select set_config('request.jwt.claim.sub', '', false); update usuarios set depto = null where id = :'a5';
+select t.soy(:'a1');
+select t.falla(format($$select public.registrar_asistencia(%L, '104', 'propietario', 'Alguien', 'telematica')$$, (select id from asambleas where estado = 'en_curso' limit 1)), 'la mesa registra asistencia a distancia por otra persona');
+select t.soy(:'a2');
+select t.falla(format($$insert into incidencias (titulo, descripcion, depto, uid, fotos) values ('x', 'y', '101', auth.uid(), array[%L])$$, public.mi_edificio() || '/logo/logo.png'), 'una incidencia con una foto de otra carpeta');
+insert into incidencias (titulo, descripcion, depto, uid, fotos, historial) values ('Gotera', 'En el baño', '101', auth.uid(), array[public.mi_edificio() || '/incidencias/2026-11-27/a.jpg'], '[{"t":"creada"}]') returning id as inc \gset
+select t.falla(format($$update incidencias set historial = '[{"t":"otra cosa"}]' where id = %L$$, :'inc'), 'reescribir el historial de una incidencia');
+update incidencias set historial = historial || '[{"t":"comentario"}]' where id = :'inc';
+select t.ok((select jsonb_array_length(historial) = 2 from incidencias where id = :'inc'), 'pero sí agregar al historial');
+\echo 'OK: correcciones de la revisión de seguridad'

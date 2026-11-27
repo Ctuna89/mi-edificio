@@ -277,7 +277,7 @@ async function start(){
   S.usersW=watch({table:'usuarios'}, ()=>q(T('usuarios').select('*')), rows=>{ S.users={}; rows.forEach(u=>S.users[u.id]=u); const me=S.users[S.uid]||null; const k=meKey(); S.me=me; S.meLoaded=true; if((me?.edificio_id||null)!==(S.cfg?.id||null)) S.cfgW?.reload(); if(S.ready && meKey()!==k && !$('.modal')) routeNow(); else if(S.ready) refreshView(); gate(); }, {global:true, silent:true});
   S.misUnidades=[];
   watch({table:'usuario_unidades'}, ()=>q(T('usuario_unidades').select('*').eq('uid',S.uid)).catch(()=>[]), rows=>{ const k=S.misUnidades.map(x=>x.depto).join(); S.misUnidades=rows.sort((a,b)=>porNum(a.depto,b.depto)); if(S.ready&&k!==S.misUnidades.map(x=>x.depto).join()&&!$('.modal')) routeNow(); }, {global:true, silent:true});
-  S.unidadesW=watch('unidades', ()=>q(T('unidades').select('*')), rows=>{ S.unidades={}; rows.forEach(u=>S.unidades[u.depto]=u); refreshView(); }, {global:true, silent:true});
+  S.unidadesW=watch(['unidades','unidad_propietarios'], async()=>{ const [us,ps]=await Promise.all([q(T('unidades').select('*')), q(T('unidad_propietarios').select('depto,prop')).catch(()=>[])]); const P={}; ps.forEach(p=>P[p.depto]=p.prop); return us.map(u=>({...u, prop:P[u.depto]||''})); }, rows=>{ S.unidades={}; rows.forEach(u=>S.unidades[u.depto]=u); refreshView(); }, {global:true, silent:true});
   watch('empresas', ()=>q(T('empresas').select('*')), rows=>{ S.empresas={}; rows.forEach(u=>S.empresas[u.id]=u); refreshView(); }, {global:true, silent:true});
   watch('activos', ()=>q(T('activos').select('*')), rows=>{ S.activos={}; rows.forEach(u=>S.activos[u.id]=u); refreshView(); }, {global:true, silent:true});
   watch('estacionamientos', ()=>q(T('estacionamientos').select('*')), rows=>{ S.estac={}; rows.forEach(u=>S.estac[u.id]=u); refreshView(); }, {global:true, silent:true});
@@ -2433,6 +2433,9 @@ const ESPACIOS_EJ=[
   {id:'salon', nombre:'Salón de eventos', capacidad:40, desde:'10:00', hasta:'23:00', maxHoras:6, anticipacionDias:60, aprobacion:true, costo:0},
   {id:'gym', nombre:'Gimnasio', capacidad:4, desde:'06:00', hasta:'23:00', maxHoras:1, anticipacionDias:3, aprobacion:false, costo:0},
   {id:'juegos', nombre:'Sala de juegos', capacidad:8, desde:'10:00', hasta:'22:00', maxHoras:2, anticipacionDias:7, aprobacion:false, costo:0}];
+// Guarda unidades: depto y alícuota en "unidades"; el nombre del propietario aparte (solo lo ve el personal y la unidad)
+async function guardarUnidades(rows){ await q(T('unidades').upsert(rows.map(({prop,...u})=>u)));
+  const ps=rows.filter(r=>r.prop!=null&&String(r.prop).trim()).map(r=>({edificio_id:r.edificio_id, depto:r.depto, prop:String(r.prop).trim()})); if(ps.length) await q(T('unidad_propietarios').upsert(ps)); }
 const leerUnidades = txt => txt.split('\n').map(l=>l.trim()).filter(Boolean).map(l=>{ const [d,a,p]=l.split(/[;\t]/.test(l)?/[;\t]/:','); return d&&d.trim()?{edificio_id:S.me.edificio_id, depto:d.trim(), alicuota:Number(String(a||'0').trim().replace(',','.'))||0, prop:(p||'').trim()}:null; }).filter(Boolean);   // con ; o tabulador, la coma es decimal (39,5)
 function asistente(i=0){
   const c=S.cfg||{}; const upd=p=>q(T('edificios').update({...p, actualizado:now()}).eq('id',c.id));
@@ -2448,7 +2451,7 @@ function asistente(i=0){
     {t:'Unidades y alícuotas', d:'La alícuota (%) de cada departamento define su parte del gasto común. Pega una unidad por línea: depto;alícuota;propietario.',
       h:()=>`<div class="${nUn&&Math.abs(suma-100)>=0.05?'note':'info'}">${nUn?`Ya hay ${nUn} unidades cargadas; sus alícuotas suman ${suma.toFixed(2)}%${Math.abs(suma-100)<0.05?'.':' (deben sumar 100%).'}`:'Aún no hay unidades cargadas.'}</div>
         <label class="f"><span>Agregar o corregir unidades</span><textarea name="bulk" style="min-height:150px" placeholder="101;1.25;Juan Pérez&#10;102;1.30;&#10;103;1.25;María Soto"></textarea></label><p class="small muted">Puedes dejarlo en blanco y cargarlas después en Administración → Unidades.</p>`,
-      g:async d=>{ const rows=leerUnidades(d.bulk); if(rows.length){ await q(T('unidades').upsert(rows)); await S.unidadesW?.reload(); } }},
+      g:async d=>{ const rows=leerUnidades(d.bulk); if(rows.length){ await guardarUnidades(rows); await S.unidadesW?.reload(); } }},
     {t:'Gastos comunes', d:'Los residentes verán estos datos junto a su cobro para transferir. El pago se marca a mano en Gastos comunes.',
       h:()=>`<label class="f"><span>Datos bancarios</span><textarea name="datos_bancarios" style="min-height:120px" placeholder="Banco, tipo y número de cuenta, RUT, nombre, correo para el comprobante">${esc(c.datos_bancarios||'')}</textarea></label>`,
       g:d=>upd({datos_bancarios:d.datos_bancarios.trim()})},
@@ -2719,9 +2722,9 @@ ADMIN.unidades = function(el){
   <form id="fU" class="row wrap" style="margin-bottom:12px"><input type="text" name="depto" placeholder="Depto (ej: 1204)" required style="width:130px"><input type="text" inputmode="decimal" data-dec name="alicuota" placeholder="Alícuota %" required style="width:120px"><input type="text" name="prop" placeholder="Propietario (opcional)" class="grow"><button class="btn">Agregar</button></form>
   <details><summary>Carga masiva (pegar: depto;alícuota;propietario por línea)</summary><textarea id="bulk" placeholder="101;1.25;Juan Pérez&#10;102;1.30;"></textarea><button class="btn sec sm" id="bBulk" style="margin-top:6px">Cargar</button></details>
   <div style="overflow:auto;margin-top:10px"><table><thead><tr><th>Unidad</th><th class="num">Alícuota</th><th>Propietario</th><th></th></tr></thead><tbody>${us.map(u=>`<tr><td>${esc(u.depto)}</td><td class="num"><input type="text" inputmode="decimal" value="${aDec(u.alicuota)}" data-al="${esc(u.depto)}" style="width:100px;padding:4px 6px;text-align:right"></td><td><input type="text" value="${esc(u.prop||'')}" data-pr="${esc(u.depto)}" style="padding:4px 6px"></td><td><button class="btn sec sm" data-del="${esc(u.depto)}">✕</button></td></tr>`).join('')||'<tr><td colspan="4" class="muted">Sin unidades</td></tr>'}</tbody></table></div></div>`;
-  $('#fU',el).addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); try{ await q(T('unidades').upsert({edificio_id:S.me.edificio_id, depto:d.depto.trim(), alicuota:Number(d.alicuota), prop:d.prop.trim()})); e.target.reset(); toast('Unidad agregada'); }catch(err){ toast(errMsg(err)); } });
-  $('#bBulk',el).addEventListener('click', async()=>{ const rows=leerUnidades($('#bulk',el).value); if(!rows.length) return; try{ await q(T('unidades').upsert(rows)); toast(rows.length+' unidades cargadas'); }catch(err){ toast(errMsg(err)); } });
-  el.addEventListener('change', async e=>{ const t=e.target; try{ if(t.dataset.al) await q(T('unidades').update({alicuota:leerDec(t.value)}).eq('depto',t.dataset.al)); if(t.dataset.pr) await q(T('unidades').update({prop:t.value.trim()}).eq('depto',t.dataset.pr)); }catch(err){ toast(errMsg(err)); } });
+  $('#fU',el).addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); try{ await guardarUnidades([{edificio_id:S.me.edificio_id, depto:d.depto.trim(), alicuota:Number(d.alicuota), prop:d.prop.trim()}]); S.unidadesW?.reload(); e.target.reset(); toast('Unidad agregada'); }catch(err){ toast(errMsg(err)); } });
+  $('#bBulk',el).addEventListener('click', async()=>{ const rows=leerUnidades($('#bulk',el).value); if(!rows.length) return; try{ await guardarUnidades(rows); S.unidadesW?.reload(); toast(rows.length+' unidades cargadas'); }catch(err){ toast(errMsg(err)); } });
+  el.addEventListener('change', async e=>{ const t=e.target; try{ if(t.dataset.al) await q(T('unidades').update({alicuota:leerDec(t.value)}).eq('depto',t.dataset.al)); if(t.dataset.pr){ await q(T('unidad_propietarios').upsert({edificio_id:S.me.edificio_id, depto:t.dataset.pr, prop:t.value.trim()})); S.unidadesW?.reload(); } }catch(err){ toast(errMsg(err)); } });
   el.addEventListener('click', async e=>{ const b=e.target.closest('[data-del]'); if(b&&await confirmBox('¿Eliminar unidad '+b.dataset.del+'?')) await q(T('unidades').delete().eq('depto',b.dataset.del)); });
 };
 ADMIN.espacios = function(el){
