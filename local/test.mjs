@@ -107,6 +107,9 @@ test('consultas con tipos, upsert, filtros y permisos por rol', async () => {
   const mio = (await rita.db({ t: 'gasto_unidades', op: 'select' })).data; assert.equal(mio.length, 1); assert.equal(mio[0].monto, 600);
   assert.match((await rita.db({ t: 'pagos', op: 'insert', p: { depto: '101', periodo: '2026-11', monto: 100 } })).error, /row-level security/);
   const pago = await ana.db({ t: 'pagos', op: 'insert', p: { depto: '101', periodo: '2026-11', monto: 600, fecha: '2026-11-20' }, ret: true }); assert.equal(pago.data[0].monto, 600);
+  // varias filas con columnas distintas: se guardan todas las columnas (no solo las de la primera fila)
+  const varias = await ana.db({ t: 'empresas', op: 'insert', p: [{ nombre: 'Uno' }, { nombre: 'Dos', rubro: 'Ascensores', telefono: '+56 2 2222 2222' }], ret: true });
+  assert.equal(varias.estado, 200); assert.deepEqual(varias.data.map(e => [e.nombre, e.rubro || '', e.telefono || '']).sort(), [['Dos', 'Ascensores', '+56 2 2222 2222'], ['Uno', '', '']]);
   assert.equal((await rita.db({ t: 'gasto_unidades', op: 'select', f: [['depto', 'eq', '101']], one: true })).data.pagado, true);
   assert.deepEqual((await ana.db({ t: 'gasto_unidades', op: 'select', f: [['depto', 'in', ['102', '999']], ['pagado', 'eq', false]] })).data.map(x => x.depto), ['102']);
   assert.equal((await ana.db({ t: 'pagos', op: 'select', f: [['convenio_id', 'is', null], ['fecha', 'gte', '2026-11-01']] })).data.length, 1);

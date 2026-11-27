@@ -2299,20 +2299,147 @@ function registrarActivo(id, viaNFC){
   $('#fR',m).addEventListener('submit', async e=>{ e.preventDefault(); const b=$('#sR',m); busy(b,true); const d=formData(e.target); try{ const f=$('[name=foto]',m).files[0]; const rq=req.find(x=>x.tipo===d.tipo); if(rq?.fotoObligatoria&&!f){ toast('Este registro requiere foto'); busy(b,false); return; } const foto=f?await uploadImage(f,'rondas'):''; await q(T('registros').insert({activo_id:id, tipo:d.tipo, valor:d.valor||'', nota:d.nota.trim(), foto, uid:S.uid, via_nfc:!!viaNFC})); closeModal(); toast('Registrado'); }catch(err){ toast('Error: '+errMsg(err)); busy(b,false); } });
 }
 
+// CALENDARIO DE MANTENCIONES: mes o semana, con las órdenes programadas o agendadas, el plan preventivo proyectado
+// y los vencimientos de contratos. Se arrastra una orden (o una mantención del plan) a otro día para programarla.
+const CAL={ref:null, ocultas:new Set()};
+const CAL_COLORES=['#2563eb','#16a34a','#d97706','#9333ea','#db2777','#0891b2','#65a30d','#dc2626'];
+const OT_MOVIBLE=['asignada','aceptada','agendada'];
+const ymdOf=d=>d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate());
+const deYmd=s=>{ const [y,m,d]=String(s).slice(0,10).split('-').map(Number); return new Date(y,m-1,d); };
+const masDias=(d,n)=>{ const x=new Date(d); x.setDate(x.getDate()+n); return x; };
+function prefCal(k,v){ try{ if(v===undefined) return localStorage.getItem('calMant.'+k); localStorage.setItem('calMant.'+k,v); }catch(e){ return null; } }
+function colorEmpresa(id){ const emps=Object.values(S.empresas).sort((a,b)=>String(a.nombre).localeCompare(String(b.nombre))); const i=emps.findIndex(e=>e.id===id); return i<0?'#64748b':CAL_COLORES[i%CAL_COLORES.length]; }
+function eventosCal(docs, contratos, desde, hasta){
+  const hoy=todayStr(), emp=role()==='mantencion', ev=[], sin=[];
+  for(const o of docs){ if(o.estado==='rechazada') continue; const f=o.fecha_agendada||o.fecha_programada;
+    const base={tipo:'ot', id:o.id, titulo:o.titulo, empresa_id:o.empresa_id||'', o};
+    if(!f){ if(o.estado!=='aprobada') sin.push(base); continue; }
+    if(f<desde||f>hasta) continue;
+    ev.push({...base, fecha:f, hora:o.fecha_agendada?(o.hora_agendada||''):'', conf:!!o.fecha_agendada, hecha:o.estado==='aprobada', atrasada:f<hoy&&!['aprobada','cierre_tecnico'].includes(o.estado)});
+  }
+  if(!emp){
+    for(const a of Object.values(S.activos)){ const n=Number(a.plan_dias)||0; if(n<=0) continue;
+      const abierta=docs.find(o=>o.preventiva&&o.activo_id===a.id&&!['aprobada','rechazada'].includes(o.estado));
+      // con una orden preventiva abierta, el plan sigue desde ella; si no, desde la última mantención (o hoy)
+      let prox=abierta?masDias(deYmd(abierta.fecha_agendada||abierta.fecha_programada||hoy),n):a.ultima_mantencion?masDias(deYmd(a.ultima_mantencion),n):deYmd(hoy);
+      let desdeAtraso=''; if(!abierta&&ymdOf(prox)<hoy){ desdeAtraso=ymdOf(prox); prox=deYmd(hoy); }
+      for(let i=0;i<60&&ymdOf(prox)<=hasta;i++,prox=masDias(prox,n)){ const f=ymdOf(prox); if(f>=desde) ev.push({tipo:'plan', id:a.id+':'+f, activo:a, titulo:a.nombre, empresa_id:a.empresa_id||'', fecha:f, atrasada:i===0&&!!desdeAtraso, desdeAtraso:i===0?desdeAtraso:''}); }
+    }
+    for(const c of contratos){ if(c.terminado||!c.hasta||c.hasta<desde||c.hasta>hasta) continue; ev.push({tipo:'contrato', id:c.id, titulo:'Vence: '+c.titulo, empresa_id:'contratos', fecha:c.hasta, c}); }
+  }
+  return {ev, sin};
+}
+function puedeMoverEv(x){ const emp=role()==='mantencion';
+  if(x.tipo==='plan') return isAdmin();
+  if(x.tipo!=='ot'||!OT_MOVIBLE.includes(x.o.estado)) return false;
+  return isAdmin()||(emp&&x.o.empresa_id===S.me.empresa_id&&x.o.estado!=='asignada'); }
+function chipCal(x){
+  const est=x.tipo==='ot'?(x.hecha?'hecha':x.conf?'conf':'prog'):x.tipo;
+  const ic={hecha:'✓',conf:'🔧',prog:'📅',plan:'↻',contrato:'📄'}[est];
+  const emp=x.tipo==='contrato'?'Contrato':(S.empresas[x.empresa_id]?.nombre||'Sin empresa');
+  const det={hecha:'Cerrada',conf:'Visita confirmada por la empresa',prog:'Programada, falta que la empresa confirme la visita',plan:'Plan preventivo: aún sin orden de trabajo',contrato:'Vencimiento de contrato'}[est];
+  return `<div class="cal-ev ${est} ${x.atrasada?'late':''}" style="--c:${x.tipo==='contrato'?'#64748b':colorEmpresa(x.empresa_id)}" data-ev="${esc(x.tipo+'|'+x.id)}" ${puedeMoverEv(x)?'draggable="true"':''} title="${esc(x.titulo+' · '+emp+' · '+det+(x.desdeAtraso?' · atrasada desde el '+fmtDay(x.desdeAtraso):''))}"><span class="ic">${ic}</span>${x.hora?`<b>${esc(x.hora)}</b> `:''}<span class="tx">${esc(x.titulo)}</span>${x.atrasada?'<span class="late-i" aria-label="atrasada">!</span>':''}</div>`;
+}
+async function programarOT(o, dia, hora){
+  const hist=(a)=>[...(o.historial||[]),{ts:now(),uid:S.uid,accion:a}];
+  if(dia&&dia<todayStr()){ toast('Elige un día desde hoy'); return false; }
+  try{
+    if(isAdmin()){
+      if((o.fecha_agendada||o.fecha_programada||'')===(dia||'')) return false;
+      const p={fecha_programada:dia||null, historial:hist(dia?'Programada para el '+fmtDay(dia):'Fecha programada quitada')};
+      if(o.fecha_agendada){ Object.assign(p,{fecha_agendada:null, hora_agendada:null}); if(o.estado==='agendada') p.estado='aceptada'; if(dia) p.historial=hist('Reprogramada para el '+fmtDay(dia)+': la empresa debe confirmar la visita'); }
+      await q(T('ot').update(p).eq('id',o.id));
+      toast(dia?(o.fecha_agendada?'Reprogramada: se avisó a la empresa para que confirme':'Programada para el '+fmtDay(dia)):'Sin fecha');
+    } else {
+      if(!dia) return false;
+      const h=hora??o.hora_agendada??'';
+      await q(T('ot').update({estado:'agendada', fecha_agendada:dia, hora_agendada:h, historial:hist('Visita agendada '+dia+(h?' '+h:''))}).eq('id',o.id));
+      toast('Visita agendada para el '+fmtDay(dia));
+    }
+    return true;
+  }catch(err){ toast('Error: '+errMsg(err)); return false; }
+}
+function nuevaPreventiva(a, dia){ return formOT({activo_id:a.id, empresa_id:a.empresa_id||'', titulo:'Mantención preventiva: '+a.nombre, descripcion:'Mantención preventiva programada (cada '+a.plan_dias+' días).', preventiva:true, fecha_programada:dia}); }
+function exportarIcs(ev, desde){
+  const e=s=>String(s||'').replace(/[\;,]/g,m=>'\\'+m).replace(/\r?\n/g,'\\n');
+  const stamp=new Date().toISOString().replace(/[-:]/g,'').slice(0,15)+'Z';
+  const L=['BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//Mi Edificio//Mantenciones//ES','CALSCALE:GREGORIAN','X-WR-CALNAME:'+e('Mantenciones · '+(S.cfg?.nombre||'Mi Edificio'))];
+  for(const x of ev){ const d=x.fecha.replace(/-/g,'');
+    L.push('BEGIN:VEVENT','UID:'+x.tipo+'-'+String(x.id).replace(/[^a-z0-9-]/gi,'')+'@mi-edificio','DTSTAMP:'+stamp);
+    if(/^\d\d:\d\d/.test(x.hora||'')) L.push('DTSTART:'+d+'T'+x.hora.slice(0,5).replace(':','')+'00','DURATION:PT2H');
+    else L.push('DTSTART;VALUE=DATE:'+d,'DTEND;VALUE=DATE:'+ymdOf(masDias(deYmd(x.fecha),1)).replace(/-/g,''));
+    const emp=x.tipo==='contrato'?'':(S.empresas[x.empresa_id]?.nombre||'');
+    L.push('SUMMARY:'+e((x.tipo==='plan'?'Mantención preventiva: ':'')+x.titulo), 'DESCRIPTION:'+e([emp, x.tipo==='ot'&&!x.conf&&!x.hecha?'Por confirmar por la empresa':''].filter(Boolean).join(' · ')), 'END:VEVENT'); }
+  L.push('END:VCALENDAR');
+  descargar(new Blob([L.join('\r\n')+'\r\n'],{type:'text/calendar'}), 'mantenciones-'+desde+'.ics');
+}
+function drawCal(el, docs, contratos){
+  const adm=isAdmin(), emp=role()==='mantencion', hoy=todayStr();
+  const vista=prefCal('vista')||(innerWidth<700?'semana':'mes');
+  const ref=CAL.ref||deYmd(hoy);
+  let ini, fin, titulo;
+  if(vista==='mes'){ const p=new Date(ref.getFullYear(),ref.getMonth(),1), u=new Date(ref.getFullYear(),ref.getMonth()+1,0); ini=masDias(p,-((p.getDay()+6)%7)); fin=masDias(u,6-((u.getDay()+6)%7)); titulo=p.toLocaleDateString('es-CL',{month:'long',year:'numeric'}); titulo=titulo.charAt(0).toUpperCase()+titulo.slice(1); }
+  else { ini=masDias(ref,-((ref.getDay()+6)%7)); fin=masDias(ini,6); titulo='Semana del '+ini.toLocaleDateString('es-CL',{day:'numeric',month:'long'}); }
+  const desde=ymdOf(ini), hasta=ymdOf(fin);
+  const {ev,sin}=eventosCal(docs, contratos, desde, hasta);
+  const visible=x=>!CAL.ocultas.has(x.empresa_id);
+  const porDia={}; ev.filter(visible).forEach(x=>(porDia[x.fecha]=porDia[x.fecha]||[]).push(x));
+  Object.values(porDia).forEach(l=>l.sort((a,b)=>(a.hora||'99').localeCompare(b.hora||'99')||a.titulo.localeCompare(b.titulo)));
+  const dias=[]; for(let d=new Date(ini); d<=fin; d=masDias(d,1)) dias.push(ymdOf(d));
+  const MAX=vista==='mes'&&innerWidth>=700?3:99, mes=ref.getMonth();
+  const presentes=[...new Set(ev.concat(sin).map(x=>x.empresa_id))];
+  const ley=presentes.map(id=>`<button class="cal-ley-i ${CAL.ocultas.has(id)?'off':''}" data-ley="${esc(id)}" style="--c:${id==='contratos'?'#64748b':colorEmpresa(id)}" aria-pressed="${!CAL.ocultas.has(id)}">${esc(id==='contratos'?'Contratos':S.empresas[id]?.nombre||'Sin empresa')}</button>`).join('');
+  const sinV=sin.filter(visible);
+  el.innerHTML=`<div class="cal-bar"><div class="row" style="gap:6px;align-items:center"><button class="btn sec sm" data-cal="prev" aria-label="Anterior">‹</button><button class="btn sec sm" data-cal="hoy">Hoy</button><button class="btn sec sm" data-cal="next" aria-label="Siguiente">›</button><b class="cal-tit">${esc(titulo)}</b></div>
+    <div class="row" style="gap:6px;align-items:center"><div class="tabs" style="margin:0"><button data-vista="mes" class="${vista==='mes'?'on':''}">Mes</button><button data-vista="semana" class="${vista==='semana'?'on':''}">Semana</button></div><button class="btn sec sm" data-cal="ics" title="Para Outlook, Google Calendar o el calendario del teléfono">Exportar .ics</button></div></div>
+  ${ley?`<div class="cal-ley">${ley}</div>`:''}
+  <div class="cal-wrap ${sinV.length&&(adm||emp)?'con-sin':''}"><div class="cal ${vista}">
+    ${['Lun','Mar','Mié','Jue','Vie','Sáb','Dom'].map(d=>`<div class="cal-dow">${d}</div>`).join('')}
+    ${dias.map(d=>{ const l=porDia[d]||[], dt=deYmd(d); return `<div class="cal-dia ${d===hoy?'hoy':''} ${d<hoy?'pasado':''} ${vista==='mes'&&dt.getMonth()!==mes?'fuera':''}" data-dia="${d}"><div class="cal-n">${vista==='semana'?`<span class="cal-dsem">${dt.toLocaleDateString('es-CL',{weekday:'long'})}</span> `:''}${dt.getDate()}</div>${l.slice(0,MAX).map(chipCal).join('')}${l.length>MAX?`<button class="cal-mas" data-mas="${d}">+${l.length-MAX} más</button>`:''}</div>`; }).join('')}
+  </div>
+  ${sinV.length&&(adm||emp)?`<aside class="cal-sin" data-dia=""><b>Sin fecha (${sinV.length})</b><div class="small muted" style="margin:2px 0 8px">${adm?'Arrástralas a un día para programarlas':'Arrástralas a un día para agendar la visita'}</div>${sinV.map(chipCal).join('')}</aside>`:''}</div>
+  <div class="small muted cal-nota"><span class="cal-ev conf mini" style="--c:#64748b">🔧 confirmada</span> <span class="cal-ev prog mini" style="--c:#64748b">📅 programada, sin confirmar</span>${emp?'':' <span class="cal-ev plan mini" style="--c:#64748b">↻ plan preventivo</span>'} <span class="cal-ev hecha mini" style="--c:#64748b">✓ cerrada</span> · ${adm?'Arrastra para programar o toca un día para crear una orden.':emp?'Arrastra una orden aceptada para agendar la visita.':'Solo lectura.'}</div>`;
+  const todos=ev.concat(sin);
+  const abrir=key=>{ const x=todos.find(y=>y.tipo+'|'+y.id===key); if(!x) return;
+    if(x.tipo==='ot') return detalleOT(x.o);
+    if(x.tipo==='plan'){ if(adm) return nuevaPreventiva(x.activo, x.fecha>=hoy?x.fecha:hoy); return toast('Mantención preventiva de '+x.titulo+(x.desdeAtraso?', atrasada desde el '+fmtDay(x.desdeAtraso):', prevista para el '+fmtDay(x.fecha))); }
+    if(x.tipo==='contrato') location.hash='#proveedores--contratos'; };
+  const diaModal=d=>{ const l=porDia[d]||[]; const m=modal(`<h3>${esc(fmtDay(d))}</h3><div class="cal-lista">${l.map(chipCal).join('')||'<div class="empty">Nada programado</div>'}</div>${adm&&d>=hoy?`<button class="btn full" data-nueva style="margin-top:12px">+ Nueva orden para este día</button>`:''}`);
+    m.addEventListener('click',e=>{ const c=e.target.closest('[data-ev]'); if(c){ closeModal(); return abrir(c.dataset.ev); } if(e.target.closest('[data-nueva]')){ closeModal(); formOT({fecha_programada:d}); } }); };
+  el.onclick=e=>{
+    const c=e.target.closest('[data-cal]'); if(c){ const a=c.dataset.cal; if(a==='ics') return exportarIcs(ev.filter(visible), desde);
+      CAL.ref=a==='hoy'?null:vista==='mes'?new Date(ref.getFullYear(),ref.getMonth()+(a==='next'?1:-1),1):masDias(ref,a==='next'?7:-7); return drawCal(el,docs,contratos); }
+    const v=e.target.closest('[data-vista]'); if(v){ prefCal('vista',v.dataset.vista); return drawCal(el,docs,contratos); }
+    const l=e.target.closest('[data-ley]'); if(l){ const id=l.dataset.ley; CAL.ocultas.has(id)?CAL.ocultas.delete(id):CAL.ocultas.add(id); return drawCal(el,docs,contratos); }
+    const x=e.target.closest('[data-ev]'); if(x&&!(vista==='mes'&&innerWidth<700&&x.closest('.cal'))) return abrir(x.dataset.ev);
+    const m=e.target.closest('[data-mas]'); if(m) return diaModal(m.dataset.mas);
+    const d=e.target.closest('.cal-dia'); if(d&&((porDia[d.dataset.dia]||[]).length||(adm&&d.dataset.dia>=hoy))) return diaModal(d.dataset.dia);
+  };
+  // arrastrar y soltar (computador); en el teléfono se programa desde el detalle de la orden
+  el.ondragstart=e=>{ const x=e.target.closest('[data-ev][draggable]'); if(!x) return; e.dataTransfer.setData('text/plain',x.dataset.ev); e.dataTransfer.effectAllowed='move'; x.classList.add('arrastrando'); };
+  el.ondragend=e=>{ e.target.closest?.('[data-ev]')?.classList.remove('arrastrando'); $$('.cal-drop',el).forEach(z=>z.classList.remove('cal-drop')); };
+  el.ondragover=e=>{ const z=e.target.closest('[data-dia]'); if(!z||(z.dataset.dia&&z.dataset.dia<hoy)||(!z.dataset.dia&&!adm)) return; e.preventDefault(); $$('.cal-drop',el).forEach(y=>y!==z&&y.classList.remove('cal-drop')); z.classList.add('cal-drop'); };
+  el.ondrop=async e=>{ const z=e.target.closest('[data-dia]'); if(!z) return; e.preventDefault(); z.classList.remove('cal-drop'); const key=e.dataTransfer.getData('text/plain'); const x=todos.find(y=>y.tipo+'|'+y.id===key); if(!x||!puedeMoverEv(x)) return;
+    const dia=z.dataset.dia; if(x.tipo==='plan') return dia?nuevaPreventiva(x.activo, dia):null;
+    if(await programarOT(x.o, dia)){ Object.assign(x.o, adm?{fecha_programada:dia||null, ...(x.o.fecha_agendada?{fecha_agendada:null,hora_agendada:null}:{})}:{fecha_agendada:dia, estado:'agendada'}); drawCal(el,docs,contratos); } };
+}
+
 // MANTENCIÓN / OT
 VIEWS.mantencion = function(param){
   const r=role(); const emp=r==='mantencion';
   setMain(`<h1>Mantención</h1>${isAdmin()?'<div style="margin-bottom:10px"><button class="btn" id="bNewOT">+ Nueva orden de trabajo</button></div>':''}
   ${emp&&!S.me.empresa_id?'<div class="note">Tu usuario no está vinculado a una empresa. Pide a la administración que lo asigne.</div>':''}
-  <div class="tabs" id="oTabs"><button data-t="act" class="on">Activas</button><button data-t="cerr">Cerradas</button>${!emp?'<button data-t="plan">Plan preventivo</button>':''}</div><div id="oList" class="list"></div>`);
+  <div class="tabs" id="oTabs"><button data-t="act" class="${param==='calendario'?'':'on'}">Activas</button><button data-t="cal" class="${param==='calendario'?'on':''}">📅 Calendario</button><button data-t="cerr">Cerradas</button>${!emp?'<button data-t="plan">Plan preventivo</button>':''}</div><div id="oList" class="list"></div>`);
   $('#bNewOT')?.addEventListener('click',()=>formOT({}));
-  let tab='act', docs=[]; $('#oTabs').addEventListener('click',e=>{ const b=e.target.closest('button'); if(!b) return; $$('#oTabs button').forEach(x=>x.classList.remove('on')); b.classList.add('on'); tab=b.dataset.t; draw(); });
-  const draw=()=>{ const el=$('#oList'); if(!el) return; if(tab==='plan') return drawPlan(el); const d=docs.filter(x=>tab==='act'?!['aprobada','rechazada'].includes(x.estado):['aprobada','rechazada'].includes(x.estado));
-    el.innerHTML=d.map(x=>`<div class="item" data-o="${x.id}"><div class="hd"><b>${esc(x.titulo)}</b>${pillOf(EST_OT,x.estado)}</div><div class="meta">${esc(S.empresas[x.empresa_id]?.nombre||'Sin empresa')}${x.activo_id?' · '+esc(S.activos[x.activo_id]?.nombre||''):''}${x.fecha_agendada?' · agendada '+fmtDay(x.fecha_agendada):''} · creada ${fmtDate(x.ts)}${Number(x.costo)?' · '+clp(x.costo):''}</div></div>`).join('')||'<div class="empty">Sin órdenes</div>'; };
+  let tab=param==='calendario'?'cal':'act', docs=[], contratos=[]; if(param==='calendario') param=null;
+  $('#oTabs').addEventListener('click',e=>{ const b=e.target.closest('button'); if(!b) return; $$('#oTabs button').forEach(x=>x.classList.remove('on')); b.classList.add('on'); tab=b.dataset.t; history.replaceState(null,'',tab==='cal'?'#mantencion--calendario':'#mantencion'); draw(); });
+  const draw=()=>{ const el=$('#oList'); if(!el) return; el.classList.toggle('list',tab!=='cal'); if(tab==='cal') return drawCal(el, docs, contratos); el.onclick=el.ondragstart=el.ondragend=el.ondragover=el.ondrop=null; if(tab==='plan') return drawPlan(el); const d=docs.filter(x=>tab==='act'?!['aprobada','rechazada'].includes(x.estado):['aprobada','rechazada'].includes(x.estado));
+    el.innerHTML=d.map(x=>`<div class="item" data-o="${x.id}"><div class="hd"><b>${esc(x.titulo)}</b>${pillOf(EST_OT,x.estado)}</div><div class="meta">${esc(S.empresas[x.empresa_id]?.nombre||'Sin empresa')}${x.activo_id?' · '+esc(S.activos[x.activo_id]?.nombre||''):''}${x.fecha_agendada?' · agendada '+fmtDay(x.fecha_agendada):x.fecha_programada?' · programada '+fmtDay(x.fecha_programada):''} · creada ${fmtDate(x.ts)}${Number(x.costo)?' · '+clp(x.costo):''}</div></div>`).join('')||'<div class="empty">Sin órdenes</div>'; };
   function drawPlan(el){ const acts=Object.values(S.activos); const hoy=new Date();
     el.innerHTML=`<div class="card"><table><thead><tr><th>Activo</th><th>Empresa</th><th>Frecuencia</th><th>Última</th><th>Próxima</th><th></th></tr></thead><tbody>${acts.map(a=>{ const f=Number(a.plan_dias)||0; const ult=a.ultima_mantencion||''; let prox='',late=false; if(f&&ult){ const p=new Date(ult+'T00:00:00'); p.setDate(p.getDate()+f); prox=p.toISOString().slice(0,10); late=p<hoy; } return `<tr><td>${esc(a.nombre)}</td><td>${esc(S.empresas[a.empresa_id]?.nombre||'—')}</td><td>${f?'cada '+f+' días':'—'}</td><td>${ult?fmtDay(ult):'—'}</td><td>${prox?`<span class="pill ${late?'er':'ok'}">${fmtDay(prox)}</span>`:'—'}</td><td>${isAdmin()&&f?`<button class="btn sec sm" data-gen="${a.id}">Generar OT</button>`:''}</td></tr>`; }).join('')||'<tr><td colspan="6" class="muted">Sin activos</td></tr>'}</tbody></table><p class="small muted">Define frecuencia y empresa en Administración → Activos. La "última" se actualiza al aprobar una OT preventiva.</p></div>`; }
   $('#oList').addEventListener('click',e=>{ const g=e.target.closest('[data-gen]'); if(g){ const a=S.activos[g.dataset.gen]; return formOT({activo_id:g.dataset.gen, empresa_id:a.empresa_id||'', titulo:'Mantención preventiva: '+a.nombre, descripcion:'Mantención preventiva programada (cada '+a.plan_dias+' días).', preventiva:true}); } const it=e.target.closest('[data-o]'); if(it){ const d=docs.find(x=>x.id===it.dataset.o); if(d) detalleOT(d); } });
-  watch('ot', ()=>q(T('ot').select('*').order('ts',{ascending:false}).limit(500)), rows=>{ docs=rows; draw(); if(param){ const d=docs.find(x=>x.id===param); if(d){ detalleOT(d); param=null; } } });
+  if(['admin','comite'].includes(r)) watch('contratos', ()=>q(T('contratos').select('id,titulo,hasta,terminado')).catch(()=>[]), rows=>{ contratos=rows; if(tab==='cal') draw(); });
+  watch('ot', ()=>q(T('ot').select('*').order('ts',{ascending:false}).limit(1000)), rows=>{ docs=rows; draw(); if(param){ const d=docs.find(x=>x.id===param); if(d){ detalleOT(d); param=null; } } });
   REFRESH.mantencion=draw;
 };
 function formOT(pre){
@@ -2321,8 +2448,9 @@ function formOT(pre){
   <label class="f"><span>Empresa</span><select name="empresa_id" required><option value="">— Elegir —</option>${emps.map(e=>`<option value="${e.id}" ${pre.empresa_id===e.id?'selected':''}>${esc(e.nombre)} (${esc(e.rubro||'')})</option>`).join('')}</select>${emps.length?'':'<span class="small muted">No hay empresas. Créalas en Administración → Empresas.</span>'}</label>
   <label class="f"><span>Activo relacionado</span><select name="activo_id"><option value="">— Ninguno —</option>${acts.map(a=>`<option value="${a.id}" ${pre.activo_id===a.id?'selected':''}>${esc(a.nombre)}</option>`).join('')}</select></label>
   <div class="row"><label class="f grow"><span>Prioridad</span><select name="prioridad">${Object.entries(PRIO).map(([k,v])=>`<option value="${k}" ${k==='media'?'selected':''}>${v[0]}</option>`).join('')}</select></label><label class="f grow"><span>Fecha límite</span><input type="date" name="limite"></label></div>
+  <label class="f"><span>Programar para (opcional)</span><input type="date" name="fecha_programada" min="${todayStr()}" value="${esc(pre.fecha_programada||'')}"><span class="small muted">Aparece en el calendario; la empresa confirma la visita.</span></label>
   <button class="btn full">Crear y asignar</button></form>`);
-  $('#fO',m).addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); const b=$('button.full',e.target); busy(b,true); try{ const emp=S.empresas[d.empresa_id]?.nombre||''; const rows=await q(T('ot').insert({titulo:d.titulo.trim(), descripcion:d.descripcion.trim(), empresa_id:d.empresa_id, activo_id:d.activo_id||null, prioridad:d.prioridad, limite:d.limite||null, incidencia_id:pre.incidencia_id||null, preventiva:!!pre.preventiva, fotos_antes:pre.fotos_antes||[], estado:'asignada', uid:S.uid, historial:[{ts:now(),uid:S.uid,accion:'Creada y asignada a '+emp}]}).select());
+  $('#fO',m).addEventListener('submit', async e=>{ e.preventDefault(); const d=formData(e.target); const b=$('button.full',e.target); busy(b,true); try{ const emp=S.empresas[d.empresa_id]?.nombre||''; const rows=await q(T('ot').insert({titulo:d.titulo.trim(), descripcion:d.descripcion.trim(), empresa_id:d.empresa_id, activo_id:d.activo_id||null, prioridad:d.prioridad, limite:d.limite||null, fecha_programada:d.fecha_programada||null, incidencia_id:pre.incidencia_id||null, preventiva:!!pre.preventiva, fotos_antes:pre.fotos_antes||[], estado:'asignada', uid:S.uid, historial:[{ts:now(),uid:S.uid,accion:'Creada y asignada a '+emp+(d.fecha_programada?', programada para el '+fmtDay(d.fecha_programada):'')}]}).select());
     const ot=rows[0];
     if(pre.incidencia_id){ const inc=await q(T('incidencias').select('*').eq('id',pre.incidencia_id).maybeSingle()); if(inc) await q(T('incidencias').update({ot_id:ot.id, estado:inc.estado==='abierta'?'en_curso':inc.estado, historial:[...(inc.historial||[]),{ts:now(),uid:S.uid,accion:'OT creada para '+emp}]}).eq('id',inc.id)); }
     closeModal(); toast('OT creada'); location.hash='#mantencion--'+ot.id; }catch(err){ toast('Error: '+errMsg(err)); busy(b,false); } });
@@ -2333,7 +2461,7 @@ function detalleOT(o){
   const hist=(accion,extra={})=>[...(o.historial||[]),{ts:now(),uid:S.uid,accion,...extra}];
   const m=modal(`<h3>${esc(o.titulo)}</h3><div class="row wrap" style="gap:6px;margin-bottom:8px">${pillOf(EST_OT,o.estado)}${pillOf(PRIO,o.prioridad)}${o.preventiva?'<span class="pill mu">Preventiva</span>':''}</div>
   <p style="white-space:pre-wrap">${esc(o.descripcion)}</p>
-  <div class="small muted">🏢 ${esc(S.empresas[o.empresa_id]?.nombre||'—')}${o.activo_id?' · 🔩 '+esc(S.activos[o.activo_id]?.nombre||''):''}${o.limite?' · límite '+fmtDay(o.limite):''}${o.fecha_agendada?' · agendada '+fmtDay(o.fecha_agendada)+' '+esc(o.hora_agendada||''):''}${o.incidencia_id&&!emp?` · <a href="#incidencias--${esc(o.incidencia_id)}">Ver incidencia</a>`:''}</div>
+  <div class="small muted">🏢 ${esc(S.empresas[o.empresa_id]?.nombre||'—')}${o.activo_id?' · 🔩 '+esc(S.activos[o.activo_id]?.nombre||''):''}${o.limite?' · límite '+fmtDay(o.limite):''}${o.fecha_agendada?' · agendada '+fmtDay(o.fecha_agendada)+' '+esc(o.hora_agendada||''):o.fecha_programada?' · programada para el '+fmtDay(o.fecha_programada)+' (falta que la empresa confirme)':''}${o.incidencia_id&&!emp?` · <a href="#incidencias--${esc(o.incidencia_id)}">Ver incidencia</a>`:''}</div>
   ${o.fotos_antes?.length?`<div class="small" style="margin-top:8px"><b>Antes</b></div><div class="photos">${o.fotos_antes.map(f=>`<img data-f="${esc(f)}" data-img="${esc(f)}">`).join('')}</div>`:''}
   ${o.fotos_despues?.length?`<div class="small" style="margin-top:8px"><b>Después</b></div><div class="photos">${o.fotos_despues.map(f=>`<img data-f="${esc(f)}" data-img="${esc(f)}">`).join('')}</div>`:''}
   ${o.informe?`<div class="card" style="margin-top:10px"><b>Informe técnico</b><div style="white-space:pre-wrap">${esc(o.informe)}</div>${Number(o.costo)?`<div class="small muted">Costo informado: ${clp(o.costo)}</div>`:''}${o.factura?`<a data-f="${esc(o.factura)}" target="_blank">Ver documento adjunto</a>`:''}</div>`:''}
@@ -2344,13 +2472,15 @@ function detalleOT(o){
   </div>`:''}
   ${adm?`<h2>Acciones de administración</h2><div class="row wrap" style="gap:6px">
     ${o.estado==='cierre_tecnico'?`<button class="btn ok sm" data-a="aprobar">Aprobar y cerrar</button><button class="btn dan sm" data-a="devolver">Devolver a terreno</button>`:''}
+    ${OT_MOVIBLE.includes(o.estado)?`<button class="btn sec sm" data-a="programar">📅 ${o.fecha_programada||o.fecha_agendada?'Reprogramar':'Programar fecha'}</button>`:''}
     ${o.estado!=='aprobada'?`<button class="btn sec sm" data-a="reasignar">${o.estado==='rechazada'?'Asignar a otra empresa':'Reasignar empresa'}</button>`:''}
   </div>`:''}
   <h2>Historial</h2><div class="timeline">${(o.historial||[]).slice().reverse().map(h=>`<div><b>${esc(h.accion)}</b> <span class="muted">· ${esc(userName(h.uid))} · ${fmtDate(h.ts)}</span>${h.nota?'<br>'+esc(h.nota):''}</div>`).join('')}</div>`);
   m.addEventListener('click', async e=>{ const img=e.target.closest('[data-img]'); if(img) return viewImg(img.dataset.img); const b=e.target.closest('[data-a]'); if(!b) return; const a=b.dataset.a; try{
     if(a==='aceptar'){ await upd({estado:'aceptada', historial:hist('Aceptada por la empresa')}); }
     if(a==='rechazar'){ const n=await askText('Motivo del rechazo'); if(n===null) return; await upd({estado:'rechazada', historial:hist('Rechazada por la empresa',{nota:n})}); }
-    if(a==='agendar'){ const mm=modal(`<h3>Agendar visita</h3><form id="fAg"><div class="row"><label class="f grow"><span>Fecha</span><input type="date" name="f" required min="${todayStr()}"></label><label class="f grow"><span>Hora</span><input type="time" name="h"></label></div><button class="btn full">Agendar</button></form>`); $('#fAg',mm).addEventListener('submit', async ev=>{ ev.preventDefault(); const d=formData(ev.target); try{ await upd({estado:'agendada', fecha_agendada:d.f, hora_agendada:d.h, historial:hist('Visita agendada '+d.f+' '+d.h)}); closeModal(); toast('Agendada'); }catch(err){ toast(errMsg(err)); } }); return; }
+    if(a==='agendar'){ const mm=modal(`<h3>Agendar visita</h3><form id="fAg"><div class="row"><label class="f grow"><span>Fecha</span><input type="date" name="f" required min="${todayStr()}" value="${esc((o.fecha_agendada||o.fecha_programada||'')>=todayStr()?(o.fecha_agendada||o.fecha_programada):'')}"></label><label class="f grow"><span>Hora</span><input type="time" name="h" value="${esc(o.hora_agendada||'')}"></label></div>${o.fecha_programada?`<p class="small muted">La administración la programó para el ${fmtDay(o.fecha_programada)}.</p>`:''}<button class="btn full">Agendar</button></form>`); $('#fAg',mm).addEventListener('submit', async ev=>{ ev.preventDefault(); const d=formData(ev.target); try{ await upd({estado:'agendada', fecha_agendada:d.f, hora_agendada:d.h, historial:hist('Visita agendada '+d.f+' '+d.h)}); closeModal(); toast('Agendada'); }catch(err){ toast(errMsg(err)); } }); return; }
+    if(a==='programar'){ const mm=modal(`<h3>${o.fecha_programada||o.fecha_agendada?'Reprogramar':'Programar'} mantención</h3><form id="fPg"><label class="f"><span>Fecha</span><input type="date" name="f" required min="${todayStr()}" value="${esc(o.fecha_agendada||o.fecha_programada||'')}"></label>${o.fecha_agendada?'<p class="small muted">La empresa ya agendó la visita: al cambiar la fecha deberá confirmarla de nuevo.</p>':''}<button class="btn full">Guardar</button></form>`); $('#fPg',mm).addEventListener('submit', async ev=>{ ev.preventDefault(); if(await programarOT(o, formData(ev.target).f)) closeModal(); }); return; }
     if(a==='llegada'){ await upd({estado:'en_terreno', llegada:now(), historial:hist('Técnico en terreno')}); }
     if(a==='cerrar'){ const mm=modal(`<h3>Cierre técnico</h3><form id="fCi"><label class="f"><span>Informe de trabajos realizados</span><textarea name="inf" required style="min-height:120px"></textarea></label><label class="f"><span>Costo (CLP, opcional)</span><input type="text" inputmode="numeric" data-clp name="costo"></label><label class="f"><span>Fotos después</span><input type="file" name="fotos" accept="image/*" capture="environment" multiple></label><label class="f"><span>Cotización / factura (PDF, opcional)</span><input type="file" name="doc" accept="application/pdf,image/*"></label><button class="btn full" id="sCi">Enviar cierre</button></form>`); $('#fCi',mm).addEventListener('submit', async ev=>{ ev.preventDefault(); busy($('#sCi',mm),true,'Subiendo…'); const d=formData(ev.target); try{ const fotos=await subirFotos($('[name=fotos]',mm),'ot'); const df=$('[name=doc]',mm).files[0]; const factura=df?await uploadFile(df,'ot'):''; await upd({estado:'cierre_tecnico', salida:now(), informe:d.inf.trim(), costo:Number(d.costo)||0, fotos_despues:[...(o.fotos_despues||[]),...fotos], factura:factura||o.factura||'', historial:hist('Cierre técnico enviado')}); closeModal(); toast('Cierre enviado a administración'); }catch(err){ toast(errMsg(err)); busy($('#sCi',mm),false); } }); return; }
     if(a==='aprobar'){ await upd({estado:'aprobada', aprobado_at:now(), historial:hist('Aprobada por administración')}); if(o.incidencia_id){ const inc=await q(T('incidencias').select('*').eq('id',o.incidencia_id).maybeSingle()); if(inc) await q(T('incidencias').update({estado:'resuelta', historial:[...(inc.historial||[]),{ts:now(),uid:S.uid,accion:'OT aprobada → resuelta'}]}).eq('id',inc.id)); } if(o.preventiva&&o.activo_id) await q(T('activos').update({ultima_mantencion:todayStr()}).eq('id',o.activo_id)); }

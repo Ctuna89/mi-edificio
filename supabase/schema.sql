@@ -380,6 +380,9 @@ create table if not exists public.ot (
   ts             timestamptz default now(),
   aprobado_at    timestamptz
 );
+-- Fecha en que la administración planifica la orden (calendario de mantenciones). La visita confirmada por la
+-- empresa va en fecha_agendada; mientras no la confirme, el calendario muestra esta.
+alter table public.ot add column if not exists fecha_programada date;
 
 -- Encuestas del comité: un voto por unidad (depto), modificable mientras esté abierta
 create table if not exists public.encuestas (
@@ -1649,6 +1652,7 @@ begin
   new.empresa_id := old.empresa_id; new.titulo := old.titulo; new.descripcion := old.descripcion; new.uid := old.uid;
   new.incidencia_id := old.incidencia_id; new.activo_id := old.activo_id; new.preventiva := old.preventiva;
   new.prioridad := old.prioridad; new.limite := old.limite; new.aprobado_at := old.aprobado_at;
+  new.fecha_programada := old.fecha_programada;
   return new;
 end $$;
 drop trigger if exists ot_antes_update on public.ot;
@@ -4186,6 +4190,17 @@ begin
     elsif new.estado = 'aprobada' and new.empresa_id is not null then
       perform privado.push(new.edificio_id, privado.usuarios_de(new.edificio_id, '{mantencion}', null, new.empresa_id),
         '✅ Orden de trabajo aprobada', new.titulo, '#mantencion--' || new.id);
+    end if;
+  end if;
+  -- calendario: la administración programa (o reprograma) la orden, o la empresa agenda la visita
+  if tg_op = 'UPDATE' and new.empresa_id is not distinct from old.empresa_id and new.estado not in ('aprobada','rechazada') then
+    if new.fecha_programada is distinct from old.fecha_programada and new.fecha_programada is not null and new.empresa_id is not null then
+      perform privado.push(new.edificio_id, privado.usuarios_de(new.edificio_id, '{mantencion}', null, new.empresa_id),
+        '📅 Mantención programada para el ' || to_char(new.fecha_programada, 'DD-MM-YYYY'), new.titulo || ' · confirma la visita', '#mantencion--' || new.id);
+    end if;
+    if new.fecha_agendada is distinct from old.fecha_agendada and new.fecha_agendada is not null and not public.es_admin() then
+      perform privado.push(new.edificio_id, privado.usuarios_de(new.edificio_id, '{admin}'),
+        '📅 Visita agendada para el ' || to_char(new.fecha_agendada, 'DD-MM-YYYY'), concat_ws(' · ', new.titulo, nullif(new.hora_agendada, '')), '#mantencion--' || new.id);
     end if;
   end if;
   return null;

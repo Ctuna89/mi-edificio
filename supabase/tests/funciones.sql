@@ -758,3 +758,26 @@ select t.falla(format($$update incidencias set historial = '[{"t":"otra cosa"}]'
 update incidencias set historial = historial || '[{"t":"comentario"}]' where id = :'inc';
 select t.ok((select jsonb_array_length(historial) = 2 from incidencias where id = :'inc'), 'pero sí agregar al historial');
 \echo 'OK: correcciones de la revisión de seguridad'
+
+-- ============ calendario de mantenciones ============
+\set m1 '00000000-0000-0000-0000-0000000000b1'
+reset role; select set_config('request.jwt.claim.sub', '', false);
+insert into auth.users (id, email) values (:'m1', 'tecnico@ejemplo.cl');
+select t.soy(:'m1'); insert into usuarios (id, edificio_id, nombre) values (:'m1', :'ea', 'Tomás Técnico');
+select t.soy(:'a1');
+insert into empresas (nombre, rubro) values ('Bombas Ltda', 'bombas') returning id as emp \gset
+update usuarios set estado = 'activo', rol = 'mantencion', empresa_id = :'emp' where id = :'m1';
+insert into ot (titulo, descripcion, empresa_id, preventiva, fecha_programada, uid) values ('Mantención bombas', 'Preventiva', :'emp', true, public.hoy() + 7, :'a1') returning id as otm \gset
+select t.soy(:'m1');
+select t.ok((select fecha_programada = public.hoy() + 7 from ot where id = :'otm'), 'la empresa ve la fecha programada de su orden');
+update ot set fecha_programada = public.hoy() + 1 where id = :'otm';
+select t.ok((select fecha_programada = public.hoy() + 7 from ot where id = :'otm'), 'la empresa no cambia la fecha que programó la administración');
+update ot set estado = 'aceptada' where id = :'otm';
+update ot set estado = 'agendada', fecha_agendada = public.hoy() + 8, hora_agendada = '10:00' where id = :'otm';
+select t.ok((select estado = 'agendada' and fecha_agendada = public.hoy() + 8 from ot where id = :'otm'), 'la empresa confirma la visita con su fecha');
+select t.soy(:'a1');
+update ot set fecha_programada = public.hoy() + 10, fecha_agendada = null, hora_agendada = null, estado = 'aceptada' where id = :'otm';
+select t.ok((select estado = 'aceptada' and fecha_programada = public.hoy() + 10 and fecha_agendada is null from ot where id = :'otm'), 'la administración reprograma y la empresa debe confirmar de nuevo');
+select t.soy(:'a5'); select t.ok((select count(*) = 1 from ot where id = :'otm'), 'el comité ve el calendario');
+select t.soy(:'a2'); select t.ok((select count(*) = 0 from ot), 'los residentes no ven las órdenes');
+\echo 'OK: calendario de mantenciones'

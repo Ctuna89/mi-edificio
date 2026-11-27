@@ -493,7 +493,7 @@ async function consultar(uid, q) {
   if (!TABLAS.has(q.t)) throw new Fallo('Tabla no válida');
   const T = 'public.' + ident(q.t), P = [], p = v => { P.push(JSON.stringify(v)); return '$' + P.length + '::jsonb'; };
   const filas = Array.isArray(q.p) ? q.p : q.p ? [q.p] : [];
-  const cols = filas.length ? Object.keys(filas[0]) : [];
+  const cols = [...new Set(filas.flatMap(f => Object.keys(f || {})))];   // la unión de las columnas de todas las filas (como supabase-js)
   const filtros = (q.f || []).map(([k, op, v]) => {
     const c = ident(k), tip = x => `(jsonb_populate_record(null::${T}, ${p({ [k]: x })})).${c}`;
     if (op === 'is' || (op === 'eq' && v === null)) return v === null ? `${c} is null` : `${c} is ${v === true ? 'true' : v === false ? 'false' : 'null'}`;

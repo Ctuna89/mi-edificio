@@ -1,5 +1,10 @@
 # Cambios
 
+## Sin publicar
+
+- **Calendario de mantenciones** (Mantención → Calendario), al estilo de un planificador: vista de mes o de semana con las órdenes de trabajo, el plan preventivo proyectado de cada activo y los vencimientos de contratos, con un color por empresa y filtros. La administración arrastra una orden (o una mantención del plan) a un día para programarla; las órdenes sin fecha esperan en un panel lateral. La empresa recibe el aviso y confirma la visita con su hora; si la administración la cambia después, la empresa debe confirmarla de nuevo. Las atrasadas se marcan. En el teléfono se programa desde el detalle de la orden. Se exporta a Outlook, Google Calendar o el teléfono (.ics).
+- Servidor local: al guardar varias filas de una vez se guardaban solo las columnas de la primera (ahora todas, como en Supabase).
+
 ## 0.3.2 — 2026-11-27
 
 - **Revisión de seguridad** (servidor, base de datos y app) y sus correcciones: bloqueo por cuenta tras 10 fallos; confirmar la identidad antes de cambios delicados; solo nombres de host conocidos (DNS rebinding); respaldo solo en carpetas del propio computador; la contraseña del correo no se envía a un servidor nuevo; política CSP más estricta y valores escapados; topes para archivos importados; el comité no decide sobre su propia unidad; la mesa de asamblea solo registra y vota por quienes están en la sala; votos de propietarios por unidad; historial de incidencias que solo se agrega y fotos solo de su carpeta; nombres de propietarios visibles solo para el personal y la propia unidad; plazos mínimos para la bitácora (24 meses) y el libro de novedades (60), con registro de cada depuración.
